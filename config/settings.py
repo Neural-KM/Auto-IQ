@@ -42,10 +42,10 @@ class Settings:
     
     # Camera positions (relative to vehicle)
     CAMERA_THIRD_PERSON = {
-        'x': -8.0,
+        'x': -6.0,
         'y': 0.0,
-        'z': 4.0,
-        'pitch': -15.0,
+        'z': 2.5,
+        'pitch': -8.0,
         'yaw': 0.0,
         'roll': 0.0
     }

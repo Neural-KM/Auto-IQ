@@ -39,6 +39,7 @@ from config import Settings
 from control import VehicleController
 from sensors import SensorSuite
 from visualization import HUD
+from navigation import NavigationManager
 from utils.helpers import spawn_vehicle, get_vehicle_telemetry
 
 
@@ -51,7 +52,7 @@ class AutoIQDemo:
         self.world = None
         self.vehicle = None
         self.sensors = None
-        self.controller = None
+        self.nav_manager = None
         self.hud = None
         self.display = None
         self.clock = None
@@ -81,8 +82,8 @@ class AutoIQDemo:
             print("[AutoIQ] Synchronous mode enabled")
         
         # Spawn vehicle
-        self.vehicle = spawn_vehicle(self.world)
-        print(f"[AutoIQ] Spawned: {self.vehicle.type_id}")
+        self.vehicle = spawn_vehicle(self.world, spawn_index=self.args.spawn)
+        print(f"[AutoIQ] Spawned: {self.vehicle.type_id} at spawn point {self.args.spawn}")
         
         # Setup sensors
         self.sensors = SensorSuite(self.vehicle, self.world)
@@ -91,8 +92,13 @@ class AutoIQDemo:
         self.sensors.add_depth_camera('depth', position='front')
         print("[AutoIQ] Sensors attached")
         
-        # Setup controller
-        self.controller = VehicleController(self.vehicle)
+        # Setup navigation manager
+        self.nav_manager = NavigationManager(self.vehicle, self.world)
+        self.nav_manager.set_target_speed(self.target_speed)
+        
+        # Set destination if provided
+        if self.args.dest is not None:
+            self.nav_manager.set_destination_by_index(self.args.dest)
         
         # Setup pygame display
         pygame.init()
@@ -124,42 +130,29 @@ class AutoIQDemo:
                     self.running = False
                 elif event.key == K_UP:
                     self.target_speed = min(self.target_speed + 5, 100)
+                    self.nav_manager.set_target_speed(self.target_speed)
                     print(f"[AutoIQ] Target speed: {self.target_speed} km/h")
                 elif event.key == K_DOWN:
                     self.target_speed = max(self.target_speed - 5, 10)
+                    self.nav_manager.set_target_speed(self.target_speed)
                     print(f"[AutoIQ] Target speed: {self.target_speed} km/h")
                 elif event.key == K_SPACE:
-                    self.show_perception = not self.show_perception
-    
-    def get_target_waypoint(self):
-        """Get waypoint ahead for steering (temporary - will be replaced by perception)."""
-        vehicle_location = self.vehicle.get_location()
-        current_wp = self.world_map.get_waypoint(vehicle_location)
-        
-        # Get waypoints ahead
-        waypoints = [current_wp]
-        for _ in range(20):
-            next_wps = waypoints[-1].next(2.0)
-            if next_wps:
-                waypoints.append(next_wps[0])
-            else:
-                break
-        
-        # Find waypoint at lookahead distance
-        for wp in waypoints:
-            if vehicle_location.distance(wp.transform.location) >= Settings.LOOKAHEAD_DISTANCE:
-                return wp
-        
-        return current_wp
+                    if self.nav_manager.is_navigating:
+                        self.nav_manager.stop()
+                        print("[AutoIQ] Navigation paused")
+                    else:
+                        self.nav_manager.resume()
+                        print("[AutoIQ] Navigation resumed")
     
     def run_step(self):
         """Execute one simulation step."""
-        # Get target waypoint (will be replaced by perception later)
-        target_wp = self.get_target_waypoint()
+        control = self.nav_manager.run_step()
         
-        # Compute and apply control
-        control = self.controller.run_step(target_wp, self.target_speed)
-        self.vehicle.apply_control(control)
+        if control:
+            self.vehicle.apply_control(control)
+        else:
+            # Not navigating - apply brakes
+            self.vehicle.apply_control(carla.VehicleControl(brake=0.5))
         
         return control
     
@@ -174,6 +167,11 @@ class AutoIQDemo:
         # Get telemetry
         telemetry = get_vehicle_telemetry(self.vehicle, self.world_map)
         telemetry['target_speed'] = self.target_speed
+        
+        # Add navigation info
+        nav_status = self.nav_manager.get_status()
+        telemetry['nav_progress'] = f"{nav_status['progress']*100:.1f}%"
+        telemetry['nav_remaining'] = f"{nav_status['remaining_distance']:.0f}m"
         
         # Render HUD
         self.hud.render(self.display, telemetry, control)
@@ -196,7 +194,7 @@ class AutoIQDemo:
     def run(self):
         """Main loop."""
         print("\n[AutoIQ] Starting autonomous demo...")
-        print("[AutoIQ] UP/DOWN: Adjust speed | SPACE: Toggle perception | ESC: Quit\n")
+        print("[AutoIQ] UP/DOWN: Adjust speed | SPACE: Pause/Resume | R: Random dest | ESC: Quit\n")
         
         try:
             while self.running:
@@ -239,9 +237,22 @@ def main():
     parser.add_argument('--speed', type=float, default=30.0, help='Target speed km/h')
     parser.add_argument('--sync', action='store_true', help='Synchronous mode')
     parser.add_argument('--res', default='1280x720', help='Window resolution')
+    parser.add_argument('--spawn', type=int, default=0, help='Spawn point index for vehicle (default: 0)')
+    parser.add_argument('--dest', type=int, default=None, help='Destination spawn point index')
+    parser.add_argument('--list', action='store_true', help='List spawn points and exit')
     args = parser.parse_args()
     
     args.width, args.height = [int(x) for x in args.res.split('x')]
+    
+    # List spawn points if requested
+    if args.list:
+        client = carla.Client(args.host, args.port)
+        client.set_timeout(10.0)
+        spawn_points = client.get_world().get_map().get_spawn_points()
+        print(f"\n{len(spawn_points)} spawn points:")
+        for i, sp in enumerate(spawn_points):
+            print(f"  [{i:3d}] x={sp.location.x:8.1f}, y={sp.location.y:8.1f}")
+        return
     
     demo = AutoIQDemo(args)
     

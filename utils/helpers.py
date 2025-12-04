@@ -6,6 +6,7 @@ Common helper functions.
 """
 
 import math
+import random
 import carla
 
 from config import Settings
@@ -25,13 +26,14 @@ def get_speed(vehicle):
     return 3.6 * math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2)
 
 
-def spawn_vehicle(world, spawn_point=None, vehicle_filter=None):
+def spawn_vehicle(world, spawn_point=None, spawn_index=0, vehicle_filter=None):
     """
     Spawn a vehicle in the world.
     
     Args:
         world: CARLA world
         spawn_point: Optional spawn transform
+        spawn_index: Spawn point index (default 0)
         vehicle_filter: Blueprint filter string
         
     Returns:
@@ -52,7 +54,7 @@ def spawn_vehicle(world, spawn_point=None, vehicle_filter=None):
         spawn_points = world.get_map().get_spawn_points()
         if not spawn_points:
             raise RuntimeError("No spawn points available in map")
-        spawn_point = spawn_points[0]
+        spawn_point = spawn_points[spawn_index]
     
     vehicle = world.spawn_actor(vehicle_bp, spawn_point)
     
