@@ -53,6 +53,21 @@ class SensorSuite:
         """Get a sensor by name."""
         return self.sensors.get(name)
     
+    def get_data(self, name):
+        """
+        Get data from a specific sensor by name.
+        
+        Args:
+            name: Sensor name
+            
+        Returns:
+            Sensor data (numpy array) or None if sensor not found/ready
+        """
+        sensor = self.sensors.get(name)
+        if sensor is not None:
+            return sensor.get_data()
+        return None
+    
     def get_all_data(self):
         """Get data from all sensors."""
         return {name: sensor.get_data() for name, sensor in self.sensors.items()}

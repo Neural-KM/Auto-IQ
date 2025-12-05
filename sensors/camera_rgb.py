@@ -71,10 +71,11 @@ class CameraRGB(BaseSensor):
         )
     
     def _process_data(self, image):
-        """Convert CARLA image to numpy array."""
+        """Convert CARLA image to numpy array (RGB format)."""
         array = np.frombuffer(image.raw_data, dtype=np.uint8)
         array = array.reshape((image.height, image.width, 4))
-        array = array[:, :, :3]  # Remove alpha channel
+        # CARLA returns BGRA, convert to RGB
+        array = array[:, :, :3][:, :, ::-1]  # Remove alpha and BGR->RGB
         return array
     
     def get_pygame_surface(self):
@@ -84,9 +85,8 @@ class CameraRGB(BaseSensor):
         
         try:
             import pygame
-            # Convert BGR to RGB and create surface
-            rgb_array = self.data[:, :, ::-1]  # BGR to RGB
-            self.surface = pygame.surfarray.make_surface(rgb_array.swapaxes(0, 1))
+            # Data is already RGB
+            self.surface = pygame.surfarray.make_surface(self.data.swapaxes(0, 1))
             return self.surface
         except ImportError:
             return None
