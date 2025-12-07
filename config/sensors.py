@@ -96,7 +96,7 @@ SENSORS = [
     {
         'type': 'depth',
         'name': 'depth',
-        'position': {'x': 2.0, 'y': 0.0, 'z': 1.5},
+        'position': {'x': 0.2, 'y': 0.0, 'z': 1.5},
         'rotation': {'pitch': 0.0, 'yaw': 0.0, 'roll': 0.0},
         'fov': 90,
         'width': 1280,
