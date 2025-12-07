@@ -7,6 +7,7 @@ Provides waypoint-based routes with navigation instructions (turn left, right, e
 """
 
 import math
+import time
 from enum import IntEnum
 from collections import deque
 
@@ -98,14 +99,16 @@ class GlobalPlanner:
         self._destination = destination
         self._route_index = 0
         
-        # Compute route
+        # Compute route with timing
+        start_time = time.perf_counter()
         self._route = self.trace_route(origin, destination)
+        elapsed_time = (time.perf_counter() - start_time) * 1000  # Convert to ms
         
         if not self._route:
             print(f"[GlobalPlanner] No route found from {origin} to {destination}")
             return False
         
-        print(f"[GlobalPlanner] Route computed: {len(self._route)} waypoints")
+        print(f"[GlobalPlanner] Route computed: {len(self._route)} waypoints in {elapsed_time:.2f} ms")
         return True
     
     def trace_route(self, origin, destination):

@@ -124,10 +124,11 @@ class BehaviorPlanner:
     def _handle_lane_changing(self):
         """Handle lane change execution."""
         if self.lane_change_index >= len(self.lane_change_waypoints):
-            # Lane change complete
+            # Lane change complete - stay in new lane, don't auto-return
             self.state = BehaviorState.LANE_FOLLOWING
             self.lane_change_waypoints = []
-            print("[Behavior] Lane change complete - resuming lane following")
+            self.lane_change_index = 0
+            print("[Behavior] Lane change complete - continuing in new lane")
             return self.local_planner.get_target_waypoint()
         
         # Get current target in lane change sequence
@@ -137,10 +138,24 @@ class BehaviorPlanner:
         vehicle_location = self.local_planner.vehicle.get_location()
         distance = vehicle_location.distance(target_wp.transform.location)
         
-        if distance < 3.0:  # Close enough, move to next waypoint
+        # Advance to next waypoint when close enough
+        # Use smaller threshold for smoother path following
+        if distance < 2.5:
             self.lane_change_index += 1
+            
+            # Skip waypoints that are behind the vehicle (already passed)
+            while self.lane_change_index < len(self.lane_change_waypoints):
+                next_wp = self.lane_change_waypoints[self.lane_change_index]
+                next_dist = vehicle_location.distance(next_wp.transform.location)
+                if next_dist > 2.0:
+                    break
+                self.lane_change_index += 1
         
-        return target_wp
+        # Return current target or next available
+        if self.lane_change_index < len(self.lane_change_waypoints):
+            return self.lane_change_waypoints[self.lane_change_index]
+        else:
+            return target_wp
     
     def _handle_emergency_stop(self):
         """Handle emergency stop state."""

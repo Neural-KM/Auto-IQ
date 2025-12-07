@@ -420,11 +420,6 @@ class HelpPanel(Panel):
     
     def render(self, data=None):
         self.surface.fill((30, 30, 30))
-        
-        help_text = "UP/DOWN: Speed | LEFT/RIGHT: Lane | SPACE: Pause | B: Reset | ESC: Quit"
-        text = self.font.render(help_text, True, (180, 180, 180))
-        self.surface.blit(text, (10, (self.height - text.get_height()) // 2))
-        
         return self.surface
 
 

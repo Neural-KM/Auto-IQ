@@ -157,19 +157,6 @@ class HUD:
             obstacle_text = self.font.render(f"Obstacle: {obstacle_info}", True, obstacle_color)
             display.blit(obstacle_text, (20, y_offset))
             y_offset += 22
-        
-        # Help text at bottom
-        help_surface = pygame.Surface((500, 30))
-        help_surface.set_alpha(180)
-        help_surface.fill((0, 0, 0))
-        display.blit(help_surface, (10, self.height - 40))
-        
-        help_text = self.font.render(
-            "UP/DOWN: Speed | LEFT/RIGHT: Lane | SPACE: Pause | ESC: Quit",
-            True, (200, 200, 200)
-        )
-        display.blit(help_text, (20, self.height - 35))
-    
     def render_perception_view(self, display, semantic_img, depth_img=None, x=10, y=240,
                                 obstacle_detection=None, rgb_img=None):
         """

@@ -14,6 +14,8 @@ import sys
 import os
 import argparse
 import time
+import signal
+import atexit
 
 # Add carla module path (one level up from Auto-IQ, then into carla)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'carla'))
@@ -25,7 +27,7 @@ except ImportError:
 
 try:
     import pygame
-    from pygame.locals import K_ESCAPE, K_q, K_UP, K_DOWN, K_SPACE, K_LEFT, K_RIGHT, K_b
+    from pygame.locals import K_ESCAPE, K_q, K_UP, K_DOWN, K_SPACE, K_LEFT, K_RIGHT, K_b, K_g, K_n
 except ImportError:
     raise RuntimeError('Cannot import pygame. pip install pygame')
 
@@ -97,13 +99,13 @@ class AutoIQDemo:
         self.nav_manager = NavigationManager(
             self.vehicle, self.world, 
             sensor_suite=self.sensors,
-            draw_on_simulator=self.args.draw_on_simulator
+            draw_on_simulator=self.args.draw_on_simulator,
+            controller_type=self.args.controller
         )
         self.nav_manager.set_target_speed(self.target_speed)
         
-        # Set destination if provided
-        if self.args.dest is not None:
-            self.nav_manager.set_destination_by_index(self.args.dest)
+        # Store destination but don't start navigation yet - wait for G key
+        self._pending_destination = self.args.dest
         
         # Setup pygame display
         pygame.init()
@@ -158,6 +160,20 @@ class AutoIQDemo:
                     # Reset behavior to lane following
                     self.nav_manager.reset_behavior()
                     print("[AutoIQ] Behavior reset")
+                elif event.key == K_g:
+                    # Plan route to destination (but don't start driving yet)
+                    if self._pending_destination is not None:
+                        print(f"[AutoIQ] Planning route to spawn point {self._pending_destination}...")
+                        self.nav_manager.plan_route_by_index(self._pending_destination)
+                    else:
+                        print("[AutoIQ] No destination set. Use --dest argument.")
+                elif event.key == K_n:
+                    # Start navigation (begin driving the planned route)
+                    if self.nav_manager.is_route_planned():
+                        print("[AutoIQ] Starting navigation...")
+                        self.nav_manager.start_navigation()
+                    else:
+                        print("[AutoIQ] No route planned. Press G first to plan a route.")
                 elif event.key == pygame.K_1:
                     # Default layout
                     self.tiled_display.reconfigure_layout('default')
@@ -269,12 +285,16 @@ class AutoIQDemo:
         """Main loop."""
         print("\n[AutoIQ] Starting autonomous demo...")
         print("[AutoIQ] Controls:")
+        print("  G         : Start navigation to destination")
         print("  UP/DOWN   : Adjust target speed")
         print("  LEFT/RIGHT: Force lane change")
         print("  SPACE     : Pause/Resume navigation")
         print("  B         : Reset behavior state")
         print("  1/2/3/4   : Switch layout (Default/Minimal/Debug/Perception)")
         print("  ESC/Q     : Quit\n")
+        
+        if self._pending_destination is not None:
+            print(f"[AutoIQ] Press G to start navigation to spawn point {self._pending_destination}")
         
         try:
             while self.running:
@@ -291,21 +311,51 @@ class AutoIQDemo:
             print("\n[AutoIQ] Interrupted")
     
     def cleanup(self):
-        """Clean up resources."""
+        """Clean up resources. Safe to call multiple times."""
+        if hasattr(self, '_cleaned_up') and self._cleaned_up:
+            return
+        self._cleaned_up = True
+        
         print("[AutoIQ] Cleaning up...")
         
-        if self.sensors:
-            self.sensors.destroy_all()
+        # Stop navigation and clear debug drawings
+        try:
+            if self.nav_manager:
+                self.nav_manager.cleanup()
+        except Exception as e:
+            print(f"[AutoIQ] Warning: Error cleaning up navigation: {e}")
         
-        if self.vehicle:
-            self.vehicle.destroy()
+        # Destroy sensors
+        try:
+            if self.sensors:
+                self.sensors.destroy_all()
+                self.sensors = None
+        except Exception as e:
+            print(f"[AutoIQ] Warning: Error destroying sensors: {e}")
         
-        if self.args.sync and self.world:
-            settings = self.world.get_settings()
-            settings.synchronous_mode = False
-            self.world.apply_settings(settings)
+        # Destroy vehicle
+        try:
+            if self.vehicle:
+                self.vehicle.destroy()
+                self.vehicle = None
+        except Exception as e:
+            print(f"[AutoIQ] Warning: Error destroying vehicle: {e}")
         
-        pygame.quit()
+        # Restore world settings
+        try:
+            if self.args.sync and self.world:
+                settings = self.world.get_settings()
+                settings.synchronous_mode = False
+                self.world.apply_settings(settings)
+        except Exception as e:
+            print(f"[AutoIQ] Warning: Error restoring world settings: {e}")
+        
+        # Quit pygame
+        try:
+            pygame.quit()
+        except Exception as e:
+            print(f"[AutoIQ] Warning: Error quitting pygame: {e}")
+        
         print("[AutoIQ] Done.")
 
 
@@ -322,6 +372,8 @@ def main():
     parser.add_argument('--list', action='store_true', help='List spawn points and exit')
     parser.add_argument('--draw-on-simulator', action='store_true',
                         help='Draw debug waypoints and markers in the simulator world')
+    parser.add_argument('--controller', type=str, default='mpc',
+                        choices=['mpc', 'pid'], help='Type of vehicle controller to use (default: mpc)')
     args = parser.parse_args()
     
     # Parse resolution and ensure minimum size for tiled display
@@ -343,9 +395,25 @@ def main():
     
     demo = AutoIQDemo(args)
     
+    # Register cleanup handlers for various exit scenarios
+    def signal_handler(sig, frame):
+        print(f"\n[AutoIQ] Received signal {sig}, shutting down...")
+        demo.running = False
+        demo.cleanup()
+        sys.exit(0)
+    
+    # Register signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Register atexit handler as backup
+    atexit.register(demo.cleanup)
+    
     try:
         demo.setup()
         demo.run()
+    except Exception as e:
+        print(f"[AutoIQ] Error: {e}")
     finally:
         demo.cleanup()
 

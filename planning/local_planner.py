@@ -138,7 +138,7 @@ class LocalPlanner:
         # Generate waypoints transitioning to new lane
         waypoints = []
         
-        # Start in current lane
+        # Start in current lane - approach phase (3 waypoints)
         wp = current_wp
         for _ in range(3):
             next_wps = wp.next(self.waypoint_spacing)
@@ -155,9 +155,10 @@ class LocalPlanner:
         if transition_wp:
             waypoints.append(transition_wp)
             
-            # Continue in new lane
+            # Continue in new lane - EXTENDED to clear obstacle
+            # Generate enough waypoints to travel ~30-40m past the obstacle
             wp = transition_wp
-            for _ in range(10):
+            for _ in range(25):  # Was 10, now 25 waypoints (~50m at 2m spacing)
                 next_wps = wp.next(self.waypoint_spacing)
                 if next_wps:
                     waypoints.append(next_wps[0])
