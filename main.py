@@ -38,6 +38,7 @@ except ImportError:
 
 # AutoIQ modules
 from config import Settings
+from config.sensors import SENSORS
 from control import VehicleController
 from sensors import SensorSuite
 from visualization import HUD, TiledDisplay
@@ -176,17 +177,16 @@ class AutoIQDemo:
                     self.tiled_display.reconfigure_layout('default')
                     print("[AutoIQ] Layout: Default")
                 elif event.key == pygame.K_2:
-                    # Minimal layout
-                    self.tiled_display.reconfigure_layout('minimal')
-                    print("[AutoIQ] Layout: Minimal")
+                    # Surround layout (all sensors)
+                    self.tiled_display.reconfigure_layout('surround')
+                    print("[AutoIQ] Layout: Surround")
                 elif event.key == pygame.K_3:
-                    # Debug layout
-                    self.tiled_display.reconfigure_layout('debug')
-                    print("[AutoIQ] Layout: Debug")
-                elif event.key == pygame.K_4:
-                    # Perception debug layout
-                    self.tiled_display.reconfigure_layout('perception')
-                    print("[AutoIQ] Layout: Perception Debug")
+                    # Fullscreen layout with dropdown
+                    self.tiled_display.reconfigure_layout('fullscreen')
+                    print("[AutoIQ] Layout: Fullscreen (click dropdown to select sensor)")
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:  # Left click
+                    self.tiled_display.handle_click(event.pos)
     
     def run_step(self):
         """Execute one simulation step."""
@@ -205,12 +205,6 @@ class AutoIQDemo:
     
     def render(self, control):
         """Render the display using tiled layout."""
-        # Get sensor data
-        main_cam = self.sensors.get_sensor('main')
-        front_rgb_cam = self.sensors.get_sensor('front_rgb')
-        semantic_cam = self.sensors.get_sensor('semantic')
-        depth_cam = self.sensors.get_sensor('depth')
-        
         # Get telemetry
         telemetry = get_vehicle_telemetry(self.vehicle, self.world_map)
         telemetry['target_speed'] = self.target_speed
@@ -236,22 +230,8 @@ class AutoIQDemo:
         # Get debug images from obstacle detector
         debug_images = self.nav_manager.obstacle_detector.get_debug_images()
         
-        # Prepare panel data
+        # Build panel data dynamically from configured sensors
         panel_data = {
-            'main_camera': {
-                'image': main_cam.get_data() if main_cam else None
-            },
-            'front_rgb': {
-                'image': front_rgb_cam.get_data() if front_rgb_cam else None
-            },
-            'semantic': {
-                'image': semantic_cam.get_colored_image() if semantic_cam else None,
-                'obstacle_detection': obstacle_detection
-            },
-            'depth': {
-                'image': depth_cam.get_normalized_image() if depth_cam else None,
-                'obstacle_detection': obstacle_detection
-            },
             'telemetry': telemetry,
             'obstacle': {
                 'obstacle_detection': obstacle_detection
@@ -276,6 +256,40 @@ class AutoIQDemo:
             }
         }
         
+        # Dynamically add sensor data based on config
+        for sensor_config in SENSORS:
+            sensor_name = sensor_config['name']
+            sensor_type = sensor_config['type']
+            sensor = self.sensors.get_sensor(sensor_name)
+            
+            if sensor is None:
+                continue
+            
+            # Get appropriate data based on sensor type
+            if sensor_type == 'rgb':
+                panel_data[sensor_name] = {
+                    'image': sensor.get_data()
+                }
+            elif sensor_type == 'semantic':
+                panel_data[sensor_name] = {
+                    'image': sensor.get_colored_image(),
+                    'obstacle_detection': obstacle_detection
+                }
+            elif sensor_type == 'depth':
+                panel_data[sensor_name] = {
+                    'image': sensor.get_normalized_image(),
+                    'obstacle_detection': obstacle_detection
+                }
+            else:
+                panel_data[sensor_name] = {
+                    'image': sensor.get_data()
+                }
+        
+        # Also add main_camera alias (for layouts that use main_camera panel name)
+        main_sensor = self.sensors.get_sensor('main')
+        if main_sensor:
+            panel_data['main_camera'] = {'image': main_sensor.get_data()}
+        
         # Render tiled display
         self.tiled_display.render(self.display, panel_data)
         
@@ -290,7 +304,7 @@ class AutoIQDemo:
         print("  LEFT/RIGHT: Force lane change")
         print("  SPACE     : Pause/Resume navigation")
         print("  B         : Reset behavior state")
-        print("  1/2/3/4   : Switch layout (Default/Minimal/Debug/Perception)")
+        print("  1/2/3     : Switch layout (Default/Surround/Fullscreen)")
         print("  ESC/Q     : Quit\n")
         
         if self._pending_destination is not None:

@@ -7,6 +7,7 @@ Detects static obstacles on the road ahead.
 
 import numpy as np
 from config import Settings
+from sensors.camera_semantic import SemanticLabels
 
 
 class ObstacleDetector:
@@ -78,11 +79,11 @@ class ObstacleDetector:
         self.debug_data['roi_image'] = sem_roi.copy()
         
         # Only detect actual obstacles: vehicles and pedestrians
-        vehicle_mask = sem_roi == Settings.SemanticLabels.VEHICLE
-        pedestrian_mask = sem_roi == Settings.SemanticLabels.PEDESTRIAN
+        vehicle_mask = sem_roi == SemanticLabels.VEHICLE
+        pedestrian_mask = sem_roi == SemanticLabels.PEDESTRIAN
         
         # Check if obstacles are near road surface (not on sidewalk/roadside)
-        road_mask = sem_roi == Settings.SemanticLabels.ROAD
+        road_mask = sem_roi == SemanticLabels.ROAD
         
         # Store masks for debug
         self.debug_data['vehicle_mask'] = vehicle_mask.copy()
@@ -229,13 +230,13 @@ class ObstacleDetector:
             
             # Color the semantic labels (RGB)
             colored_roi = np.zeros((h, w, 3), dtype=np.uint8)
-            colored_roi[roi == Settings.SemanticLabels.ROAD] = [128, 64, 128]  # Purple - road
-            colored_roi[roi == Settings.SemanticLabels.ROAD_LINE] = [157, 234, 50]  # Green/yellow - road markings
-            colored_roi[roi == Settings.SemanticLabels.VEHICLE] = [0, 0, 142]  # Dark blue - vehicle (CARLA color)
-            colored_roi[roi == Settings.SemanticLabels.PEDESTRIAN] = [220, 20, 60]  # Crimson - pedestrian
-            colored_roi[roi == Settings.SemanticLabels.SIDEWALK] = [244, 35, 232]  # Pink - sidewalk
-            colored_roi[roi == Settings.SemanticLabels.VEGETATION] = [107, 142, 35]  # Olive - vegetation
-            colored_roi[roi == Settings.SemanticLabels.TERRAIN] = [152, 251, 152]  # Light green - terrain
+            colored_roi[roi == SemanticLabels.ROAD] = [128, 64, 128]  # Purple - road
+            colored_roi[roi == SemanticLabels.ROAD_LINE] = [157, 234, 50]  # Green/yellow - road markings
+            colored_roi[roi == SemanticLabels.VEHICLE] = [0, 0, 142]  # Dark blue - vehicle (CARLA color)
+            colored_roi[roi == SemanticLabels.PEDESTRIAN] = [220, 20, 60]  # Crimson - pedestrian
+            colored_roi[roi == SemanticLabels.SIDEWALK] = [244, 35, 232]  # Pink - sidewalk
+            colored_roi[roi == SemanticLabels.VEGETATION] = [107, 142, 35]  # Olive - vegetation
+            colored_roi[roi == SemanticLabels.TERRAIN] = [152, 251, 152]  # Light green - terrain
             debug_images['roi_semantic'] = colored_roi
         
         # Vehicle mask (blue on black) - RGB

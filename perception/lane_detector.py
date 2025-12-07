@@ -7,6 +7,7 @@ Detects lanes from camera input.
 
 import numpy as np
 from config import Settings
+from sensors.camera_semantic import SemanticLabels
 
 
 class LaneDetector:
@@ -51,7 +52,7 @@ class LaneDetector:
         
         # Get road pixels in ROI
         roi = semantic_labels[self.roi_top:self.roi_bottom, :]
-        road_mask = roi == Settings.SemanticLabels.ROAD
+        road_mask = roi == SemanticLabels.ROAD
         
         # Find road boundaries by scanning horizontally
         # at different heights in the ROI

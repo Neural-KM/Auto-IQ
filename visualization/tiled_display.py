@@ -3,12 +3,14 @@ Tiled Display System
 ====================
 
 Modular visualization system with configurable tiled panels.
-Allows easy addition/removal of visualization components.
+Automatically adapts to available sensors from config.
 """
 
 import pygame
 import numpy as np
 from config import Settings
+from config.sensors import SENSORS
+from config.visualization import get_layout_config, get_all_sensor_names
 
 
 class Panel:
@@ -286,6 +288,7 @@ class TelemetryPanel(Panel):
         self.border_color = (0, 200, 255)
         self.font = pygame.font.Font(None, 20)
         self.font_big = pygame.font.Font(None, 26)
+        self.font_small = pygame.font.Font(None, 16)
     
     def render(self, data=None):
         self.surface.fill(self.bg_color)
@@ -335,6 +338,35 @@ class TelemetryPanel(Panel):
                 )
                 self.surface.blit(ctrl_text, (10, y))
                 y += 22
+                
+                # Visual control bars
+                bar_width = min(self.width - 20, 300)
+                bar_height = 12
+                bar_x = 10
+                center_x = bar_x + bar_width // 2
+                
+                # Steering bar (cyan indicator on gray bar)
+                pygame.draw.rect(self.surface, (60, 60, 60), (bar_x, y, bar_width, bar_height))
+                pygame.draw.line(self.surface, (100, 100, 100), (center_x, y), (center_x, y + bar_height), 1)
+                steer_offset = int(control.steer * (bar_width // 2))
+                steer_x = center_x + steer_offset
+                pygame.draw.rect(self.surface, (0, 200, 255), (steer_x - 3, y, 6, bar_height))
+                steer_label = self.font_small.render("STEER", True, (150, 150, 150))
+                self.surface.blit(steer_label, (bar_x + bar_width + 5, y))
+                y += bar_height + 4
+                
+                # Throttle/Brake bar (green right for throttle, red left for brake)
+                pygame.draw.rect(self.surface, (60, 60, 60), (bar_x, y, bar_width, bar_height))
+                pygame.draw.line(self.surface, (100, 100, 100), (center_x, y), (center_x, y + bar_height), 1)
+                if control.throttle > 0:
+                    throttle_w = int(control.throttle * (bar_width // 2))
+                    pygame.draw.rect(self.surface, (0, 200, 0), (center_x, y, throttle_w, bar_height))
+                if control.brake > 0:
+                    brake_w = int(control.brake * (bar_width // 2))
+                    pygame.draw.rect(self.surface, (200, 0, 0), (center_x - brake_w, y, brake_w, bar_height))
+                tb_label = self.font_small.render("THR/BRK", True, (150, 150, 150))
+                self.surface.blit(tb_label, (bar_x + bar_width + 5, y))
+                y += bar_height + 4
             
             # Navigation progress
             progress = data.get('nav_progress', 'N/A')
@@ -438,7 +470,7 @@ class TiledDisplay:
     """
     
     # Minimum panel heights
-    MIN_BOTTOM_HEIGHT = 140
+    MIN_BOTTOM_HEIGHT = 175
     MIN_SIDE_PANEL_HEIGHT = 150
     
     def __init__(self, width, height):
@@ -453,6 +485,9 @@ class TiledDisplay:
         self.height = height
         self.panels = {}
         self.layout = []
+        self._current_layout = 'default'
+        self._fullscreen_sensor = '3rd_person'
+        self._dropdown_open = False
         
         pygame.font.init()
         
@@ -492,44 +527,77 @@ class TiledDisplay:
         self.reconfigure_layout(current_layout)
     
     def _setup_default_layout(self):
-        """Setup default panel layout."""
+        """Setup default panel layout dynamically based on available sensors."""
+        # Get layout config (filters to only existing sensors)
+        layout = get_layout_config('default')
+        
         # Bottom panels need fixed minimum height for text
-        bottom_h = 140
+        bottom_h = 175
         
         # Main view takes remaining height
         main_h = self.height - bottom_h
-        main_w = int(self.width * 0.72)
         
-        # Side panels
-        side_w = self.width - main_w
-        side_h = main_h // 3
+        # Get side sensors that exist
+        side_sensors = layout.get('side', [])
         
-        # Create panels
-        self.add_panel('main_camera', CameraPanel('main_camera', main_w, main_h, "Main View"), 
-                      0, 0)
+        # If we have side panels, split the width
+        if side_sensors:
+            main_w = int(self.width * 0.72)
+            side_w = self.width - main_w
+            side_h = main_h // max(len(side_sensors), 1)
+        else:
+            main_w = self.width
+            side_w = 0
+            side_h = 0
         
-        self.add_panel('front_rgb', CameraPanel('front_rgb', side_w, side_h, "RGB Front"),
-                      main_w, 0)
+        # Create main camera panel
+        main_sensor = layout.get('main')
+        if main_sensor:
+            panel = self._create_panel_for_sensor(main_sensor, main_w, main_h)
+            self.add_panel(main_sensor, panel, 0, 0)
         
-        self.add_panel('semantic', SemanticPanel('semantic', side_w, side_h),
-                      main_w, side_h)
+        # Create side panels dynamically
+        for i, sensor_name in enumerate(side_sensors):
+            panel = self._create_panel_for_sensor(sensor_name, side_w, side_h)
+            self.add_panel(sensor_name, panel, main_w, i * side_h)
         
-        self.add_panel('depth', DepthPanel('depth', side_w, side_h),
-                      main_w, side_h * 2)
+        # Bottom bar
+        self._add_bottom_bar(main_h)
+    
+    def _get_sensor_type(self, sensor_name):
+        """Get sensor type by name from config."""
+        for sensor in SENSORS:
+            if sensor['name'] == sensor_name:
+                return sensor['type']
+        return 'rgb'  # default
+    
+    def _create_panel_for_sensor(self, sensor_name, width, height):
+        """Create appropriate panel type for a sensor."""
+        sensor_type = self._get_sensor_type(sensor_name)
         
-        # Bottom row
-        telem_w = int(self.width * 0.45)
-        obstacle_w = int(self.width * 0.30)
-        help_w = self.width - telem_w - obstacle_w
+        if sensor_type == 'semantic':
+            return SemanticPanel(sensor_name, width, height)
+        elif sensor_type == 'depth':
+            return DepthPanel(sensor_name, width, height)
+        else:  # rgb or unknown
+            return CameraPanel(sensor_name, width, height, sensor_name.replace('_', ' ').title())
+    
+    def _add_bottom_bar(self, y_position, height=175):
+        """
+        Add telemetry and obstacle panels at the bottom.
+        Called by all layouts.
         
-        self.add_panel('telemetry', TelemetryPanel('telemetry', telem_w, bottom_h),
-                      0, main_h)
+        Args:
+            y_position: Y position for the bottom bar
+            height: Height of the bottom bar
+        """
+        telem_w = self.width // 2
+        obstacle_w = self.width - telem_w
         
-        self.add_panel('obstacle', ObstaclePanel('obstacle', obstacle_w, bottom_h),
-                      telem_w, main_h)
-        
-        self.add_panel('help', HelpPanel('help', help_w, bottom_h),
-                      telem_w + obstacle_w, main_h)
+        self.add_panel('telemetry', TelemetryPanel('telemetry', telem_w, height),
+                      0, y_position)
+        self.add_panel('obstacle', ObstaclePanel('obstacle', obstacle_w, height),
+                      telem_w, y_position)
     
     def add_panel(self, name, panel, x, y):
         """
@@ -563,6 +631,89 @@ class TiledDisplay:
             panel = self.panels[name]['panel']
             panel.visible = not panel.visible
     
+    def reconfigure_layout(self, layout_name='default'):
+        """
+        Reconfigure panel layout.
+        
+        Args:
+            layout_name: Name of layout preset ('default', 'surround', or 'fullscreen')
+        """
+        # Clear existing panels
+        self.panels.clear()
+        self._current_layout = layout_name
+        
+        if layout_name == 'default':
+            self._setup_default_layout()
+        elif layout_name == 'surround':
+            self._setup_surround_layout()
+        elif layout_name == 'fullscreen':
+            self._setup_fullscreen_layout()
+    
+    def _setup_surround_layout(self):
+        """Setup surround layout showing all sensors in a grid."""
+        layout = get_layout_config('surround')
+        grid_sensors = layout.get('grid', [])
+        
+        # If no grid sensors defined, fall back to all sensors
+        if not grid_sensors:
+            grid_sensors = [s['name'] for s in SENSORS]
+        
+        num_sensors = len(grid_sensors)
+        
+        if num_sensors == 0:
+            self._setup_default_layout()
+            return
+        
+        # Bottom bar needs fixed height
+        bottom_h = 175
+        available_h = self.height - bottom_h
+        
+        # Calculate grid dimensions
+        if num_sensors <= 2:
+            cols, rows = num_sensors, 1
+        elif num_sensors <= 4:
+            cols, rows = 2, 2
+        elif num_sensors <= 6:
+            cols, rows = 3, 2
+        else:
+            cols, rows = 4, 2
+        
+        cell_w = self.width // cols
+        cell_h = available_h // rows
+        
+        # Create panels in grid
+        for i, sensor_name in enumerate(grid_sensors):
+            row = i // cols
+            col = i % cols
+            x = col * cell_w
+            y = row * cell_h
+            
+            panel = self._create_panel_for_sensor(sensor_name, cell_w, cell_h)
+            self.add_panel(sensor_name, panel, x, y)
+        
+        # Bottom bar
+        self._add_bottom_bar(rows * cell_h)
+    
+    def _setup_fullscreen_layout(self):
+        """Setup fullscreen layout with dropdown sensor selector."""
+        # Initialize selected sensor if not set
+        if not hasattr(self, '_fullscreen_sensor'):
+            self._fullscreen_sensor = '3rd_person'
+        if not hasattr(self, '_dropdown_open'):
+            self._dropdown_open = False
+        
+        # Header bar for dropdown
+        header_h = 40
+        bottom_h = 175
+        content_h = self.height - header_h - bottom_h
+        
+        # Create fullscreen panel for current sensor
+        panel = self._create_panel_for_sensor(self._fullscreen_sensor, self.width, content_h)
+        self.add_panel('fullscreen_view', panel, 0, header_h)
+        
+        # Bottom bar
+        self._add_bottom_bar(header_h + content_h)
+    
     def render(self, display, data=None):
         """
         Render all panels to the display.
@@ -583,97 +734,105 @@ class TiledDisplay:
             # Get panel-specific data
             panel_data = data.get(name, {}) if data else {}
             
+            # For fullscreen layout, map fullscreen_view to selected sensor
+            if name == 'fullscreen_view' and hasattr(self, '_fullscreen_sensor'):
+                panel_data = data.get(self._fullscreen_sensor, {}) if data else {}
+            
             # Render panel
             surface = panel.render(panel_data)
             
             # Blit to display
             display.blit(surface, (panel_info['x'], panel_info['y']))
+        
+        # Render dropdown if in fullscreen mode
+        if self._current_layout == 'fullscreen':
+            self._render_dropdown(display)
     
-    def reconfigure_layout(self, layout_name='default'):
+    def _render_dropdown(self, display):
+        """Render the sensor dropdown selector."""
+        sensors = get_all_sensor_names()
+        
+        # Dropdown button
+        btn_w, btn_h = 200, 30
+        btn_x, btn_y = 10, 5
+        
+        # Draw button background
+        btn_color = (60, 60, 60) if not self._dropdown_open else (80, 80, 80)
+        pygame.draw.rect(display, btn_color, (btn_x, btn_y, btn_w, btn_h))
+        pygame.draw.rect(display, (100, 100, 100), (btn_x, btn_y, btn_w, btn_h), 1)
+        
+        # Draw current selection text
+        font = pygame.font.Font(None, 24)
+        text = font.render(f"Sensor: {self._fullscreen_sensor}", True, (255, 255, 255))
+        display.blit(text, (btn_x + 10, btn_y + 7))
+        
+        # Draw arrow
+        arrow_x = btn_x + btn_w - 20
+        arrow_y = btn_y + btn_h // 2
+        if self._dropdown_open:
+            pygame.draw.polygon(display, (255, 255, 255), 
+                              [(arrow_x, arrow_y + 5), (arrow_x + 10, arrow_y + 5), (arrow_x + 5, arrow_y - 5)])
+        else:
+            pygame.draw.polygon(display, (255, 255, 255), 
+                              [(arrow_x, arrow_y - 5), (arrow_x + 10, arrow_y - 5), (arrow_x + 5, arrow_y + 5)])
+        
+        # Draw dropdown list if open
+        if self._dropdown_open:
+            list_y = btn_y + btn_h
+            for i, sensor in enumerate(sensors):
+                item_rect = pygame.Rect(btn_x, list_y + i * btn_h, btn_w, btn_h)
+                
+                # Highlight hovered item
+                mouse_pos = pygame.mouse.get_pos()
+                if item_rect.collidepoint(mouse_pos):
+                    pygame.draw.rect(display, (80, 100, 120), item_rect)
+                else:
+                    pygame.draw.rect(display, (50, 50, 50), item_rect)
+                
+                pygame.draw.rect(display, (100, 100, 100), item_rect, 1)
+                
+                # Draw sensor name
+                item_text = font.render(sensor, True, (255, 255, 255))
+                display.blit(item_text, (btn_x + 10, list_y + i * btn_h + 7))
+    
+    def handle_click(self, pos):
         """
-        Reconfigure panel layout.
+        Handle mouse click for dropdown interaction.
+        Call this from main event loop when in fullscreen layout.
         
         Args:
-            layout_name: Name of layout preset
+            pos: (x, y) mouse position
+            
+        Returns:
+            True if click was handled, False otherwise
         """
-        # Clear existing panels
-        self.panels.clear()
-        self._current_layout = layout_name
+        if self._current_layout != 'fullscreen':
+            return False
         
-        if layout_name == 'default':
-            self._setup_default_layout()
-        elif layout_name == 'minimal':
-            self._setup_minimal_layout()
-        elif layout_name == 'debug':
-            self._setup_debug_layout()
-        elif layout_name == 'perception':
-            self._setup_perception_debug_layout()
-    
-    def _setup_minimal_layout(self):
-        """Setup minimal layout with just main camera."""
-        main_h = self.height - 35
-        self.add_panel('main_camera', CameraPanel('main_camera', self.width, main_h, "Main View"),
-                      0, 0)
-        self.add_panel('help', HelpPanel('help', self.width, 35),
-                      0, main_h)
-    
-    def _setup_debug_layout(self):
-        """Setup debug layout with all perception views."""
-        # Bottom bar needs fixed height
-        bottom_h = 140
+        sensors = get_all_sensor_names()
+        btn_w, btn_h = 200, 30
+        btn_x, btn_y = 10, 5
         
-        # 2x2 grid of cameras
-        half_w = self.width // 2
-        half_h = (self.height - bottom_h) // 2
+        # Check if clicked on dropdown button
+        btn_rect = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
+        if btn_rect.collidepoint(pos):
+            self._dropdown_open = not self._dropdown_open
+            return True
         
-        self.add_panel('main_camera', CameraPanel('main_camera', half_w, half_h, "Main View"),
-                      0, 0)
-        self.add_panel('front_rgb', CameraPanel('front_rgb', half_w, half_h, "RGB Front"),
-                      half_w, 0)
-        self.add_panel('semantic', SemanticPanel('semantic', half_w, half_h),
-                      0, half_h)
-        self.add_panel('depth', DepthPanel('depth', half_w, half_h),
-                      half_w, half_h)
+        # Check if clicked on dropdown item
+        if self._dropdown_open:
+            list_y = btn_y + btn_h
+            for i, sensor in enumerate(sensors):
+                item_rect = pygame.Rect(btn_x, list_y + i * btn_h, btn_w, btn_h)
+                if item_rect.collidepoint(pos):
+                    self._fullscreen_sensor = sensor
+                    self._dropdown_open = False
+                    # Rebuild the layout with new sensor
+                    self._setup_fullscreen_layout()
+                    return True
+            
+            # Clicked outside dropdown - close it
+            self._dropdown_open = False
+            return True
         
-        # Bottom info bar
-        bottom_y = half_h * 2
-        
-        self.add_panel('telemetry', TelemetryPanel('telemetry', self.width // 2, bottom_h),
-                      0, bottom_y)
-        self.add_panel('obstacle', ObstaclePanel('obstacle', self.width // 2, bottom_h),
-                      self.width // 2, bottom_y)
-    
-    def _setup_perception_debug_layout(self):
-        """Setup layout showing obstacle detection intermediate steps."""
-        # This layout shows: Main cam, ROI semantic, Vehicle mask, Road mask, Raw obstacles, Filtered
-        bottom_h = 100
-        
-        # 3x2 grid for debug views
-        third_w = self.width // 3
-        half_h = (self.height - bottom_h) // 2
-        
-        # Top row: Main camera, ROI Semantic, Combined debug
-        self.add_panel('main_camera', CameraPanel('main_camera', third_w, half_h, "Main View"),
-                      0, 0)
-        self.add_panel('roi_semantic', DebugMaskPanel('roi_semantic', third_w, half_h, 
-                                                       "ROI Semantic", (255, 255, 0)),
-                      third_w, 0)
-        self.add_panel('combined_debug', DebugMaskPanel('combined_debug', third_w, half_h,
-                                                         "Combined", (0, 255, 0)),
-                      third_w * 2, 0)
-        
-        # Bottom row: Vehicle mask, Raw obstacles, Filtered obstacles
-        self.add_panel('vehicle_mask', DebugMaskPanel('vehicle_mask', third_w, half_h,
-                                                       "Vehicles (raw)", (0, 100, 255)),
-                      0, half_h)
-        self.add_panel('raw_obstacles', DebugMaskPanel('raw_obstacles', third_w, half_h,
-                                                        "Before Filter", (0, 255, 255)),
-                      third_w, half_h)
-        self.add_panel('filtered_obstacles', DebugMaskPanel('filtered_obstacles', third_w, half_h,
-                                                             "After Filter", (0, 255, 0)),
-                      third_w * 2, half_h)
-        
-        # Info bar
-        bottom_y = half_h * 2
-        self.add_panel('obstacle', ObstaclePanel('obstacle', self.width, bottom_h),
-                      0, bottom_y)
+        return False
