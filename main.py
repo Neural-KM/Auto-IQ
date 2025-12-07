@@ -87,12 +87,9 @@ class AutoIQDemo:
         self.vehicle = spawn_vehicle(self.world, spawn_index=self.args.spawn)
         print(f"[AutoIQ] Spawned: {self.vehicle.type_id} at spawn point {self.args.spawn}")
         
-        # Setup sensors
+        # Setup sensors from config
         self.sensors = SensorSuite(self.vehicle, self.world)
-        self.sensors.add_rgb_camera('main', position='third_person')
-        self.sensors.add_rgb_camera('front_rgb', position='front')  # Front RGB for debug
-        self.sensors.add_semantic_camera('semantic', position='front')
-        self.sensors.add_depth_camera('depth', position='front')
+        self.sensors.add_sensors_from_config()
         print("[AutoIQ] Sensors attached")
         
         # Setup navigation manager with sensor integration
@@ -200,6 +197,9 @@ class AutoIQDemo:
         else:
             # Not navigating - apply brakes
             self.vehicle.apply_control(carla.VehicleControl(brake=0.5))
+        
+        # Draw sensor markers in simulator
+        self.sensors.draw_sensor_markers()
         
         return control
     

@@ -15,32 +15,27 @@ from config import Settings
 class CameraSemantic(BaseSensor):
     """Semantic Segmentation Camera sensor."""
     
-    def __init__(self, vehicle, world, position='front',
-                 width=None, height=None, fov=None):
+    def __init__(self, vehicle, world, position,
+                 width=1280, height=720, fov=90, sensor_tick=0.0):
         """
         Initialize semantic camera.
         
         Args:
             vehicle: CARLA vehicle actor
             world: CARLA world
-            position: 'front' or custom dict
-            width: Image width
-            height: Image height
-            fov: Field of view
+            position: Dict with x, y, z, pitch, yaw, roll
+            width: Image width in pixels
+            height: Image height in pixels
+            fov: Field of view in degrees
+            sensor_tick: Sensor capture rate (0.0 = every frame)
         """
         super().__init__(vehicle, world)
         
-        self.width = width or Settings.CAMERA_WIDTH
-        self.height = height or Settings.CAMERA_HEIGHT
-        self.fov = fov or Settings.CAMERA_FOV
-        
-        # Semantic camera typically mounted front
-        if position == 'front':
-            self.position = Settings.CAMERA_FRONT
-        elif isinstance(position, dict):
-            self.position = position
-        else:
-            self.position = Settings.CAMERA_FRONT
+        self.width = width
+        self.height = height
+        self.fov = fov
+        self.sensor_tick = sensor_tick
+        self.position = position
         
         # Store raw labels separately
         self.labels = None
@@ -52,6 +47,7 @@ class CameraSemantic(BaseSensor):
         bp.set_attribute('image_size_x', str(self.width))
         bp.set_attribute('image_size_y', str(self.height))
         bp.set_attribute('fov', str(self.fov))
+        bp.set_attribute('sensor_tick', str(self.sensor_tick))
         return bp
     
     def _get_transform(self):

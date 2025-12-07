@@ -9,40 +9,32 @@ import carla
 import numpy as np
 
 from sensors.base_sensor import BaseSensor
-from config import Settings
 
 
 class CameraRGB(BaseSensor):
     """RGB Camera sensor."""
     
-    def __init__(self, vehicle, world, position='third_person', 
-                 width=None, height=None, fov=None):
+    def __init__(self, vehicle, world, position, 
+                 width=1280, height=720, fov=90, sensor_tick=0.0):
         """
         Initialize RGB camera.
         
         Args:
             vehicle: CARLA vehicle actor
             world: CARLA world
-            position: 'third_person' or 'front' or custom dict
-            width: Image width (uses config default if None)
-            height: Image height (uses config default if None)
-            fov: Field of view (uses config default if None)
+            position: Dict with x, y, z, pitch, yaw, roll
+            width: Image width in pixels
+            height: Image height in pixels
+            fov: Field of view in degrees
+            sensor_tick: Sensor capture rate (0.0 = every frame)
         """
         super().__init__(vehicle, world)
         
-        self.width = width or Settings.CAMERA_WIDTH
-        self.height = height or Settings.CAMERA_HEIGHT
-        self.fov = fov or Settings.CAMERA_FOV
-        
-        # Set camera position
-        if position == 'third_person':
-            self.position = Settings.CAMERA_THIRD_PERSON
-        elif position == 'front':
-            self.position = Settings.CAMERA_FRONT
-        elif isinstance(position, dict):
-            self.position = position
-        else:
-            self.position = Settings.CAMERA_THIRD_PERSON
+        self.width = width
+        self.height = height
+        self.fov = fov
+        self.sensor_tick = sensor_tick
+        self.position = position
         
         self.surface = None  # For pygame rendering
     
@@ -53,6 +45,7 @@ class CameraRGB(BaseSensor):
         bp.set_attribute('image_size_x', str(self.width))
         bp.set_attribute('image_size_y', str(self.height))
         bp.set_attribute('fov', str(self.fov))
+        bp.set_attribute('sensor_tick', str(self.sensor_tick))
         return bp
     
     def _get_transform(self):
