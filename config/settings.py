@@ -3,7 +3,22 @@ AutoIQ Configuration Settings
 ==============================
 
 All tunable parameters in one place.
+Control parameters are loaded from control_params.yaml for easy tuning.
 """
+
+import os
+import yaml
+
+
+def _load_control_params():
+    """Load control parameters from YAML file."""
+    yaml_path = os.path.join(os.path.dirname(__file__), 'control_params.yaml')
+    with open(yaml_path, 'r') as f:
+        return yaml.safe_load(f)
+
+
+# Load control params once at import time
+_control_params = _load_control_params()
 
 
 class Settings:
@@ -41,42 +56,30 @@ class Settings:
     CAMERA_FOV = 90
     
     # ==========================================================================
-    # Control - Lateral (Steering)
+    # Control - Lateral (Steering) - from YAML
     # ==========================================================================
-    LATERAL_KP = 1.5
-    LATERAL_KI = 0.0
-    LATERAL_KD = 0.3
-    MAX_STEERING = 1.0
-    MAX_STEERING_DIFF = 0.1  # Max change per step (smoothing)
+    MAX_STEERING = _control_params['lateral']['max_steering']
+    MAX_STEERING_DIFF = _control_params['lateral']['max_steering_diff']
     
     # ==========================================================================
-    # Control - Longitudinal (Speed)
+    # Control - Longitudinal (Speed) - from YAML
     # ==========================================================================
-    LONGITUDINAL_KP = 1.0
-    LONGITUDINAL_KI = 0.05
-    LONGITUDINAL_KD = 0.0
-    MAX_THROTTLE = 0.75
-    MAX_BRAKE = 0.5
+    LONGITUDINAL_KP = _control_params['longitudinal']['kp']
+    LONGITUDINAL_KI = _control_params['longitudinal']['ki']
+    LONGITUDINAL_KD = _control_params['longitudinal']['kd']
+    MAX_THROTTLE = _control_params['longitudinal']['max_throttle']
+    MAX_BRAKE = _control_params['longitudinal']['max_brake']
     
     # ==========================================================================
-    # Planning
+    # Planning - from YAML
     # ==========================================================================
-    TARGET_SPEED = 30.0  # km/h
-    LOOKAHEAD_DISTANCE = 5.0  # meters
-    WAYPOINT_SPACING = 2.0  # meters between waypoints
+    TARGET_SPEED = _control_params['planning']['target_speed']
+    LOOKAHEAD_DISTANCE = _control_params['planning']['lookahead_distance']
+    WAYPOINT_SPACING = _control_params['planning']['waypoint_spacing']
     
     # ==========================================================================
-    # Obstacle Avoidance
+    # Obstacle Avoidance - from YAML
     # ==========================================================================
-    OBSTACLE_DETECTION_DISTANCE = 30.0  # meters
-    LANE_CHANGE_TRIGGER_DISTANCE = 20.0  # meters
-    SAFE_LANE_CHANGE_GAP = 10.0  # meters
-    
-    # ==========================================================================
-    # Behavior States
-    # ==========================================================================
-    class BehaviorState:
-        LANE_FOLLOWING = 'LANE_FOLLOWING'
-        PREPARING_LANE_CHANGE = 'PREPARING_LANE_CHANGE'
-        LANE_CHANGING = 'LANE_CHANGING'
-        RETURNING_TO_LANE = 'RETURNING_TO_LANE'
+    OBSTACLE_DETECTION_DISTANCE = _control_params['obstacle']['detection_distance']
+    LANE_CHANGE_TRIGGER_DISTANCE = _control_params['obstacle']['lane_change_trigger_distance']
+    SAFE_LANE_CHANGE_GAP = _control_params['obstacle']['safe_lane_change_gap']

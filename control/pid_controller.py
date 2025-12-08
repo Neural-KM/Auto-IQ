@@ -2,16 +2,14 @@
 PID Controller
 ==============
 
-Generic PID controller for vehicle control.
+Generic PID controller with anti-windup for vehicle control.
 """
-
-from collections import deque
 
 
 class PIDController:
-    """Generic PID Controller."""
+    """Generic PID Controller with anti-windup."""
     
-    def __init__(self, k_p=1.0, k_i=0.0, k_d=0.0, dt=0.05):
+    def __init__(self, k_p, k_i, k_d, dt, output_limits=(-1.0, 1.0)):
         """
         Initialize PID controller.
         
@@ -20,48 +18,52 @@ class PIDController:
             k_i: Integral gain
             k_d: Derivative gain
             dt: Time step (seconds)
+            output_limits: Tuple of (min, max) output limits for anti-windup
         """
         self.k_p = k_p
         self.k_i = k_i
         self.k_d = k_d
         self.dt = dt
-        self.error_buffer = deque(maxlen=20)
+        self.output_min, self.output_max = output_limits
+        
+        self.integral = 0.0
+        self.prev_error = 0.0
     
     def reset(self):
-        """Reset the error buffer."""
-        self.error_buffer.clear()
+        """Reset the controller state."""
+        self.integral = 0.0
+        self.prev_error = 0.0
     
     def step(self, error):
         """
-        Compute PID control output.
+        Compute PID control output with anti-windup.
         
         Args:
             error: Current error value
             
         Returns:
-            Control output
+            Control output (clamped to output_limits)
         """
-        self.error_buffer.append(error)
-        
         # Proportional term
         p_term = self.k_p * error
         
         # Derivative term
-        if len(self.error_buffer) >= 2:
-            d_term = self.k_d * (self.error_buffer[-1] - self.error_buffer[-2]) / self.dt
-        else:
-            d_term = 0.0
+        d_term = self.k_d * (error - self.prev_error) / self.dt
+        self.prev_error = error
         
-        # Integral term
-        i_term = self.k_i * sum(self.error_buffer) * self.dt
+        # Integral term (before anti-windup)
+        self.integral += error * self.dt
+        i_term = self.k_i * self.integral
         
-        return p_term + i_term + d_term
-    
-    def set_gains(self, k_p=None, k_i=None, k_d=None):
-        """Update PID gains."""
-        if k_p is not None:
-            self.k_p = k_p
-        if k_i is not None:
-            self.k_i = k_i
-        if k_d is not None:
-            self.k_d = k_d
+        # Compute output
+        output = p_term + i_term + d_term
+        
+        # Anti-windup: clamp output and back-calculate integral
+        if output > self.output_max:
+            self.integral -= (output - self.output_max) / self.k_i if self.k_i != 0 else 0
+            output = self.output_max
+        elif output < self.output_min:
+            self.integral -= (output - self.output_min) / self.k_i if self.k_i != 0 else 0
+            output = self.output_min
+        
+        return output
