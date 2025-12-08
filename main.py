@@ -20,29 +20,19 @@ import atexit
 # Add carla module path (one level up from Auto-IQ, then into carla)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'carla'))
 
-try:
-    import carla
-except ImportError:
-    raise RuntimeError('Cannot import carla module. Make sure CARLA PythonAPI is in the path.')
-
-try:
-    import pygame
-    from pygame.locals import K_ESCAPE, K_q, K_UP, K_DOWN, K_SPACE, K_LEFT, K_RIGHT, K_b, K_g, K_n
-except ImportError:
-    raise RuntimeError('Cannot import pygame. pip install pygame')
-
-try:
-    import numpy as np
-except ImportError:
-    raise RuntimeError('Cannot import numpy. pip install numpy')
+import carla
+import pygame
+from pygame.locals import K_ESCAPE, K_q, K_UP, K_DOWN, K_SPACE, K_LEFT, K_RIGHT, K_b, K_g, K_n
+import numpy as np
+import cv2
 
 # AutoIQ modules
 from config import Settings
 from config.sensors import SENSORS
-from control import VehicleController
 from sensors import SensorSuite
-from visualization import HUD, TiledDisplay
+from visualization import TiledDisplay
 from navigation import NavigationManager
+from perception import LaneDetector, LaneDetectorDebugWindow
 from utils.helpers import spawn_vehicle, get_vehicle_telemetry
 
 
@@ -64,6 +54,11 @@ class AutoIQDemo:
         self.target_speed = args.speed
         self.running = True
         self.layout_mode = 'default'  # 'default', 'minimal', 'debug'
+        
+        # Lane detection
+        self.lane_detector = None
+        self.lane_debug_window = None
+        self.lane_detection_result = None
     
     def setup(self):
         """Initialize everything."""
@@ -122,6 +117,26 @@ class AutoIQDemo:
                 self.world.tick()
         else:
             time.sleep(1.0)
+        
+        # Setup lane detection
+        semantic_sensor = self.sensors.get_sensor('semantic')
+        if semantic_sensor:
+            # Get camera parameters for proper BEV transform
+            camera_fov = semantic_sensor.fov
+            camera_pitch = semantic_sensor.position.get('pitch', 0.0)
+            camera_height = semantic_sensor.position.get('z', 1.5)
+            
+            self.lane_detector = LaneDetector(
+                image_width=semantic_sensor.width,
+                image_height=semantic_sensor.height,
+                camera_fov=camera_fov,
+                camera_pitch=camera_pitch,
+                camera_height=camera_height
+            )
+            self.lane_debug_window = LaneDetectorDebugWindow("Lane Detection Debug")
+            print(f"[AutoIQ] Lane detector initialized (FOV={camera_fov}°, pitch={camera_pitch}°, height={camera_height}m)")
+        else:
+            print("[AutoIQ] Warning: No semantic sensor found, lane detection disabled")
         
         print("[AutoIQ] Ready!")
     
@@ -200,6 +215,24 @@ class AutoIQDemo:
         
         # Draw sensor markers in simulator
         self.sensors.draw_sensor_markers()
+        
+        # Run lane detection pipeline
+        if self.lane_detector:
+            semantic_sensor = self.sensors.get_sensor('semantic')
+            if semantic_sensor:
+                semantic_image = semantic_sensor.get_data()
+                if semantic_image is not None:
+                    self.lane_detection_result = self.lane_detector.detect(semantic_image)
+                    
+                    # Print lane detection control inferences
+                    if self.lane_detection_result['valid']:
+                        cte = self.lane_detection_result['cte']
+                        cte_norm = self.lane_detection_result['cte_normalized']
+                        heading_err = np.degrees(self.lane_detection_result['heading_error'])
+                        confidence = self.lane_detection_result['confidence']
+                        print(f"[Lane] CTE: {cte:+6.1f}px ({cte_norm:+.2f}) | "
+                              f"Heading: {heading_err:+5.1f}° | "
+                              f"Conf: {confidence:.2f}")
         
         return control
     
@@ -294,6 +327,19 @@ class AutoIQDemo:
         self.tiled_display.render(self.display, panel_data)
         
         pygame.display.flip()
+        
+        # Show lane detection debug window (separate OpenCV window)
+        if self.lane_debug_window and self.lane_detector:
+            semantic_sensor = self.sensors.get_sensor('semantic')
+            if semantic_sensor:
+                semantic_image = semantic_sensor.get_data()
+                self.lane_debug_window.show(
+                    self.lane_detector,
+                    semantic_image,
+                    self.lane_detection_result
+                )
+                # Process OpenCV window events
+                LaneDetectorDebugWindow.wait_key(1)
     
     def run(self):
         """Main loop."""
@@ -363,6 +409,15 @@ class AutoIQDemo:
                 self.world.apply_settings(settings)
         except Exception as e:
             print(f"[AutoIQ] Warning: Error restoring world settings: {e}")
+        
+        # Close lane detection debug window
+        try:
+            if self.lane_debug_window:
+                self.lane_debug_window.close()
+                self.lane_debug_window = None
+            cv2.destroyAllWindows()
+        except Exception as e:
+            print(f"[AutoIQ] Warning: Error closing debug windows: {e}")
         
         # Quit pygame
         try:

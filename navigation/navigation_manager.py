@@ -8,8 +8,7 @@ Supports both MPC and PID control strategies.
 """
 
 import carla
-import numpy as np
-from planning.global_planner import GlobalPlanner, RoadOption
+from planning.global_planner import GlobalPlanner
 from planning.local_planner import LocalPlanner
 from planning.behavior_planner import BehaviorPlanner, BehaviorState
 from perception.obstacle_detector import ObstacleDetector
