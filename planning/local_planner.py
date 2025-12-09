@@ -6,7 +6,7 @@ Waypoint-based local path planning.
 """
 
 from collections import deque
-from config import Settings
+from config.settings import Settings
 
 
 class LocalPlanner:

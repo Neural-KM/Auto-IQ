@@ -13,7 +13,7 @@ import math
 
 from control.pure_pursuit_controller import PurePursuitController
 from control.longitudinal_controller import LongitudinalController
-from config import Settings
+from config.settings import Settings
 
 # Try to import MPC components
 try:

@@ -8,7 +8,7 @@ Speed control using PID for throttle and brake.
 import math
 
 from control.pid_controller import PIDController
-from config import Settings
+from config.settings import Settings
 
 
 class LongitudinalController:

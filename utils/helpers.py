@@ -9,7 +9,7 @@ import math
 import random
 import carla
 
-from config import Settings
+from config.settings import Settings
 
 
 def get_speed(vehicle):

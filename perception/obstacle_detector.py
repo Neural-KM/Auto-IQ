@@ -6,7 +6,7 @@ Detects static obstacles on the road ahead.
 """
 
 import numpy as np
-from config import Settings
+from config.settings import Settings
 from sensors.camera_semantic import SemanticLabels
 
 

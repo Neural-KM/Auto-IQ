@@ -27,12 +27,12 @@ import numpy as np
 import cv2
 
 # AutoIQ modules
-from config import Settings
+from config.settings import Settings
 from config.sensors import SENSORS
-from sensors import SensorSuite
-from visualization import TiledDisplay
-from navigation import NavigationManager
-from perception import LaneDetector, LaneDetectorDebugWindow
+from sensors.sensor_suite import SensorSuite
+from visualization.tiled_display import TiledDisplay
+from navigation.navigation_manager import NavigationManager
+from perception.lane_detector import LaneDetector, LaneDetectorDebugWindow
 from utils.helpers import spawn_vehicle, get_vehicle_telemetry
 
 

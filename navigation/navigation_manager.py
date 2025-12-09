@@ -12,8 +12,8 @@ from planning.global_planner import GlobalPlanner
 from planning.local_planner import LocalPlanner
 from planning.behavior_planner import BehaviorPlanner, BehaviorState
 from perception.obstacle_detector import ObstacleDetector
-from control import VehicleController
-from config import Settings
+from control.vehicle_controller import VehicleController
+from config.settings import Settings
 
 
 class NavigationManager:

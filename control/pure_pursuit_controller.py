@@ -10,7 +10,7 @@ Reference: Implementation of the Pure Pursuit Path Tracking Algorithm
 
 import math
 import numpy as np
-from config import Settings
+from config.settings import Settings
 
 
 class PurePursuitController:

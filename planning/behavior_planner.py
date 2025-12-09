@@ -6,7 +6,7 @@ State machine for high-level behavior decisions.
 """
 
 from enum import Enum, auto
-from config import Settings
+from config.settings import Settings
 
 
 class BehaviorState(Enum):
