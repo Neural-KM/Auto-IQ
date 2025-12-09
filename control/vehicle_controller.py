@@ -61,7 +61,13 @@ class VehicleController:
         elif self.controller_type == 'pid':
             print("[VehicleController] Using Pure Pursuit + PID control")
             self.lateral = PurePursuitController(vehicle)
-            self.longitudinal = LongitudinalController(vehicle)
+            self.longitudinal = LongitudinalController(
+                vehicle,
+                k_p=Settings.LONGITUDINAL_KP,
+                k_i=Settings.LONGITUDINAL_KI,
+                k_d=Settings.LONGITUDINAL_KD,
+                dt=Settings.FIXED_DELTA_SECONDS
+            )
         else:
             raise ValueError(f"Unknown controller type: {controller_type}. Use 'mpc' or 'pid'")
         

@@ -6,7 +6,6 @@ Speed control using PID for throttle and brake.
 """
 
 import math
-import numpy as np
 
 from control.pid_controller import PIDController
 from config import Settings
@@ -18,26 +17,22 @@ class LongitudinalController:
     Controls throttle and brake to maintain target speed.
     """
     
-    def __init__(self, vehicle, k_p=None, k_i=None, k_d=None, dt=None):
+    def __init__(self, vehicle, k_p, k_i, k_d, dt):
         """
         Initialize longitudinal controller.
         
         Args:
             vehicle: CARLA vehicle actor
-            k_p, k_i, k_d: PID gains (uses config defaults if None)
+            k_p, k_i, k_d: PID gains
             dt: Time step
         """
         self.vehicle = vehicle
-        
-        # Use config defaults if not specified
-        k_p = k_p if k_p is not None else Settings.LONGITUDINAL_KP
-        k_i = k_i if k_i is not None else Settings.LONGITUDINAL_KI
-        k_d = k_d if k_d is not None else Settings.LONGITUDINAL_KD
-        dt = dt if dt is not None else Settings.FIXED_DELTA_SECONDS
-        
-        self.pid = PIDController(k_p, k_i, k_d, dt)
         self.max_throttle = Settings.MAX_THROTTLE
         self.max_brake = Settings.MAX_BRAKE
+        
+        # PID with anti-windup limits based on max throttle/brake
+        output_limits = (-self.max_brake, self.max_throttle)
+        self.pid = PIDController(k_p, k_i, k_d, dt, output_limits)
     
     def get_speed(self):
         """Get current vehicle speed in km/h."""
