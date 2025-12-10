@@ -14,13 +14,7 @@ Features:
 
 import numpy as np
 import time
-
-try:
-    import casadi as ca
-    CASADI_AVAILABLE = True
-except ImportError:
-    CASADI_AVAILABLE = False
-    print("[MPC] WARNING: CasADi not installed. Run: pip install casadi")
+import casadi as ca
 
 from control.vehicle_model import VehicleModel
 
@@ -45,9 +39,7 @@ class MPCController:
             dt: Control timestep (seconds), default 50ms = 20Hz
             horizon: Prediction horizon (number of steps)
         """
-        if not CASADI_AVAILABLE:
-            raise RuntimeError("CasADi required for MPC. Install with: pip install casadi")
-        
+
         self.dt = dt
         self.N = horizon  # Prediction horizon
         
