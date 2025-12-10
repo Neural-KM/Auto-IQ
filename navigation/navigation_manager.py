@@ -8,7 +8,7 @@ Supports both MPC and PID control strategies.
 """
 
 import carla
-from planning.global_planner import GlobalPlanner
+from planning.global_planner import GlobalPlanner, RoadOption
 from planning.local_planner import LocalPlanner
 from planning.behavior_planner import BehaviorPlanner, BehaviorState
 from perception.obstacle_detector import ObstacleDetector
@@ -71,11 +71,16 @@ class NavigationManager:
         self._previous_behavior = BehaviorState.LANE_FOLLOWING
         self._lane_change_speed_factor = 0.7  # Slow down during lane change
         self._obstacle_detection = None
+        self.lane_detection_result = None
         
         # MPC-specific: waypoint lookahead for trajectory
         self._mpc_lookahead_waypoints = 30  # Number of waypoints to feed MPC
         
         print(f"[Navigation] Initialized with {controller_type.upper()} controller")
+    
+    def update_perception(self, lane_detection_result):
+        """Update lane detection result from perception system."""
+        self.lane_detection_result = lane_detection_result
     
     def plan_route(self, destination):
         """Plan route to destination without starting navigation."""
@@ -196,17 +201,6 @@ class NavigationManager:
         self.is_navigating = False
         self._route_planned = False
     
-    def _draw_current_waypoint(self, waypoint):
-        """Draw the current waypoint being followed (larger, red)."""
-        if waypoint is None:
-            return
-        self.world.debug.draw_point(
-            waypoint.transform.location + carla.Location(z=0.5),
-            size=0.2,
-            color=carla.Color(255, 0, 0),  # Red
-            life_time=0.05
-        )
-    
     def _clear_route(self):
         """Clear the drawn route by not refreshing it."""
         self._route_drawn = False
@@ -304,7 +298,7 @@ class NavigationManager:
         # Update behavior planner with obstacle detection
         self._previous_behavior = self._current_behavior
         self._current_behavior = self.behavior_planner.get_state()
-        behavior_waypoint = self.behavior_planner.update(self._obstacle_detection)
+        self.behavior_planner.update(self._obstacle_detection)
         
         # Check if lane change just completed - replan route from new lane
         if (self._previous_behavior in [BehaviorState.LANE_CHANGING_LEFT, 
@@ -313,55 +307,120 @@ class NavigationManager:
             print("[Navigation] Lane change completed - replanning route")
             self._replan_route_from_current()
         
+        # Emergency stop check
+        if self._current_behavior == BehaviorState.EMERGENCY_STOP:
+            print("[Navigation] Emergency stop triggered")
+            return self.controller.emergency_stop()
+        
         # Determine effective target speed based on behavior
         if self._current_behavior in [BehaviorState.LANE_CHANGING_LEFT, 
                                        BehaviorState.LANE_CHANGING_RIGHT]:
             effective_speed = self.target_speed * self._lane_change_speed_factor
-        elif self._current_behavior == BehaviorState.EMERGENCY_STOP:
-            print("[Navigation] Emergency stop triggered")
-            return self.controller.emergency_stop()
         else:
             effective_speed = self.target_speed
         
-        # Get waypoints for controller
-        if self._current_behavior in [BehaviorState.LANE_CHANGING_LEFT, 
-                                       BehaviorState.LANE_CHANGING_RIGHT]:
-            # During lane change, use behavior planner's waypoints
-            waypoints = self._get_lane_change_waypoints()
-        else:
-            # Normal navigation - advance global planner and get waypoints
-            self.global_planner.advance(vehicle_location)
-            waypoints = self._get_lookahead_waypoints()
+        # Advance global planner to keep state in sync
+        self.global_planner.advance(vehicle_location)
+        
+        # Get waypoints for controller based on mode
+        waypoints = self._get_waypoints_for_control(vehicle_location)
         
         if not waypoints:
             self.is_navigating = False
             self._clear_route()
             return self.controller.emergency_stop()
         
-        # Convert obstacles to world coordinates for MPC
-        obstacles_world = self._convert_obstacles_to_world()
-        
-        # Update controller with waypoints and obstacles
+        # Update controller with waypoints
         self.controller.set_waypoints(waypoints)
-        self.controller.set_obstacles(obstacles_world)
+        self.controller.set_obstacles(self._convert_obstacles_to_world())
         
-        # Draw the current waypoint being followed (only if draw_on_simulator enabled)
+        # Draw debug visualizations
         if self.draw_on_simulator:
-            self._draw_current_waypoint(waypoints[0] if waypoints else None)
-            
-            # Draw MPC trajectory if using MPC
-            if self.controller_type == 'mpc':
-                self._draw_mpc_trajectory()
-            
-            # Draw Pure Pursuit lookahead point if using PID
-            if self.controller_type == 'pid':
-                self._draw_pure_pursuit_target()
-            
-            # Draw obstacle detection visualization
-            if self._obstacle_detection and self._obstacle_detection.get('obstacle_detected'):
-                self._draw_obstacle_warning()
+            self._draw_debug_visualizations(waypoints, vehicle_location)
         
-        return self.controller.run_step(waypoints[0] if waypoints else None, effective_speed)
+        return self.controller.run_step(effective_speed)
+    
+    def _get_waypoints_for_control(self, vehicle_location):
+        """
+        Get waypoints for controller based on current mode.
+        
+        Decides between perception-based waypoints and map-based waypoints.
+        
+        Returns:
+            List of waypoint objects or None
+        """
+        # Check if we should use perception-based control
+        use_perception = self._should_use_perception(vehicle_location)
+        
+        if use_perception:
+            # Generate waypoints from lane detection
+            waypoints = self.local_planner.generate_waypoints_from_lane_fits(self.lane_detection_result)
+            if waypoints:
+                return waypoints
+            # Fall through to map-based if perception fails
+        
+        # Map-based waypoints
+        if self._current_behavior in [BehaviorState.LANE_CHANGING_LEFT, 
+                                       BehaviorState.LANE_CHANGING_RIGHT]:
+            return self._get_lane_change_waypoints()
+        else:
+            return self._get_lookahead_waypoints()
+    
+    def _should_use_perception(self, vehicle_location):
+        """
+        Check if perception-based control should be used.
+        
+        Criteria:
+        1. Lane detection is valid and high confidence
+        2. Not in a junction or sharp turn
+        3. Not changing lanes
+        4. Controller supports it (PID)
+        """
+        if not (self.lane_detection_result and 
+                self.lane_detection_result['valid'] and 
+                self.lane_detection_result['confidence'] > 0.5 and
+                self._current_behavior == BehaviorState.LANE_FOLLOWING and
+                self.controller_type == 'pid'):
+            return False
+        
+        # Check road geometry
+        road_option = self.global_planner.get_current_road_option()
+        current_wp = self.map.get_waypoint(vehicle_location)
+        
+        if current_wp.is_junction:
+            return False
+        
+        if road_option in [RoadOption.LEFT, RoadOption.RIGHT, 
+                           RoadOption.CHANGELANELEFT, RoadOption.CHANGELANERIGHT]:
+            return False
+        
+        return True
+    
+    def _draw_debug_visualizations(self, waypoints, vehicle_location):
+        """Draw all debug visualizations."""
+        # Draw waypoints
+        self._draw_waypoints(waypoints)
+        
+        # Draw perception mode indicator
+        if self._should_use_perception(vehicle_location):
+            self.world.debug.draw_string(
+                vehicle_location + carla.Location(z=2.0), 
+                "PERCEPTION CONTROL", 
+                color=carla.Color(0, 255, 0),
+                life_time=0.1
+            )
+        
+        # Draw MPC trajectory if using MPC
+        if self.controller_type == 'mpc':
+            self._draw_mpc_trajectory()
+        
+        # Draw Pure Pursuit lookahead point if using PID
+        if self.controller_type == 'pid':
+            self._draw_pure_pursuit_target()
+        
+        # Draw obstacle detection visualization
+        if self._obstacle_detection and self._obstacle_detection.get('obstacle_detected'):
+            self._draw_obstacle_warning()
     
     def _get_lookahead_waypoints(self):
         """
@@ -565,6 +624,44 @@ class NavigationManager:
             color=carla.Color(0, 200, 200),  # Slightly darker cyan
             life_time=0.1
         )
+    
+    def _draw_waypoints(self, waypoints):
+        """Draw waypoints for controller visualization."""
+        if not waypoints:
+            return
+        
+        # Draw each waypoint as a small sphere
+        for i, wp in enumerate(waypoints):
+            loc = wp.transform.location
+            loc_draw = carla.Location(x=loc.x, y=loc.y, z=loc.z + 0.3)
+            
+            # Color gradient: green (near) to yellow (far)
+            ratio = i / max(len(waypoints) - 1, 1)
+            color = carla.Color(
+                int(255 * ratio),      # R: 0 -> 255
+                int(255 * (1 - ratio * 0.3)),  # G: 255 -> 178
+                0                       # B: 0
+            )
+            
+            self.world.debug.draw_point(
+                loc_draw,
+                size=0.12,
+                color=color,
+                life_time=0.1
+            )
+        
+        # Draw lines connecting waypoints
+        for i in range(len(waypoints) - 1):
+            loc1 = waypoints[i].transform.location
+            loc2 = waypoints[i + 1].transform.location
+            
+            self.world.debug.draw_line(
+                carla.Location(x=loc1.x, y=loc1.y, z=loc1.z + 0.3),
+                carla.Location(x=loc2.x, y=loc2.y, z=loc2.z + 0.3),
+                thickness=0.04,
+                color=carla.Color(0, 255, 100),  # Green
+                life_time=0.1
+            )
     
     def get_status(self):
         """Get navigation status including behavior state and MPC info."""

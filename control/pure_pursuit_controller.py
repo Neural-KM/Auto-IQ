@@ -155,17 +155,18 @@ class PurePursuitController:
         # Fallback to simple method
         return self._find_lookahead_point(vehicle_location, lookahead_distance)
     
-    def run_step(self, waypoint):
+    def run_step(self):
         """
         Compute steering using Pure Pursuit algorithm.
-
-        Args:
-            waypoint: Target carla.Waypoint (used if no waypoints set)
+        
+        Uses internal waypoints set via set_waypoints().
 
         Returns:
             Steering value in range [-1, 1]
-
         """
+        if not self._waypoints or len(self._waypoints) == 0:
+            return 0.0
+            
         # Get vehicle state
         vehicle_transform = self.vehicle.get_transform()
         vehicle_location = vehicle_transform.location
@@ -179,16 +180,13 @@ class PurePursuitController:
         lookahead_distance = self._compute_lookahead_distance(speed)
         self._current_lookahead_distance = lookahead_distance
         
-        # Find lookahead point
-        if self._waypoints and len(self._waypoints) > 1:
+        # Find lookahead point from waypoints
+        if len(self._waypoints) > 1:
             self._current_lookahead_point = self._find_lookahead_interpolated(vehicle_location, lookahead_distance)
         else:
-            # Use provided waypoint if no path set
-            if waypoint is not None:
-                self._current_lookahead_point = (waypoint.transform.location.x, waypoint.transform.location.y)
-            else:
-                self._current_lookahead_point = None
-                return 0.0
+            # Single waypoint - use it directly
+            wp = self._waypoints[0]
+            self._current_lookahead_point = (wp.transform.location.x, wp.transform.location.y)
         
         if self._current_lookahead_point is None:
             return 0.0
@@ -250,19 +248,6 @@ class PurePursuitController:
         """
         return self._current_lookahead_distance
     
-    def run_step_with_lookahead(self, waypoints):
-        """
-        Compute steering with explicit waypoint list.
-        
-        Args:
-            waypoints: List of carla.Waypoint objects
-            
-        Returns:
-            Steering value in range [-1, 1]
-        """
-        self._waypoints = waypoints
-        return self.run_step(waypoints[0] if waypoints else None)
-    
     def get_lookahead_info(self):
         """
         Get debug information about current lookahead state.
@@ -279,24 +264,6 @@ class PurePursuitController:
             'lookahead_distance': ld,
             'num_waypoints': len(self._waypoints) if self._waypoints else 0
         }
-    
-    def run_step_from_error(self, cross_track_error):
-        """
-        Compute steering from cross-track error (for perception-based control).
-        
-        Uses a simple proportional control for cross-track error correction.
-        This is a fallback when Pure Pursuit waypoints aren't available.
-        
-        Args:
-            cross_track_error: Lateral offset from lane center (positive = right)
-            
-        Returns:
-            Steering value in range [-1, 1]
-        """
-        # Simple proportional gain for cross-track error
-        k_cte = 0.5  # Cross-track error gain
-        steering = -k_cte * cross_track_error
-        return np.clip(steering, -self.max_steering, self.max_steering)
     
     def reset(self):
         """Reset controller state."""

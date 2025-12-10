@@ -205,6 +205,23 @@ class AutoIQDemo:
     
     def run_step(self):
         """Execute one simulation step."""
+        # Run lane detection pipeline first so nav manager has latest data
+        if self.lane_detector:
+            semantic_sensor = self.sensors.get_sensor('semantic')
+            if semantic_sensor:
+                semantic_image = semantic_sensor.get_data()
+                if semantic_image is not None:
+                    self.lane_detection_result = self.lane_detector.detect(semantic_image)
+                    
+                    # Update navigation manager with perception data
+                    if self.nav_manager:
+                        self.nav_manager.update_perception(self.lane_detection_result)
+                    
+                    # Print lane detection control inferences
+                    if self.lane_detection_result['valid']:
+                        confidence = self.lane_detection_result['confidence']
+                        print(f"[Lane] Detected | Conf: {confidence:.2f}")
+
         control = self.nav_manager.run_step()
         
         if control:
@@ -215,24 +232,6 @@ class AutoIQDemo:
         
         # Draw sensor markers in simulator
         self.sensors.draw_sensor_markers()
-        
-        # Run lane detection pipeline
-        if self.lane_detector:
-            semantic_sensor = self.sensors.get_sensor('semantic')
-            if semantic_sensor:
-                semantic_image = semantic_sensor.get_data()
-                if semantic_image is not None:
-                    self.lane_detection_result = self.lane_detector.detect(semantic_image)
-                    
-                    # Print lane detection control inferences
-                    if self.lane_detection_result['valid']:
-                        cte = self.lane_detection_result['cte']
-                        cte_norm = self.lane_detection_result['cte_normalized']
-                        heading_err = np.degrees(self.lane_detection_result['heading_error'])
-                        confidence = self.lane_detection_result['confidence']
-                        print(f"[Lane] CTE: {cte:+6.1f}px ({cte_norm:+.2f}) | "
-                              f"Heading: {heading_err:+5.1f}° | "
-                              f"Conf: {confidence:.2f}")
         
         return control
     

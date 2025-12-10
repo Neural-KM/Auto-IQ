@@ -4,7 +4,7 @@ Lane Detector
 
 Detects lane boundaries from CARLA semantic segmentation images.
 Uses bird's eye view transform for better lane line fitting.
-Outputs cross-track error (CTE) and heading error for lateral control.
+Outputs polynomial fits and lane geometry for path planning.
 """
 
 import numpy as np
@@ -21,7 +21,7 @@ class LaneDetector:
     2. Transform to bird's eye view (top-down perspective)
     3. Use sliding window to find lane pixels
     4. Fit polynomial curves to left and right lanes
-    5. Calculate cross-track error and heading error
+    5. Return lane geometry and polynomial fits for path planning
     """
     
     def __init__(self, image_width, image_height, camera_fov, camera_pitch, camera_height):
@@ -66,6 +66,7 @@ class LaneDetector:
         self.right_lane_x = None
         self.lane_center = self.width // 2
         self.lane_width_pixels = None
+        self.avg_lane_width = None  # Track average lane width for stability
         
         # Previous polynomial fits for temporal smoothing
         self.prev_left_fit = None
@@ -346,7 +347,7 @@ class LaneDetector:
         return left_fit, right_fit, vis_img
     
     def _compute_lane_metrics(self, left_fit, right_fit, orig_width):
-        """Compute CTE, heading error, and other metrics from polynomial fits."""
+        """Compute lane metrics from polynomial fits."""
         confidence = 0.0
         y_eval = self.bev_height - 10  # Near bottom (closest to vehicle)
         
@@ -361,32 +362,27 @@ class LaneDetector:
             right_x = int(np.polyval(right_fit, y_eval))
             confidence += 0.4
         
-        # Lane center in BEV
-        bev_center = self.bev_width // 2
+        # Use tracked average width if available, else default to 40% of BEV width
+        current_lane_width = self.avg_lane_width if self.avg_lane_width is not None else self.bev_width * 0.4
         
         if left_x is not None and right_x is not None:
-            lane_center_bev = (left_x + right_x) // 2
             lane_width_bev = right_x - left_x
+            
+            # Update average lane width (with heavy smoothing to reject noise)
+            if self.avg_lane_width is None:
+                self.avg_lane_width = lane_width_bev
+            else:
+                self.avg_lane_width = 0.95 * self.avg_lane_width + 0.05 * lane_width_bev
+                
             confidence += 0.2
         elif left_x is not None:
-            lane_width_bev = self.bev_width * 0.4
-            lane_center_bev = int(left_x + lane_width_bev / 2)
+            lane_width_bev = current_lane_width
         elif right_x is not None:
-            lane_width_bev = self.bev_width * 0.4
-            lane_center_bev = int(right_x - lane_width_bev / 2)
+            lane_width_bev = current_lane_width
         else:
-            lane_center_bev = bev_center
             lane_width_bev = None
         
-        # Cross-track error (positive = vehicle right of center)
-        cte_bev = bev_center - lane_center_bev
-        cte_normalized = np.clip(cte_bev / (self.bev_width / 2), -1.0, 1.0)
-        
-        # Heading error from polynomial derivative
-        heading_error = self._compute_heading_error(left_fit, right_fit, y_eval)
-        
         # Map to original image coords (approximate)
-        self.lane_center = int(orig_width / 2 - cte_bev * (orig_width / self.bev_width))
         if left_x is not None:
             self.left_lane_x = int((left_x / self.bev_width) * orig_width)
         if right_x is not None:
@@ -396,42 +392,26 @@ class LaneDetector:
         
         return {
             'valid': confidence > 0.2,
-            'cte': float(cte_bev),
-            'cte_normalized': float(cte_normalized),
-            'heading_error': float(heading_error),
             'lane_center': self.lane_center,
             'left_lane': self.left_lane_x,
             'right_lane': self.right_lane_x,
             'lane_width': self.lane_width_pixels,
             'confidence': min(confidence, 1.0),
             'left_fit': left_fit,
-            'right_fit': right_fit
+            'right_fit': right_fit,
+            'lane_width_bev': lane_width_bev,
+            'bev_params': {
+                'width': self.bev_width,
+                'height': self.bev_height,
+                'x_range': self.bev_x_range,
+                'y_range': self.bev_y_range
+            }
         }
-    
-    def _compute_heading_error(self, left_fit, right_fit, y_eval):
-        """Calculate heading error from polynomial derivatives."""
-        slopes = []
-        
-        if left_fit is not None:
-            slope = 2 * left_fit[0] * y_eval + left_fit[1]
-            slopes.append(slope)
-        
-        if right_fit is not None:
-            slope = 2 * right_fit[0] * y_eval + right_fit[1]
-            slopes.append(slope)
-        
-        if not slopes:
-            return 0.0
-        
-        return float(np.arctan(np.mean(slopes)))
     
     def _invalid_result(self):
         """Return result when detection fails."""
         return {
             'valid': False,
-            'cte': 0.0,
-            'cte_normalized': 0.0,
-            'heading_error': 0.0,
             'lane_center': self.width // 2,
             'left_lane': None,
             'right_lane': None,
@@ -449,6 +429,7 @@ class LaneDetector:
         self.lane_width_pixels = None
         self.prev_left_fit = None
         self.prev_right_fit = None
+        self.avg_lane_width = None
     
     def get_debug_images(self):
         """
@@ -587,8 +568,6 @@ class LaneDetectorDebugWindow:
         """Add detection metrics to panel."""
         y = 50
         info_lines = [
-            f"CTE: {result['cte']:.1f}px ({result['cte_normalized']:.2f})",
-            f"Heading: {np.degrees(result['heading_error']):.1f} deg",
             f"Confidence: {result['confidence']:.2f}",
             f"Valid: {result['valid']}"
         ]

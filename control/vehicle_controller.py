@@ -16,15 +16,9 @@ from control.longitudinal_controller import LongitudinalController
 from config.settings import Settings
 
 # Try to import MPC components
-try:
-    from control.mpc_controller import MPCController, CASADI_AVAILABLE
-    from control.trajectory_generator import TrajectoryGenerator
-    from control.vehicle_model import VehicleModel
-    MPC_AVAILABLE = CASADI_AVAILABLE
-except ImportError as e:
-    print(f"[VehicleController] MPC components not available: {e}")
-    MPC_AVAILABLE = False
-
+# from control.mpc_controller import MPCController
+# from control.trajectory_generator import TrajectoryGenerator
+# from control.vehicle_model import VehicleModel
 
 class VehicleController:
     """
@@ -48,8 +42,8 @@ class VehicleController:
         self.controller_type = controller_type.lower()
         
         if self.controller_type == 'mpc':
-            if not MPC_AVAILABLE:
-                raise RuntimeError("MPC requested but CasADi not available. Install with: pip install casadi")
+            
+            raise NotImplementedError("MPC not tested yet")
             
             print("[VehicleController] Using MPC control")
             self.mpc = MPCController(dt=mpc_dt, horizon=mpc_horizon)
@@ -127,23 +121,28 @@ class VehicleController:
         
         return np.array([x, y, psi, v])
     
-    def run_step(self, target_waypoint, target_speed):
+    def run_step(self, target_speed):
         """
         Compute vehicle control for waypoint following.
         
+        Uses internal waypoints set via set_waypoints().
+        
         Args:
-            target_waypoint: Target carla.Waypoint
             target_speed: Target speed in km/h
             
         Returns:
             carla.VehicleControl object
         """
+        if not self._waypoints or len(self._waypoints) == 0:
+            print("[VehicleController] No waypoints set")
+            return self.emergency_stop()
+            
         if self.controller_type == 'mpc':
-            return self._run_step_mpc(target_waypoint, target_speed)
+            return self._run_step_mpc(target_speed)
         else:
-            return self._run_step_pid(target_waypoint, target_speed)
+            return self._run_step_pid(target_speed)
     
-    def _run_step_mpc(self, target_waypoint, target_speed):
+    def _run_step_mpc(self, target_speed):
         """Run MPC control step."""
         # Get current state
         current_state = self.get_current_state()
@@ -151,9 +150,9 @@ class VehicleController:
         # Convert target speed to m/s
         target_speed_ms = target_speed / 3.6
         
-        # Generate reference trajectory
-        if self._waypoints and len(self._waypoints) > 3:
-            # Use spline-based trajectory from global waypoints
+        # Generate reference trajectory from waypoints
+        if len(self._waypoints) > 3:
+            # Use spline-based trajectory from waypoints
             reference = self.trajectory_gen.generate_reference(
                 current_state, 
                 self._mpc_horizon, 
@@ -161,9 +160,9 @@ class VehicleController:
                 target_speed_ms
             )
         else:
-            # Generate simple reference from single waypoint
+            # Generate simple reference from first waypoint
             reference = self._generate_simple_reference(
-                current_state, target_waypoint, target_speed_ms
+                current_state, self._waypoints[0], target_speed_ms
             )
         
         if reference is None:
@@ -247,14 +246,13 @@ class VehicleController:
         
         return reference
     
-    def _run_step_pid(self, target_waypoint, target_speed):
+    def _run_step_pid(self, target_speed):
         """Run PID control step."""
-        # Pass waypoints to Pure Pursuit if available, otherwise use single target
-        if self._waypoints and len(self._waypoints) > 1:
-            self.lateral.set_waypoints(self._waypoints)
+        # Pass waypoints to Pure Pursuit
+        self.lateral.set_waypoints(self._waypoints)
         
-        # Compute steering using the target waypoint
-        raw_steering = self.lateral.run_step(target_waypoint)
+        # Compute steering using Pure Pursuit (uses internal waypoints)
+        raw_steering = self.lateral.run_step()
         steering = self.smooth_steering(raw_steering)
         
         # Compute throttle/brake
@@ -279,34 +277,6 @@ class VehicleController:
         
         self.previous_steering = steering
         return steering
-    
-    def run_step_from_error(self, cross_track_error, target_speed):
-        """
-        Compute vehicle control from perception error (PID only).
-        
-        Args:
-            cross_track_error: Lateral offset from lane center
-            target_speed: Target speed in km/h
-            
-        Returns:
-            carla.VehicleControl object
-        """
-        if self.controller_type != 'pid':
-            raise RuntimeError("run_step_from_error only available in PID mode")
-        
-        raw_steering = self.lateral.run_step_from_error(cross_track_error)
-        steering = self.smooth_steering(raw_steering)
-        
-        throttle, brake = self.longitudinal.run_step(target_speed)
-        
-        control = carla.VehicleControl()
-        control.steer = float(steering)
-        control.throttle = float(throttle)
-        control.brake = float(brake)
-        control.hand_brake = False
-        control.manual_gear_shift = False
-        
-        return control
     
     def emergency_stop(self):
         """Return control for emergency stop."""

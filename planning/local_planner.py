@@ -5,6 +5,9 @@ Local Planner
 Waypoint-based local path planning.
 """
 
+import math
+import numpy as np
+import carla
 from collections import deque
 from config.settings import Settings
 
@@ -78,6 +81,93 @@ class LocalPlanner:
         
         return waypoints[-1] if waypoints else current_wp
     
+    def generate_waypoints_from_lane_fits(self, lane_detection_result):
+        """
+        Generate waypoints from lane detection polynomial fits.
+        
+        Args:
+            lane_detection_result: Result dict from LaneDetector
+            
+        Returns:
+            List of carla.Waypoint-like objects representing the lane center path
+        """
+        if not lane_detection_result or not lane_detection_result['valid']:
+            return []
+            
+        left_fit = lane_detection_result['left_fit']
+        right_fit = lane_detection_result['right_fit']
+        bev_params = lane_detection_result.get('bev_params')
+        lane_width_bev = lane_detection_result.get('lane_width_bev')
+        
+        if not bev_params:
+            return []
+            
+        width = bev_params['width']
+        height = bev_params['height']
+        x_min, x_max = bev_params['x_range']
+        y_min, y_max = bev_params['y_range']
+        
+        # Generate points
+        waypoints = []
+        
+        # Sample y from bottom (near) to top (far)
+        # Skip the very bottom to avoid noise
+        num_points = 10
+        y_pixels = np.linspace(height - 10, 0, num_points)
+        
+        vehicle_transform = self.vehicle.get_transform()
+        
+        # Helper class for waypoints
+        class PerceptionWaypoint:
+            def __init__(self, location):
+                self.transform = carla.Transform(location)
+        
+        for y_pix in y_pixels:
+            # Calculate x center in pixels
+            x_left = np.polyval(left_fit, y_pix) if left_fit is not None else None
+            x_right = np.polyval(right_fit, y_pix) if right_fit is not None else None
+            
+            if x_left is not None and x_right is not None:
+                x_center_pix = (x_left + x_right) / 2.0
+            elif x_left is not None:
+                # Use detected lane width or default
+                if lane_width_bev is not None:
+                    lw = lane_width_bev
+                else:
+                    # Default 3.5m converted to pixels
+                    meters_per_pixel_x = (x_max - x_min) / width
+                    lw = 3.5 / meters_per_pixel_x
+                x_center_pix = x_left + lw / 2.0
+            elif x_right is not None:
+                if lane_width_bev is not None:
+                    lw = lane_width_bev
+                else:
+                    meters_per_pixel_x = (x_max - x_min) / width
+                    lw = 3.5 / meters_per_pixel_x
+                x_center_pix = x_right - lw / 2.0
+            else:
+                continue
+                
+            # Convert to vehicle coordinates (LaneDetector frame: X=Right, Y=Forward)
+            # x_pix 0 -> x_min, width -> x_max
+            x_ld = x_min + (x_center_pix / width) * (x_max - x_min)
+            
+            # y_pix 0 -> y_max, height -> y_min
+            # Note: y_pix=0 is top (Far/Max), y_pix=height is bottom (Near/Min)
+            y_ld = y_max - (y_pix / height) * (y_max - y_min)
+            
+            # Convert to CARLA vehicle frame (X=Forward, Y=Right)
+            x_carla = y_ld
+            y_carla = x_ld
+            
+            # Transform to world
+            loc_local = carla.Location(x=x_carla, y=y_carla, z=0.0)
+            loc_world = vehicle_transform.transform(loc_local)
+            
+            waypoints.append(PerceptionWaypoint(loc_world))
+            
+        return waypoints
+
     def get_left_lane_waypoint(self):
         """Get waypoint in left lane."""
         current_wp = self.get_current_waypoint()
