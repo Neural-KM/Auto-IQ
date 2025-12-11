@@ -307,12 +307,12 @@ def main():
     parser = argparse.ArgumentParser(description='Spawn test obstacles in CARLA')
     parser.add_argument('--host', default='127.0.0.1', help='CARLA host')
     parser.add_argument('--port', type=int, default=2000, help='CARLA port')
-    parser.add_argument('--distance', type=float, default=20.0, help='Distance ahead (meters)')
+    parser.add_argument('--distance', type=float, nargs='+', default=[20.0], help='Distance(s) ahead (meters)')
     parser.add_argument('--type', choices=['vehicle', 'car', 'truck', 'motorcycle', 
                                            'pedestrian', 'cone', 'barrier', 'cones'],
                        default='vehicle', help='Type of obstacle')
-    parser.add_argument('--lane', choices=['left', 'center', 'right'], 
-                       default='center', help='Which lane to spawn in')
+    parser.add_argument('--lane', choices=['left', 'center', 'right'], nargs='+',
+                       default=['center'], help='Which lane(s) to spawn in')
     parser.add_argument('--persist', action='store_true', 
                        help='Keep obstacle after script exits (default: auto-remove)')
     parser.add_argument('--duration', type=float, default=30.0,
@@ -339,58 +339,67 @@ def main():
     ego_loc = ego.get_location()
     print(f"Ego location: ({ego_loc.x:.1f}, {ego_loc.y:.1f}, {ego_loc.z:.1f})")
     
-    # Get spawn location
-    transform = spawner.get_spawn_transform(ego, args.distance, args.lane)
-    print(f"Spawn location: ({transform.location.x:.1f}, {transform.location.y:.1f}, {transform.location.z:.1f})")
+    spawned_count = 0
     
-    # Calculate actual distance
-    actual_dist = ego_loc.distance(transform.location)
-    print(f"Actual distance from ego: {actual_dist:.1f}m")
+    for dist in args.distance:
+        for lane in args.lane:
+            # Get spawn location
+            transform = spawner.get_spawn_transform(ego, dist, lane)
+            print(f"Spawn location ({dist}m, {lane}): ({transform.location.x:.1f}, {transform.location.y:.1f}, {transform.location.z:.1f})")
+            
+            # Calculate actual distance
+            actual_dist = ego_loc.distance(transform.location)
+            print(f"Actual distance from ego: {actual_dist:.1f}m")
+            
+            # Spawn based on type
+            actor = None
+            if args.type == 'vehicle' or args.type == 'car':
+                actor = spawner.spawn_vehicle(transform, 'car')
+                if actor:
+                    actor.apply_control(carla.VehicleControl(hand_brake=True))
+                    print("Vehicle set to stationary (handbrake on)")
+                    
+            elif args.type == 'truck':
+                actor = spawner.spawn_vehicle(transform, 'truck')
+                if actor:
+                    actor.apply_control(carla.VehicleControl(hand_brake=True))
+                    
+            elif args.type == 'motorcycle':
+                actor = spawner.spawn_vehicle(transform, 'motorcycle')
+                if actor:
+                    actor.apply_control(carla.VehicleControl(hand_brake=True))
+                    
+            elif args.type == 'pedestrian':
+                actor = spawner.spawn_pedestrian(transform)
+                
+            elif args.type == 'cone':
+                actor = spawner.spawn_static_prop(transform, 'cone')
+                
+            elif args.type == 'barrier':
+                actor = spawner.spawn_static_prop(transform, 'barrier')
+                
+            elif args.type == 'cones':
+                spawner.spawn_multiple_cones(ego, dist, count=5)
+                actor = True
+            
+            if actor:
+                spawned_count += 1
+            else:
+                print(f"Failed to spawn obstacle at {dist}m in {lane} lane.")
     
-    # Spawn based on type
-    actor = None
-    if args.type == 'vehicle' or args.type == 'car':
-        actor = spawner.spawn_vehicle(transform, 'car')
-        if actor:
-            actor.apply_control(carla.VehicleControl(hand_brake=True))
-            print("Vehicle set to stationary (handbrake on)")
-            
-    elif args.type == 'truck':
-        actor = spawner.spawn_vehicle(transform, 'truck')
-        if actor:
-            actor.apply_control(carla.VehicleControl(hand_brake=True))
-            
-    elif args.type == 'motorcycle':
-        actor = spawner.spawn_vehicle(transform, 'motorcycle')
-        if actor:
-            actor.apply_control(carla.VehicleControl(hand_brake=True))
-            
-    elif args.type == 'pedestrian':
-        actor = spawner.spawn_pedestrian(transform)
-        
-    elif args.type == 'cone':
-        actor = spawner.spawn_static_prop(transform, 'cone')
-        
-    elif args.type == 'barrier':
-        actor = spawner.spawn_static_prop(transform, 'barrier')
-        
-    elif args.type == 'cones':
-        spawner.spawn_multiple_cones(ego, args.distance, count=5)
-        actor = True
-    
-    if not actor:
-        print("\nFailed to spawn obstacle.")
+    if spawned_count == 0:
+        print("\nFailed to spawn any obstacles.")
         return
     
     if args.persist:
-        print(f"\nObstacle spawned and will PERSIST until manually removed.")
+        print(f"\n{spawned_count} obstacles spawned and will PERSIST until manually removed.")
     else:
-        print(f"\nObstacle spawned! Will be removed in {args.duration}s or on Ctrl+C...")
+        print(f"\n{spawned_count} obstacles spawned! Will be removed in {args.duration}s or on Ctrl+C...")
         try:
             time.sleep(args.duration)
         except KeyboardInterrupt:
             pass
-        print("Removing obstacle...")
+        print("Removing obstacles...")
         cleanup_actors()
         print("Done.")
 

@@ -33,6 +33,7 @@ from sensors.sensor_suite import SensorSuite
 from visualization.tiled_display import TiledDisplay
 from navigation.navigation_manager import NavigationManager
 from perception.lane_detector import LaneDetector, LaneDetectorDebugWindow
+from perception.fake_perception import FakePerception
 from utils.helpers import spawn_vehicle, get_vehicle_telemetry
 
 
@@ -59,6 +60,9 @@ class AutoIQDemo:
         self.lane_detector = None
         self.lane_debug_window = None
         self.lane_detection_result = None
+        
+        # Fake perception
+        self.fake_perception = None
     
     def setup(self):
         """Initialize everything."""
@@ -82,6 +86,10 @@ class AutoIQDemo:
         # Spawn vehicle
         self.vehicle = spawn_vehicle(self.world, spawn_index=self.args.spawn)
         print(f"[AutoIQ] Spawned: {self.vehicle.type_id} at spawn point {self.args.spawn}")
+        
+        # Initialize fake perception
+        self.fake_perception = FakePerception(self.vehicle, self.world, debug=self.args.draw_on_simulator)
+        print("[AutoIQ] Fake perception initialized")
         
         # Setup sensors from config
         self.sensors = SensorSuite(self.vehicle, self.world)
@@ -205,6 +213,19 @@ class AutoIQDemo:
     
     def run_step(self):
         """Execute one simulation step."""
+        # Run fake perception
+        if self.fake_perception:
+            obstacles = self.fake_perception.detect_obstacles(radius=50.0)
+            if obstacles:
+                print(f"\n[FakePerception] Detected {len(obstacles)} obstacles:")
+                for obs in obstacles:
+                    bbox = obs['bounding_box']
+                    rel_loc = bbox['relative_location']
+                    dims = bbox['dimensions']
+                    print(f"  - {obs['type']} (ID: {obs['id']}) at {obs['distance']:.1f}m | Speed: {obs['speed']:.1f} m/s")
+                    print(f"    Relative Pos: (x={rel_loc.x:.2f}, y={rel_loc.y:.2f}, z={rel_loc.z:.2f})")
+                    print(f"    Dimensions:   (l={dims.x:.2f}, w={dims.y:.2f}, h={dims.z:.2f})")
+        
         # Run lane detection pipeline first so nav manager has latest data
         if self.lane_detector:
             semantic_sensor = self.sensors.get_sensor('semantic')
