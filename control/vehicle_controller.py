@@ -15,10 +15,10 @@ from control.pure_pursuit_controller import PurePursuitController
 from control.longitudinal_controller import LongitudinalController
 from config.settings import Settings
 
-# Try to import MPC components
-# from control.mpc_controller import MPCController
-# from control.trajectory_generator import TrajectoryGenerator
-# from control.vehicle_model import VehicleModel
+# MPC components
+from control.mpc_controller import MPCController
+from control.trajectory_generator import TrajectoryGenerator
+from control.vehicle_model import VehicleModel
 
 class VehicleController:
     """
@@ -42,12 +42,10 @@ class VehicleController:
         self.controller_type = controller_type.lower()
         
         if self.controller_type == 'mpc':
-            
-            raise NotImplementedError("MPC not tested yet")
-            
-            print("[VehicleController] Using MPC control")
+            raise NotImplementedError("MPC controller is currently disabled.")
+            print("[VehicleController] Using MPC control (path tracking, no obstacles)")
             self.mpc = MPCController(dt=mpc_dt, horizon=mpc_horizon)
-            self.trajectory_gen = TrajectoryGenerator()
+            self.trajectory_gen = TrajectoryGenerator(target_speed=Settings.TARGET_SPEED)
             self.model = VehicleModel()
             self._mpc_horizon = mpc_horizon
             self._mpc_dt = mpc_dt

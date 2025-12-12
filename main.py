@@ -55,6 +55,8 @@ class AutoIQDemo:
         self.target_speed = args.speed
         self.running = True
         self.layout_mode = 'default'  # 'default', 'minimal', 'debug'
+        self.enable_lane_detection = not args.no_lane_detection
+        self.visualize_options = args.visualize
         
         # Lane detection
         self.lane_detector = None
@@ -88,7 +90,8 @@ class AutoIQDemo:
         print(f"[AutoIQ] Spawned: {self.vehicle.type_id} at spawn point {self.args.spawn}")
         
         # Initialize fake perception
-        self.fake_perception = FakePerception(self.vehicle, self.world, debug=self.args.draw_on_simulator)
+        fake_perception_debug = ('all' in self.args.visualize) or ('bbox' in self.args.visualize)
+        self.fake_perception = FakePerception(self.vehicle, self.world, debug=fake_perception_debug)
         print("[AutoIQ] Fake perception initialized")
         
         # Setup sensors from config
@@ -98,10 +101,11 @@ class AutoIQDemo:
         
         # Setup navigation manager with sensor integration
         self.nav_manager = NavigationManager(
-            self.vehicle, self.world, 
+            vehicle=self.vehicle, 
+            world=self.world, 
             sensor_suite=self.sensors,
-            draw_on_simulator=self.args.draw_on_simulator,
-            controller_type=self.args.controller
+            controller_type=self.args.controller,
+            visualize_options=self.args.visualize
         )
         self.nav_manager.set_target_speed(self.target_speed)
         
@@ -128,7 +132,7 @@ class AutoIQDemo:
         
         # Setup lane detection
         semantic_sensor = self.sensors.get_sensor('semantic')
-        if semantic_sensor:
+        if self.enable_lane_detection and semantic_sensor:
             # Get camera parameters for proper BEV transform
             camera_fov = semantic_sensor.fov
             camera_pitch = semantic_sensor.position.get('pitch', 0.0)
@@ -144,7 +148,10 @@ class AutoIQDemo:
             self.lane_debug_window = LaneDetectorDebugWindow("Lane Detection Debug")
             print(f"[AutoIQ] Lane detector initialized (FOV={camera_fov}°, pitch={camera_pitch}°, height={camera_height}m)")
         else:
-            print("[AutoIQ] Warning: No semantic sensor found, lane detection disabled")
+            if not self.enable_lane_detection:
+                print("[AutoIQ] Lane detection disabled via CLI flag")
+            else:
+                print("[AutoIQ] Warning: No semantic sensor found, lane detection disabled")
         
         print("[AutoIQ] Ready!")
     
@@ -227,7 +234,7 @@ class AutoIQDemo:
                     print(f"    Dimensions:   (l={dims.x:.2f}, w={dims.y:.2f}, h={dims.z:.2f})")
         
         # Run lane detection pipeline first so nav manager has latest data
-        if self.lane_detector:
+        if self.enable_lane_detection and self.lane_detector:
             semantic_sensor = self.sensors.get_sensor('semantic')
             if semantic_sensor:
                 semantic_image = semantic_sensor.get_data()
@@ -252,8 +259,8 @@ class AutoIQDemo:
             self.vehicle.apply_control(carla.VehicleControl(brake=0.5))
         
         # Draw sensor markers in simulator
-        self.sensors.draw_sensor_markers()
-        
+        if self.visualize_options and ('all' in self.visualize_options or 'sensors' in self.visualize_options):
+            self.sensors.draw_sensor_markers()
         return control
     
     def render(self, control):
@@ -459,11 +466,18 @@ def main():
     parser.add_argument('--spawn', type=int, default=0, help='Spawn point index for vehicle (default: 0)')
     parser.add_argument('--dest', type=int, default=None, help='Destination spawn point index')
     parser.add_argument('--list', action='store_true', help='List spawn points and exit')
-    parser.add_argument('--draw-on-simulator', action='store_true',
-                        help='Draw debug waypoints and markers in the simulator world')
+    parser.add_argument('--visualize', type=str, default='',
+                        help='Comma-separated items to draw in simulator (e.g., "route,waypoints,bbox,all")')
+    parser.add_argument('--no-lane-detection', action='store_true',
+                        help='Disable lane detection pipeline (use map waypoints only)')
     parser.add_argument('--controller', type=str, default='mpc',
                         choices=['mpc', 'pid'], help='Type of vehicle controller to use (default: mpc)')
     args = parser.parse_args()
+
+    # Parse visualize options
+    args.visualize = set([item.strip().lower() for item in args.visualize.split(',') if item.strip()])
+    if 'all' in args.visualize:
+        args.visualize = {'all'}
     
     # Parse resolution and ensure minimum size for tiled display
     req_width, req_height = [int(x) for x in args.res.split('x')]
@@ -504,6 +518,7 @@ def main():
     except Exception as e:
         print(f"[AutoIQ] Error: {e}")
     finally:
+
         demo.cleanup()
 
 

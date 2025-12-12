@@ -39,6 +39,9 @@ class BehaviorPlanner:
         self.lane_change_waypoints = []
         self.lane_change_index = 0
         self.original_lane_id = None
+        
+        # Road context
+        self.lane_context = None
     
     def get_state(self):
         """Get current behavior state."""
@@ -58,6 +61,9 @@ class BehaviorPlanner:
         Returns:
             Target waypoint for current behavior
         """
+        # Update lane context
+        self.lane_context = self.local_planner.get_lane_context()
+        
         if self.state == BehaviorState.LANE_FOLLOWING:
             return self._handle_lane_following(obstacle_detection)
         

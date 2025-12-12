@@ -28,8 +28,8 @@ class NavigationManager:
     - Vehicle Controller: Low-level vehicle control (MPC or PID)
     """
     
-    def __init__(self, vehicle, world, sensor_suite=None, draw_on_simulator=False,
-                 controller_type='mpc'):
+    def __init__(self, vehicle, world, sensor_suite=None,
+                 controller_type='mpc', visualize_options=None):
         """
         Initialize navigation manager.
         
@@ -37,14 +37,14 @@ class NavigationManager:
             vehicle: CARLA vehicle actor
             world: CARLA world instance
             sensor_suite: Optional SensorSuite instance for perception
-            draw_on_simulator: Whether to draw debug objects in the simulator
             controller_type: 'mpc' for Model Predictive Control, 'pid' for PID control
+            visualize_options: Set of visualization tags to draw in simulator
         """
         self.vehicle = vehicle
         self.world = world
         self.map = world.get_map()
         self.sensor_suite = sensor_suite
-        self.draw_on_simulator = draw_on_simulator
+        self.visualize_options = set(visualize_options) if visualize_options else set()
         self.controller_type = controller_type
         
         # Initialize planners
@@ -100,7 +100,7 @@ class NavigationManager:
             self._route_planned = True
             self.is_navigating = False  # Don't start yet
             self.behavior_planner.reset()  # Reset behavior state for new route
-            if self.draw_on_simulator:
+            if self._should_draw('route'):
                 self._draw_route()
             print("[Navigation] Route planned. Press N to start driving.")
         else:
@@ -147,7 +147,7 @@ class NavigationManager:
             self._route_planned = True
             self.is_navigating = True
             self.behavior_planner.reset()  # Reset behavior state for new route
-            if self.draw_on_simulator:
+            if self._should_draw('route'):
                 self._draw_route()
         else:
             self.is_navigating = False
@@ -167,7 +167,7 @@ class NavigationManager:
         success = self.global_planner.set_destination(origin, self.destination)
         
         if success:
-            if self.draw_on_simulator:
+            if self._should_draw('route'):
                 self._draw_route()
             print("[Navigation] Route replanned from current position")
         
@@ -198,8 +198,13 @@ class NavigationManager:
     def cleanup(self):
         """Clean up navigation resources and debug drawings."""
         self._clear_debug_drawings()
-        self.is_navigating = False
-        self._route_planned = False
+
+    def _should_draw(self, tag):
+        """Check if a specific visualization tag should be drawn."""
+
+        if not self.visualize_options or 'all' in self.visualize_options:
+            return True
+        return tag in self.visualize_options
     
     def _clear_route(self):
         """Clear the drawn route by not refreshing it."""
@@ -281,7 +286,7 @@ class NavigationManager:
         vehicle_location = self.vehicle.get_location()
         
         # Refresh route visualization (short lifetime so it disappears when script stops)
-        if self.draw_on_simulator and self._route_drawn:
+        if self._route_drawn:
             self._draw_route()
         
         # Check if destination reached
@@ -335,8 +340,7 @@ class NavigationManager:
         self.controller.set_obstacles(self._convert_obstacles_to_world())
         
         # Draw debug visualizations
-        if self.draw_on_simulator:
-            self._draw_debug_visualizations(waypoints, vehicle_location)
+        self.handle_visualization(waypoints, vehicle_location)
         
         return self.controller.run_step(effective_speed)
     
@@ -396,10 +400,11 @@ class NavigationManager:
         
         return True
     
-    def _draw_debug_visualizations(self, waypoints, vehicle_location):
+    def handle_visualization(self, waypoints, vehicle_location):
         """Draw all debug visualizations."""
         # Draw waypoints
-        self._draw_waypoints(waypoints)
+        if self._should_draw('waypoints') or self._should_draw('route'):
+            self._draw_waypoints(waypoints)
         
         # Draw perception mode indicator
         if self._should_use_perception(vehicle_location):
@@ -611,17 +616,6 @@ class NavigationManager:
             loc,
             size=0.25,
             color=carla.Color(0, 255, 255),  # Cyan for Pure Pursuit target
-            life_time=0.1
-        )
-        
-        # Draw a line from vehicle to lookahead point
-        vehicle_loc = self.vehicle.get_location()
-        vehicle_loc.z += 0.5
-        self.world.debug.draw_line(
-            vehicle_loc,
-            loc,
-            thickness=0.05,
-            color=carla.Color(0, 200, 200),  # Slightly darker cyan
             life_time=0.1
         )
     

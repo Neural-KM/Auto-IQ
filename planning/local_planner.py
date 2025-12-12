@@ -168,6 +168,65 @@ class LocalPlanner:
             
         return waypoints
 
+    def get_lane_context(self):
+        """
+        Get information about all lanes on the current road section.
+        
+        Returns:
+            dict: {
+                'current_lane_id': int,
+                'left_lanes': int,  # Number of lanes to the left
+                'right_lanes': int, # Number of lanes to the right
+                'total_lanes': int,
+                'lane_ids': list    # List of all lane IDs from left to right
+            }
+        """
+        current_wp = self.get_current_waypoint()
+        current_lane_id = current_wp.lane_id
+        
+        # Check left
+        left_lanes = 0
+        left_ids = []
+        wp = current_wp
+        while True:
+            left_wp = wp.get_left_lane()
+            # Check if left lane exists, is driving type, and is in same direction (same sign)
+            if (left_wp and 
+                left_wp.lane_type == carla.LaneType.Driving and 
+                left_wp.lane_id * current_lane_id > 0):
+                
+                left_lanes += 1
+                left_ids.append(left_wp.lane_id)
+                wp = left_wp
+            else:
+                break
+                
+        # Check right
+        right_lanes = 0
+        right_ids = []
+        wp = current_wp
+        while True:
+            right_wp = wp.get_right_lane()
+            # Check if right lane exists, is driving type, and is in same direction (same sign)
+            if (right_wp and 
+                right_wp.lane_type == carla.LaneType.Driving and 
+                right_wp.lane_id * current_lane_id > 0):
+                
+                right_lanes += 1
+                right_ids.append(right_wp.lane_id)
+                wp = right_wp
+            else:
+                break
+                
+        return {
+            'current_lane_id': current_lane_id,
+            'left_lanes': left_lanes,
+            'right_lanes': right_lanes,
+            'total_lanes': 1 + left_lanes + right_lanes,
+            'left_lane_ids': left_ids,
+            'right_lane_ids': right_ids
+        }
+
     def get_left_lane_waypoint(self):
         """Get waypoint in left lane."""
         current_wp = self.get_current_waypoint()
