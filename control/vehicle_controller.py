@@ -42,7 +42,6 @@ class VehicleController:
         self.controller_type = controller_type.lower()
         
         if self.controller_type == 'mpc':
-            raise NotImplementedError("MPC controller is currently disabled.")
             print("[VehicleController] Using MPC control (path tracking, no obstacles)")
             self.mpc = MPCController(dt=mpc_dt, horizon=mpc_horizon)
             self.trajectory_gen = TrajectoryGenerator(target_speed=Settings.TARGET_SPEED)
@@ -81,17 +80,18 @@ class VehicleController:
         Set waypoints for trajectory generation.
         
         Args:
-            waypoints: List of carla.Waypoint or (x, y) tuples
+            waypoints: List of carla.Waypoint
         """
-        self._waypoints = waypoints
+        # Convert to (x, y) tuples
+        self._waypoints = [(wp.transform.location.x, wp.transform.location.y) for wp in waypoints] if waypoints else []
         
-        if self.controller_type == 'mpc' and waypoints:
-            success = self.trajectory_gen.set_waypoints(waypoints)
+        if self.controller_type == 'mpc' and self._waypoints:
+            success = self.trajectory_gen.set_waypoints(self._waypoints)
             if not success:
                 print("[VehicleController] Failed to set waypoints for MPC")
-        elif self.controller_type == 'pid' and waypoints:
+        elif self.controller_type == 'pid' and self._waypoints:
             # Pass waypoints to Pure Pursuit controller
-            self.lateral.set_waypoints(waypoints)
+            self.lateral.set_waypoints(self._waypoints)
     
     def set_obstacles(self, obstacles):
         """
@@ -145,6 +145,9 @@ class VehicleController:
         # Get current state
         current_state = self.get_current_state()
         
+        # DEBUG: Print vehicle state
+        print(f"[MPC] Vehicle state: x={current_state[0]:.1f}, y={current_state[1]:.1f}, yaw={np.degrees(current_state[2]):.1f}°, v={current_state[3]:.1f}m/s")
+        
         # Convert target speed to m/s
         target_speed_ms = target_speed / 3.6
         
@@ -167,6 +170,14 @@ class VehicleController:
             print("[VehicleController] No reference trajectory available")
             return self.emergency_stop()
         
+        # DEBUG: Print reference trajectory info
+        print(f"[MPC] Reference trajectory: {len(reference)} points")
+        print(f"[MPC] First ref point: x={reference[0][0]:.1f}, y={reference[0][1]:.1f}, psi={np.degrees(reference[0][2]):.1f}°")
+        print(f"[MPC] Last ref point: x={reference[-1][0]:.1f}, y={reference[-1][1]:.1f}, psi={np.degrees(reference[-1][2]):.1f}°")
+        
+        # Store reference for visualization
+        self._last_reference = reference
+        
         # Solve MPC
         optimal_control = self.mpc.solve(current_state, reference, self._obstacles)
         
@@ -176,6 +187,10 @@ class VehicleController:
         
         # Convert MPC output to CARLA control
         steering_rad, accel = optimal_control
+        
+        # Negate steering for CARLA: MPC uses standard coords where +steering = left turn,
+        # but CARLA uses +steer = right turn
+        steering_rad = -steering_rad
         
         # Convert steering angle to normalized steering [-1, 1]
         max_steer_rad = self.model.MAX_STEER
@@ -314,7 +329,8 @@ class VehicleController:
             'solve_time_ms': self.mpc.get_avg_solve_time(),
             'predicted_trajectory': self.mpc.get_predicted_trajectory(),
             'planned_controls': self.mpc.get_planned_controls(),
-            'num_obstacles': len(self._obstacles)
+            'num_obstacles': len(self._obstacles),
+            'reference_trajectory': getattr(self, '_last_reference', None)
         }
     
     def get_pure_pursuit_info(self):

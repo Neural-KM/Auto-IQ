@@ -17,13 +17,8 @@ Control: [delta, a]
 """
 
 import numpy as np
-
-try:
-    import casadi as ca
-    CASADI_AVAILABLE = True
-except ImportError:
-    CASADI_AVAILABLE = False
-    print("[VehicleModel] CasADi not available - MPC will not work")
+import casadi as ca
+CASADI_AVAILABLE = True
 
 
 class VehicleModel:

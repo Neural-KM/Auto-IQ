@@ -1,37 +1,13 @@
-"""
-Trajectory Generator
-====================
-
-Generates smooth reference trajectories from sparse waypoints using spline interpolation.
-Converts A* waypoints into dense, differentiable paths suitable for MPC.
-
-Output: Dense reference states [x_ref, y_ref, psi_ref, v_ref] for prediction horizon.
-"""
+"""Minimal trajectory generator using SciPy splines (splprep/splev)."""
 
 import numpy as np
-from scipy.interpolate import CubicSpline, splprep, splev
-from scipy.ndimage import gaussian_filter1d
+from scipy.interpolate import splprep, splev
 
 
 class TrajectoryGenerator:
-    """
-    Generates smooth trajectories from sparse waypoints.
-    
-    Takes waypoints from global planner (A*) and produces:
-    1. Smooth path via cubic spline interpolation
-    2. Heading angles computed from path tangent
-    3. Velocity profile based on curvature
-    """
+    """Generate smooth path and reference states directly via SciPy."""
     
     def __init__(self, target_speed=30.0, min_speed=5.0, max_curvature_speed=15.0):
-        """
-        Initialize trajectory generator.
-        
-        Args:
-            target_speed: Default target speed in km/h
-            min_speed: Minimum speed in km/h (for sharp turns)
-            max_curvature_speed: Speed at maximum curvature in km/h
-        """
         self.target_speed = target_speed / 3.6  # Convert to m/s
         self.min_speed = min_speed / 3.6
         self.max_curvature_speed = max_curvature_speed / 3.6
@@ -46,86 +22,52 @@ class TrajectoryGenerator:
         self._waypoints = None
         
     def set_waypoints(self, waypoints):
-        """
-        Set waypoints and compute spline.
-        
-        Args:
-            waypoints: List of carla.Waypoint or (x, y) tuples or carla.Location
-        """
-        # Extract x, y coordinates
-        points = []
-        for wp in waypoints:
-            if hasattr(wp, 'transform'):
-                # carla.Waypoint
-                points.append((wp.transform.location.x, wp.transform.location.y))
-            elif hasattr(wp, 'x'):
-                # carla.Location or similar
-                points.append((wp.x, wp.y))
-            else:
-                # Tuple
-                points.append((wp[0], wp[1]))
-        
-        if len(points) < 4:
-            print(f"[TrajectoryGen] Not enough waypoints ({len(points)}), need at least 4")
+        """Fit a parametric B-spline (splprep) to provided waypoints."""
+        if len(waypoints) < 4:
+            print(f"[TrajectoryGen] Not enough waypoints ({len(waypoints)}), need at least 4")
             self._spline = None
             return False
         
-        self._waypoints = np.array(points)
-        
+        self._waypoints = np.array(waypoints)
+        print(f"[TrajectoryGen] Waypoint List: {self._waypoints}")
         # Fit parametric spline
-        try:
-            # Remove duplicate points
-            unique_points = [self._waypoints[0]]
-            for p in self._waypoints[1:]:
-                if np.linalg.norm(p - unique_points[-1]) > 0.1:
-                    unique_points.append(p)
-            
-            if len(unique_points) < 4:
-                print("[TrajectoryGen] Not enough unique waypoints after deduplication")
-                return False
-            
-            self._waypoints = np.array(unique_points)
-            
-            # Parametric spline (u parameter from 0 to 1)
-            tck, u = splprep([self._waypoints[:, 0], self._waypoints[:, 1]], 
-                            s=self.spline_smoothing, k=min(3, len(self._waypoints)-1))
-            self._spline = tck
-            
-            # Compute approximate path length
-            u_dense = np.linspace(0, 1, 1000)
-            x_dense, y_dense = splev(u_dense, tck)
-            distances = np.sqrt(np.diff(x_dense)**2 + np.diff(y_dense)**2)
-            self._spline_length = np.sum(distances)
-            
-            print(f"[TrajectoryGen] Spline fitted: {len(self._waypoints)} waypoints, "
-                  f"{self._spline_length:.1f}m path length")
-            return True
-            
-        except Exception as e:
-            print(f"[TrajectoryGen] Spline fitting failed: {e}")
-            self._spline = None
-            return False
-    
-    def generate_reference(self, current_pos, horizon_length, dt, target_speed=None):
-        """
-        Generate reference trajectory for MPC horizon.
+        # Remove duplicate points
+        unique_points = [self._waypoints[0]]
+        for p in self._waypoints[1:]:
+            if np.linalg.norm(p - unique_points[-1]) > 0.1:
+                unique_points.append(p)
         
-        Args:
-            current_pos: Current position (x, y) or [x, y, psi, v]
-            horizon_length: Number of steps in prediction horizon (N)
-            dt: Time step (seconds)
-            target_speed: Override target speed (m/s), None uses default
-            
-        Returns:
-            Reference trajectory as numpy array [N+1, 4] with columns [x, y, psi, v]
-            Returns None if no valid trajectory
-        """
+        if len(unique_points) < 4:
+            print("[TrajectoryGen] Not enough unique waypoints after deduplication")
+            return False
+        
+        self._waypoints = np.array(unique_points)
+        
+        # Parametric spline (u parameter from 0 to 1)
+        tck, _ = splprep([self._waypoints[:, 0], self._waypoints[:, 1]], 
+                        s=self.spline_smoothing, k=min(3, len(self._waypoints)-1))
+        self._spline = tck
+        
+        # Compute approximate path length
+        u_dense = np.linspace(0, 1, 1000)
+        x_dense, y_dense = splev(u_dense, tck)
+        distances = np.sqrt(np.diff(x_dense)**2 + np.diff(y_dense)**2)
+        self._spline_length = np.sum(distances)
+        
+        print(f"[TrajectoryGen] Spline fitted: {len(self._waypoints)} pts, length={self._spline_length:.1f}m")
+        return True
+
+    def generate_reference(self, current_pos, horizon_length, dt, target_speed=None):
+        """Return [N+1,4] reference states [x,y,psi,v] sampled along the spline."""
         if self._spline is None:
             return None
         
-        # Get current position
-        if len(current_pos) >= 2:
+        # Get current position and heading
+        if len(current_pos) >= 4:
+            curr_x, curr_y, curr_psi, curr_v = current_pos[0], current_pos[1], current_pos[2], current_pos[3]
+        elif len(current_pos) >= 2:
             curr_x, curr_y = current_pos[0], current_pos[1]
+            curr_psi, curr_v = 0, 0
         else:
             return None
         
@@ -134,10 +76,13 @@ class TrajectoryGenerator:
         # Find closest point on spline
         u_start = self._find_closest_u(curr_x, curr_y)
         
+        # DEBUG: Print spline direction info
+        dx, dy = splev(u_start, self._spline, der=1)
+        spline_heading_raw = np.arctan2(dy, dx)
+        print(f"[TrajectoryGen] u_start={u_start:.3f}, raw_spline_heading={np.degrees(spline_heading_raw):.1f}°, tangent=({dx:.2f}, {dy:.2f})")
+        print(f"Checking EVAL{splev(1, self._spline)}")
+
         # Generate reference points along spline
-        total_distance = speed * dt * (horizon_length + 5)  # Extra buffer
-        
-        # Sample points along path
         reference = []
         u_current = u_start
         
@@ -150,6 +95,7 @@ class TrajectoryGenerator:
             
             # Compute heading from spline tangent
             dx, dy = splev(u_current, self._spline, der=1)
+            # Use standard arctan2 - same convention as CARLA's yaw
             psi = np.arctan2(dy, dx)
             
             # Compute curvature for velocity profile
@@ -168,12 +114,18 @@ class TrajectoryGenerator:
         return np.array(reference)
     
     def _find_closest_u(self, x, y, num_samples=100):
-        """Find spline parameter u closest to point (x, y)."""
+        """Find spline parameter u closest to (x,y) by sampling."""
         u_samples = np.linspace(0, 1, num_samples)
         x_samples, y_samples = splev(u_samples, self._spline)
         
         distances = (x_samples - x)**2 + (y_samples - y)**2
         closest_idx = np.argmin(distances)
+        min_dist = np.sqrt(distances[closest_idx])
+        
+        # DEBUG: Print closest point info
+        print(f"[TrajectoryGen] Closest point: u={u_samples[closest_idx]:.3f}, "
+              f"spline_xy=({x_samples[closest_idx]:.1f}, {y_samples[closest_idx]:.1f}), "
+              f"vehicle_xy=({x:.1f}, {y:.1f}), dist={min_dist:.1f}m")
         
         # Refine search around closest point
         if closest_idx > 0 and closest_idx < num_samples - 1:
@@ -181,12 +133,13 @@ class TrajectoryGenerator:
                                 u_samples[closest_idx + 1], 50)
             x_fine, y_fine = splev(u_fine, self._spline)
             distances_fine = (x_fine - x)**2 + (y_fine - y)**2
-            return u_fine[np.argmin(distances_fine)]
+            best_idx = np.argmin(distances_fine)
+            return u_fine[best_idx]
         
         return u_samples[closest_idx]
     
     def _advance_u(self, u_start, distance):
-        """Advance u parameter by approximately 'distance' meters along spline."""
+        """Advance parameter u by ~distance meters using path length ratio."""
         if distance <= 0:
             return u_start
         
@@ -197,7 +150,7 @@ class TrajectoryGenerator:
         return min(u_new, 1.0)
     
     def _speed_from_curvature(self, curvature, max_speed):
-        """Compute safe speed based on curvature."""
+        """Speed profile based on curvature (simple linear rule)."""
         # Higher curvature = lower speed
         # curvature of 0.1 rad/m is a ~10m radius turn
         if curvature < 0.01:
@@ -210,7 +163,7 @@ class TrajectoryGenerator:
             return max_speed * (1 - t) + self.min_speed * t
     
     def get_path_points(self, num_points=100):
-        """Get dense path points for visualization."""
+        """Sample XY path points from the spline for visualization."""
         if self._spline is None:
             return None
         

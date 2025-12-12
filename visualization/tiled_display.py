@@ -328,6 +328,15 @@ class TelemetryPanel(Panel):
             road_text = self.font.render(f"Road: {road_id} | Lane: {lane_id}", True, (200, 200, 200))
             self.surface.blit(road_text, (10, y))
             y += 22
+
+            # Location (car position)
+            loc = data.get('location') or {}
+            lx = loc.get('x', 0.0)
+            ly = loc.get('y', 0.0)
+            lz = loc.get('z', 0.0)
+            loc_text = self.font.render(f"Pos: x={lx:7.1f}  y={ly:7.1f}  z={lz:5.1f}", True, (180, 220, 255))
+            self.surface.blit(loc_text, (10, y))
+            y += 22
             
             # Control
             control = data.get('control')

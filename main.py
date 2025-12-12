@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'carla'))
 
 import carla
 import pygame
-from pygame.locals import K_ESCAPE, K_q, K_UP, K_DOWN, K_SPACE, K_LEFT, K_RIGHT, K_b, K_g, K_n
+from pygame.locals import K_ESCAPE, K_q, K_UP, K_DOWN, K_SPACE, K_LEFT, K_RIGHT, K_b, K_g, K_n, K_i
 import numpy as np
 import cv2
 
@@ -88,6 +88,14 @@ class AutoIQDemo:
         # Spawn vehicle
         self.vehicle = spawn_vehicle(self.world, spawn_index=self.args.spawn)
         print(f"[AutoIQ] Spawned: {self.vehicle.type_id} at spawn point {self.args.spawn}")
+        # Print initial pose and speed
+        try:
+            transform = self.vehicle.get_transform()
+            velocity = self.vehicle.get_velocity()
+            speed_ms = (velocity.x**2 + velocity.y**2 + velocity.z**2)**0.5
+            print(f"[AutoIQ] Initial vehicle pose: x={transform.location.x:.2f}, y={transform.location.y:.2f}, yaw={transform.rotation.yaw:.2f}°, v={speed_ms:.2f} m/s")
+        except Exception as e:
+            print(f"[AutoIQ] Warning: couldn't read initial vehicle pose: {e}")
         
         # Initialize fake perception
         fake_perception_debug = ('all' in self.args.visualize) or ('bbox' in self.args.visualize)
@@ -101,8 +109,7 @@ class AutoIQDemo:
         
         # Setup navigation manager with sensor integration
         self.nav_manager = NavigationManager(
-            vehicle=self.vehicle, 
-            world=self.world, 
+            self.vehicle, self.world, 
             sensor_suite=self.sensors,
             controller_type=self.args.controller,
             visualize_options=self.args.visualize
@@ -261,6 +268,7 @@ class AutoIQDemo:
         # Draw sensor markers in simulator
         if self.visualize_options and ('all' in self.visualize_options or 'sensors' in self.visualize_options):
             self.sensors.draw_sensor_markers()
+        
         return control
     
     def render(self, control):
@@ -478,6 +486,7 @@ def main():
     args.visualize = set([item.strip().lower() for item in args.visualize.split(',') if item.strip()])
     if 'all' in args.visualize:
         args.visualize = {'all'}
+    args.draw_on_simulator = bool(args.visualize)  # backward compat for downstream checks
     
     # Parse resolution and ensure minimum size for tiled display
     req_width, req_height = [int(x) for x in args.res.split('x')]
@@ -518,7 +527,6 @@ def main():
     except Exception as e:
         print(f"[AutoIQ] Error: {e}")
     finally:
-
         demo.cleanup()
 
 

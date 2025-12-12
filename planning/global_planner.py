@@ -13,11 +13,7 @@ from collections import deque
 
 import carla
 import numpy as np
-
-try:
-    import networkx as nx
-except ImportError:
-    raise RuntimeError('networkx required. pip install networkx')
+import networkx as nx
 
 
 class RoadOption(IntEnum):

@@ -7,12 +7,15 @@ Integrates global planning, behavior planning, and obstacle avoidance.
 Supports both MPC and PID control strategies.
 """
 
+import math
+import numpy as np
 import carla
 from planning.global_planner import GlobalPlanner, RoadOption
 from planning.local_planner import LocalPlanner
 from planning.behavior_planner import BehaviorPlanner, BehaviorState
 from perception.obstacle_detector import ObstacleDetector
 from control.vehicle_controller import VehicleController
+from visualization.live_2d_visualizer import visualizer as live_visualizer
 from config.settings import Settings
 
 
@@ -77,6 +80,13 @@ class NavigationManager:
         self._mpc_lookahead_waypoints = 30  # Number of waypoints to feed MPC
         
         print(f"[Navigation] Initialized with {controller_type.upper()} controller")
+        # Start live visualizer if requested
+        if 'live' in self.visualize_options or 'all' in self.visualize_options:
+            try:
+                live_visualizer.start()
+                print("[Navigation] Live 2D visualizer started")
+            except Exception as e:
+                print(f"[Navigation] Failed to start live visualizer: {e}")
     
     def update_perception(self, lane_detection_result):
         """Update lane detection result from perception system."""
@@ -198,6 +208,11 @@ class NavigationManager:
     def cleanup(self):
         """Clean up navigation resources and debug drawings."""
         self._clear_debug_drawings()
+        # Stop live visualizer if running
+        try:
+            live_visualizer.stop()
+        except Exception:
+            pass
 
     def _should_draw(self, tag):
         """Check if a specific visualization tag should be drawn."""
@@ -418,6 +433,7 @@ class NavigationManager:
         # Draw MPC trajectory if using MPC
         if self.controller_type == 'mpc':
             self._draw_mpc_trajectory()
+            self._draw_coordinate_axes()  # Debug: show coordinate system
         
         # Draw Pure Pursuit lookahead point if using PID
         if self.controller_type == 'pid':
@@ -426,6 +442,30 @@ class NavigationManager:
         # Draw obstacle detection visualization
         if self._obstacle_detection and self._obstacle_detection.get('obstacle_detected'):
             self._draw_obstacle_warning()
+
+        # Live 2D visualizer update
+        if 'live' in self.visualize_options or 'all' in self.visualize_options:
+            try:
+                vehicle_state = self.controller.get_current_state()
+                ref = None
+                pred = None
+                if self.controller.is_using_mpc():
+                    mpc_info = self.controller.get_mpc_info()
+                    if mpc_info:
+                        ref = mpc_info.get('reference_trajectory', None)
+                        pred = mpc_info.get('predicted_trajectory', None)
+                # Convert waypoints (carla.Waypoint) to simple (x,y) tuples for visualizer
+                wp_pairs = None
+                if waypoints:
+                    wp_pairs = []
+                    for w in waypoints:
+                        if hasattr(w, 'transform') and w.transform is not None:
+                            wp_pairs.append((w.transform.location.x, w.transform.location.y))
+                        elif isinstance(w, (tuple, list)) and len(w) >= 2:
+                            wp_pairs.append((float(w[0]), float(w[1])))
+                live_visualizer.update(vehicle_state, wp_pairs, ref, pred)
+            except Exception as e:
+                print(f"[Navigation] Live visualizer update failed: {e}")
     
     def _get_lookahead_waypoints(self):
         """
@@ -565,17 +605,164 @@ class NavigationManager:
         predicted_trajectory = mpc_info.get('predicted_trajectory')
         if predicted_trajectory is None or len(predicted_trajectory) == 0:
             return
+
+        # Print solve time
+        solve_time = mpc_info.get('solve_time_ms', 0)
+        print(f"[MPC] Solve time: {solve_time:.2f} ms")
+
+        # Print a concise snapshot of XY + heading coordinates
+        try:
+            max_print = min(10, len(predicted_trajectory))
+            lines = [
+                f"{i:02d}: x={float(state[0]):7.2f}, y={float(state[1]):7.2f}, psi={float(state[2])*180/3.14159:6.1f}°"
+                for i, state in enumerate(predicted_trajectory[:max_print])
+            ]
+            print(f"[MPC] Predicted trajectory (first {max_print}/{len(predicted_trajectory)}):\n  " + "\n  ".join(lines))
+        except Exception:
+            pass
         
-        # Draw predicted trajectory points
+        # Draw predicted trajectory points with longer lifetime
+        life_time = 2.0  # 2 seconds so we can see the path clearly
         for i, state in enumerate(predicted_trajectory):
-            if i % 2 == 0:  # Draw every other point for clarity
-                loc = carla.Location(x=state[0], y=state[1], z=0.5)
+            loc = carla.Location(x=state[0], y=state[1], z=0.5)
+            # Color gradient: start=bright green, end=dark green
+            intensity = int(255 * (1 - i / len(predicted_trajectory)))
+            self.world.debug.draw_point(
+                loc,
+                size=0.15,
+                color=carla.Color(0, intensity, 0),  # Green gradient
+                life_time=life_time
+            )
+            
+            # Draw heading arrow at every 5th point
+            if i % 5 == 0 and len(state) > 2:
+                psi = state[2]
+                arrow_len = 1.0
+                end_loc = carla.Location(
+                    x=state[0] + arrow_len * float(np.cos(psi)),
+                    y=state[1] + arrow_len * float(np.sin(psi)),
+                    z=0.5
+                )
+                self.world.debug.draw_arrow(
+                    loc, end_loc,
+                    thickness=0.05,
+                    arrow_size=0.1,
+                    color=carla.Color(255, 255, 0),  # Yellow for heading
+                    life_time=life_time
+                )
+        
+        # Draw connecting lines between trajectory points
+        for i in range(len(predicted_trajectory) - 1):
+            loc1 = carla.Location(x=predicted_trajectory[i][0], y=predicted_trajectory[i][1], z=0.5)
+            loc2 = carla.Location(x=predicted_trajectory[i+1][0], y=predicted_trajectory[i+1][1], z=0.5)
+            self.world.debug.draw_line(
+                loc1, loc2,
+                thickness=0.03,
+                color=carla.Color(0, 200, 0),
+                life_time=life_time
+            )
+        
+        # Draw REFERENCE trajectory (CYAN) - what MPC is trying to track
+        reference_trajectory = mpc_info.get('reference_trajectory')
+        if reference_trajectory is not None and len(reference_trajectory) > 0:
+            for i, state in enumerate(reference_trajectory):
+                loc = carla.Location(x=state[0], y=state[1], z=0.7)  # Slightly higher
                 self.world.debug.draw_point(
                     loc,
-                    size=0.1,
-                    color=carla.Color(0, 255, 0),  # Green for predicted path
-                    life_time=0.1
+                    size=0.12,
+                    color=carla.Color(0, 255, 255),  # Cyan for reference
+                    life_time=life_time
                 )
+                
+                # Draw reference heading arrow at every 5th point
+                if i % 5 == 0 and len(state) > 2:
+                    psi = state[2]
+                    arrow_len = 1.5
+                    end_loc = carla.Location(
+                        x=state[0] + arrow_len * float(np.cos(psi)),
+                        y=state[1] + arrow_len * float(np.sin(psi)),
+                        z=0.7
+                    )
+                    self.world.debug.draw_arrow(
+                        loc, end_loc,
+                        thickness=0.06,
+                        arrow_size=0.15,
+                        color=carla.Color(0, 200, 255),  # Cyan for reference heading
+                        life_time=life_time
+                    )
+    
+    def _draw_coordinate_axes(self):
+        """Draw world coordinate axes at origin and vehicle location for debugging."""
+        vehicle_transform = self.vehicle.get_transform()
+        vehicle_loc = vehicle_transform.location
+        
+        # Axis length
+        axis_len = 5.0
+        life_time = 0.15
+        
+        # --- Draw axes at vehicle location ---
+        # X axis (RED) - East in CARLA
+        self.world.debug.draw_arrow(
+            carla.Location(x=vehicle_loc.x, y=vehicle_loc.y, z=0.5),
+            carla.Location(x=vehicle_loc.x + axis_len, y=vehicle_loc.y, z=0.5),
+            thickness=0.08,
+            arrow_size=0.2,
+            color=carla.Color(255, 0, 0),  # RED = +X
+            life_time=life_time
+        )
+        self.world.debug.draw_string(
+            carla.Location(x=vehicle_loc.x + axis_len + 0.5, y=vehicle_loc.y, z=1.0),
+            "+X (East)",
+            color=carla.Color(255, 0, 0),
+            life_time=life_time
+        )
+        
+        # Y axis (GREEN) - South in CARLA (positive Y = right = south)
+        self.world.debug.draw_arrow(
+            carla.Location(x=vehicle_loc.x, y=vehicle_loc.y, z=0.5),
+            carla.Location(x=vehicle_loc.x, y=vehicle_loc.y + axis_len, z=0.5),
+            thickness=0.08,
+            arrow_size=0.2,
+            color=carla.Color(0, 255, 0),  # GREEN = +Y
+            life_time=life_time
+        )
+        self.world.debug.draw_string(
+            carla.Location(x=vehicle_loc.x, y=vehicle_loc.y + axis_len + 0.5, z=1.0),
+            "+Y (South)",
+            color=carla.Color(0, 255, 0),
+            life_time=life_time
+        )
+        
+        # Z axis (BLUE) - Up
+        self.world.debug.draw_arrow(
+            carla.Location(x=vehicle_loc.x, y=vehicle_loc.y, z=0.5),
+            carla.Location(x=vehicle_loc.x, y=vehicle_loc.y, z=0.5 + axis_len),
+            thickness=0.08,
+            arrow_size=0.2,
+            color=carla.Color(0, 0, 255),  # BLUE = +Z
+            life_time=life_time
+        )
+        
+        # --- Draw vehicle's forward direction (YAW) ---
+        yaw_rad = np.radians(vehicle_transform.rotation.yaw)
+        forward_len = 4.0
+        forward_end = carla.Location(
+            x=vehicle_loc.x + forward_len * np.cos(yaw_rad),
+            y=vehicle_loc.y + forward_len * np.sin(yaw_rad),
+            z=0.8
+        )
+        self.world.debug.draw_arrow(
+            carla.Location(x=vehicle_loc.x, y=vehicle_loc.y, z=0.8),
+            forward_end,
+            thickness=0.12,
+            arrow_size=0.3,
+            color=carla.Color(255, 0, 255),  # MAGENTA = vehicle forward/yaw
+            life_time=life_time
+        )
+        
+        # Print vehicle state
+        print(f"[DEBUG] Vehicle: x={vehicle_loc.x:.1f}, y={vehicle_loc.y:.1f}, yaw={vehicle_transform.rotation.yaw:.1f}° (CARLA)")
+        print(f"[DEBUG] Forward dir: cos(yaw)={np.cos(yaw_rad):.3f}, sin(yaw)={np.sin(yaw_rad):.3f}")
     
     def _draw_obstacle_warning(self):
         """Draw visual warning when obstacle detected."""

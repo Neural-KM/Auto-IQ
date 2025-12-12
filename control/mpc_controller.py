@@ -56,7 +56,7 @@ class MPCController:
         self.w_heading = 5.0    # Heading tracking weight
         self.w_vel = 2.0        # Velocity tracking weight
         self.w_delta = 50.0     # Steering effort weight
-        self.w_accel = 10.0     # Acceleration effort weight
+        self.w_accel = 0.0     # Acceleration effort weight
         self.w_delta_rate = 200.0  # Steering rate weight (smoothness)
         self.w_accel_rate = 50.0   # Acceleration rate weight
         
@@ -283,9 +283,10 @@ class MPCController:
             opt = np.array(sol['x']).flatten()
             
             # Parse states and controls
+            # CasADi flattens column-major (Fortran order), so reshape accordingly
             n_state_vars = self.n_states * (self.N + 1)
-            X_opt = opt[:n_state_vars].reshape(self.n_states, self.N + 1)
-            U_opt = opt[n_state_vars:].reshape(self.n_controls, self.N)
+            X_opt = opt[:n_state_vars].reshape((self.n_states, self.N + 1), order='F')
+            U_opt = opt[n_state_vars:].reshape((self.n_controls, self.N), order='F')
             
             # Save for warm start
             self._prev_x = X_opt
@@ -394,10 +395,7 @@ class MPCControllerSimple:
 
 # Test
 if __name__ == '__main__':
-    if not CASADI_AVAILABLE:
-        print("CasADi not available, cannot test MPC")
-        exit(1)
-    
+    # Running as script to test MPC
     print("Testing MPC Controller...")
     
     # Create controller
