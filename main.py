@@ -256,7 +256,7 @@ class AutoIQDemo:
                     if self.lane_detection_result['valid']:
                         confidence = self.lane_detection_result['confidence']
                         print(f"[Lane] Detected | Conf: {confidence:.2f}")
-
+        
         control = self.nav_manager.run_step()
         
         if control:

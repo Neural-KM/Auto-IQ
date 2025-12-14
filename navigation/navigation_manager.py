@@ -352,7 +352,6 @@ class NavigationManager:
         
         # Update controller with waypoints
         self.controller.set_waypoints(waypoints)
-        self.controller.set_obstacles(self._convert_obstacles_to_world())
         
         # Draw debug visualizations
         self.handle_visualization(waypoints, vehicle_location)
