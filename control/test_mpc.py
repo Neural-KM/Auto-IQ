@@ -1,9 +1,8 @@
 """
 Simple MPC integration test harness.
 
-This script constructs an MPCController, a TrajectoryGenerator, and a small
-set of waypoints. It then computes a reference and solves the MPC problem,
-printing the results.
+This script constructs an MPCController (which now includes trajectory generation)
+and a small set of waypoints. It then solves the MPC problem, printing the results.
 
 Edit the initial conditions and waypoints below as needed.
 """
@@ -12,25 +11,24 @@ import numpy as np
 import math
 
 from control.mpc_controller import MPCController
-from control.trajectory_generator import TrajectoryGenerator
 import matplotlib.pyplot as plt
 
 # ---- EDIT THESE INITIAL CONDITIONS ----
 init_x = 405.7
 init_y = -95.4
 init_yaw_deg = -89.4  # degrees
-init_v = 1.0        # m/s
-horizon = 21
+init_v = 0        # m/s
+horizon = 30
 mpc_dt = 0.05
+target_speed_kmh = 36.0  # km/h
 # --------------------------------------
-
-
 
 def main():
     yaw_rad = math.radians(init_yaw_deg)
 
     # Build a small straight set of waypoints ahead of the initial pose
     waypoints = [
+        # (405.7, -95.4),
         (405.74182129, -97.58068848),
         (405.76269531, -99.58058167),
         (405.78359985, -101.58046722),
@@ -62,33 +60,26 @@ def main():
         (406.32684326, -153.57763672),
         (406.3477478, -155.57751465)
     ]
-
+    print(f"Car initial state: x={init_x}, y={init_y}, yaw={init_yaw_deg}°, v={init_v}m/s")
     print(f"[test_mpc] Using {len(waypoints)} waypoints: first={waypoints[0]}, last={waypoints[-1]}")
 
-    # Initialize trajectory generator and fit waypoints
-    traj_gen = TrajectoryGenerator(target_speed=10.0)
-    success = traj_gen.set_waypoints(waypoints)
+    # Initialize MPC (includes trajectory generation)
+    mpc = MPCController(dt=mpc_dt, horizon=horizon, target_speed=target_speed_kmh)
+    
+    # Set waypoints (fits spline internally)
+    success = mpc.set_waypoints(waypoints)
     if not success:
         print("[test_mpc] Failed to fit spline to waypoints")
         return
 
     # Current state
-    current_state = np.array([init_x,init_y, yaw_rad, init_v])
+    current_state = np.array([init_x, init_y, yaw_rad, init_v])
+    print(f"[test_mpc] Initial state: x={init_x:.2f}, y={init_y:.2f}, yaw={init_yaw_deg:.2f}°, v={init_v:.2f}")
 
-    # Generate reference from trajectory generator
-    reference = traj_gen.generate_reference(current_state, horizon_length=horizon, dt=mpc_dt)
-    if reference is None:
-        print("[test_mpc] Reference generation failed")
-        return
-
-    print(f"[test_mpc] Reference length: {len(reference)}")
-    print(f"[test_mpc] First ref point: x={reference[0][0]:.2f}, y={reference[0][1]:.2f}, psi={math.degrees(reference[0][2]):.2f}°, v={reference[0][3]:.2f}")
-
-    # Initialize MPC
-    mpc = MPCController(dt=mpc_dt, horizon=horizon)
-
+    # Solve MPC (generates reference internally)
+    target_speed_ms = target_speed_kmh / 3.6
     try:
-        control = mpc.solve(current_state, reference, obstacles=[])
+        control = mpc.solve(current_state, target_speed_ms)
     except Exception as exc:
         print(f"[test_mpc] MPC solver failed to run: {exc}")
         return
@@ -96,22 +87,40 @@ def main():
     if control is None:
         print("[test_mpc] MPC returned no control (failed)")
     else:
-        print(f"[test_mpc] First control: delta={control[0]:.4f} rad, accel={control[1]:.4f} m/s^2")
+        print(f"[test_mpc] First control: delta={control[0]:.4f} rad ({math.degrees(control[0]):.2f}°), accel={control[1]:.4f} m/s^2")
+        print(f"[test_mpc] Solve time: {mpc.get_avg_solve_time():.1f} ms")
 
-    # Get predicted trajectory
+    # Get predicted trajectory, reference, and planned controls
     pred = mpc.get_predicted_trajectory()
+    reference = mpc.get_reference_trajectory()
+    controls = mpc.get_planned_controls()
+    
+    # Print control values for entire horizon
+    if controls is not None:
+        print(f"\n[test_mpc] Planned controls for entire horizon ({len(controls)} steps):")
+        for i, c in enumerate(controls):
+            print(f"  k={i:02d}: delta={c[0]:.4f} rad ({math.degrees(c[0]):6.2f}°), accel={c[1]:6.3f} m/s^2")
+    
+    # Print reference trajectory
+    if reference is not None:
+        print(f"\n[test_mpc] Reference trajectory ({len(reference)} points):")
+        for i, r in enumerate(reference):
+            print(f"  k={i:02d}: x={r[0]:.2f}, y={r[1]:.2f}, psi={math.degrees(r[2]):6.2f}°, v={r[3]:.2f} m/s")
+    
     if pred is not None:
-        print(f"[test_mpc] Predicted trajectory length: {len(pred)}")
-        for i, p in enumerate(pred):
-            print(f"  {i:02d}: x={p[0]:.2f}, y={p[1]:.2f}, psi={math.degrees(p[2]):.2f}°")
+        print(f"\n[test_mpc] Predicted trajectory length: {len(pred)}")
+        for i, p in enumerate(pred): 
+            print(f"  {i:02d}: x={p[0]:.2f}, y={p[1]:.2f}, psi={math.degrees(p[2]):.2f}°, v={p[3]:.2f}")
 
     # Plot waypoints, reference, and predicted trajectory
     way_x, way_y = zip(*waypoints)
-    ref_x, ref_y = reference[:,0], reference[:,1]
     
     plt.figure(figsize=(8,6))
     plt.plot(way_x, way_y, 'bo-', label='Waypoints')
-    plt.plot(ref_x, ref_y, 'c.-', label='Reference Trajectory')
+    
+    if reference is not None:
+        ref_x, ref_y = reference[:,0], reference[:,1]
+        plt.plot(ref_x, ref_y, 'c.-', label='Reference Trajectory')
     
     if pred is not None:
         pred_x = [p[0] for p in pred]
@@ -119,7 +128,6 @@ def main():
         plt.plot(pred_x, pred_y, 'g.-', linewidth=2, label='MPC Prediction')
 
     plt.scatter([current_state[0]], [current_state[1]], color='red', s=100, label='Initial State')
-
 
     plt.axis('equal')
     plt.xlabel('X (m)')
