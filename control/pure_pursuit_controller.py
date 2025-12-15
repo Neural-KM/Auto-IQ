@@ -10,7 +10,7 @@ Reference: Implementation of the Pure Pursuit Path Tracking Algorithm
 
 import math
 import numpy as np
-from config.settings import Settings
+from config.config import CONTROL
 
 
 class PurePursuitController:
@@ -47,8 +47,8 @@ class PurePursuitController:
         self.max_lookahead = max_lookahead
         self.lookahead_ratio = lookahead_ratio
         
-        # Max steering angle (from settings or default)
-        self.max_steering = getattr(Settings, 'MAX_STEERING', 1.0)
+        # Max steering angle (from config)
+        self.max_steering = CONTROL['lateral']['max_steering']
         
         # Waypoints for path tracking
         self._waypoints = None

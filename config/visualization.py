@@ -5,7 +5,7 @@ Visualization Configuration
 Defines which sensors appear in each layout.
 """
 
-from config.sensors import SENSORS
+from config.config import SENSORS
 
 
 # Define which sensors to show in which layout

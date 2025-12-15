@@ -27,8 +27,7 @@ import numpy as np
 import cv2
 
 # AutoIQ modules
-from config.settings import Settings
-from config.sensors import SENSORS
+from config.config import CARLA, CONTROL, SENSORS
 from sensors.sensor_suite import SensorSuite
 from visualization.tiled_display import TiledDisplay
 from navigation.navigation_manager import NavigationManager
@@ -71,7 +70,7 @@ class AutoIQDemo:
         # Connect to CARLA
         print(f"[AutoIQ] Connecting to CARLA at {self.args.host}:{self.args.port}...")
         self.client = carla.Client(self.args.host, self.args.port)
-        self.client.set_timeout(Settings.CARLA_TIMEOUT)
+        self.client.set_timeout(CARLA['connection']['timeout'])
         
         self.world = self.client.get_world()
         self.world_map = self.world.get_map()
@@ -81,7 +80,7 @@ class AutoIQDemo:
         if self.args.sync:
             settings = self.world.get_settings()
             settings.synchronous_mode = True
-            settings.fixed_delta_seconds = Settings.FIXED_DELTA_SECONDS
+            settings.fixed_delta_seconds = CARLA['simulation']['fixed_delta_seconds']
             self.world.apply_settings(settings)
             print("[AutoIQ] Synchronous mode enabled")
         

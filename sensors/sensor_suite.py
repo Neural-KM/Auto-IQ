@@ -9,7 +9,7 @@ import carla
 from sensors.camera_rgb import CameraRGB
 from sensors.camera_semantic import CameraSemantic
 from sensors.camera_depth import CameraDepth
-from config.sensors import SENSORS
+from config.config import SENSORS
 
 
 # Mapping of sensor type to class

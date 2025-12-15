@@ -9,7 +9,7 @@ import math
 import random
 import carla
 
-from config.settings import Settings
+from config.config import CARLA
 
 
 def get_speed(vehicle):
@@ -39,7 +39,7 @@ def spawn_vehicle(world, spawn_point=None, spawn_index=0, vehicle_filter=None):
     Returns:
         Spawned vehicle actor
     """
-    vehicle_filter = vehicle_filter or Settings.VEHICLE_FILTER
+    vehicle_filter = vehicle_filter or CARLA['vehicle']['filter']
     
     blueprint_library = world.get_blueprint_library()
     blueprints = blueprint_library.filter(vehicle_filter)

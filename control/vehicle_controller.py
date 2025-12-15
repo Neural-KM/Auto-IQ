@@ -13,7 +13,7 @@ import math
 
 from control.pure_pursuit_controller import PurePursuitController
 from control.longitudinal_controller import LongitudinalController
-from config.settings import Settings
+from config.config import CARLA, CONTROL
 
 # MPC components
 from control.mpc_controller import MPCController
@@ -45,7 +45,7 @@ class VehicleController:
             raise NotImplementedError("MPC controller is currently disabled.")
             print("[VehicleController] Using MPC control (path tracking, no obstacles)")
             self.mpc = MPCController(dt=mpc_dt, horizon=mpc_horizon)
-            self.trajectory_gen = TrajectoryGenerator(target_speed=Settings.TARGET_SPEED)
+            self.trajectory_gen = TrajectoryGenerator(target_speed=CONTROL['planning']['target_speed'])
             self.model = VehicleModel()
             self._mpc_horizon = mpc_horizon
             self._mpc_dt = mpc_dt
@@ -55,17 +55,17 @@ class VehicleController:
             self.lateral = PurePursuitController(vehicle)
             self.longitudinal = LongitudinalController(
                 vehicle,
-                k_p=Settings.LONGITUDINAL_KP,
-                k_i=Settings.LONGITUDINAL_KI,
-                k_d=Settings.LONGITUDINAL_KD,
-                dt=Settings.FIXED_DELTA_SECONDS
+                k_p=CONTROL['longitudinal']['kp'],
+                k_i=CONTROL['longitudinal']['ki'],
+                k_d=CONTROL['longitudinal']['kd'],
+                dt=CARLA['simulation']['fixed_delta_seconds']
             )
         else:
             raise ValueError(f"Unknown controller type: {controller_type}. Use 'mpc' or 'pid'")
         
         # Steering smoothing
         self.previous_steering = 0.0
-        self.max_steering_diff = Settings.MAX_STEERING_DIFF
+        self.max_steering_diff = CONTROL['lateral']['max_steering_diff']
         
         # Previous control
         self._prev_control = np.array([0.0, 0.0])

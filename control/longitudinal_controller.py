@@ -8,7 +8,7 @@ Speed control using PID for throttle and brake.
 import math
 
 from control.pid_controller import PIDController
-from config.settings import Settings
+from config.config import CONTROL
 
 
 class LongitudinalController:
@@ -27,8 +27,8 @@ class LongitudinalController:
             dt: Time step
         """
         self.vehicle = vehicle
-        self.max_throttle = Settings.MAX_THROTTLE
-        self.max_brake = Settings.MAX_BRAKE
+        self.max_throttle = CONTROL['longitudinal']['max_throttle']
+        self.max_brake = CONTROL['longitudinal']['max_brake']
         
         # PID with anti-windup limits based on max throttle/brake
         output_limits = (-self.max_brake, self.max_throttle)

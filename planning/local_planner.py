@@ -9,7 +9,7 @@ import math
 import numpy as np
 import carla
 from collections import deque
-from config.settings import Settings
+from config.config import CONTROL
 
 
 class LocalPlanner:
@@ -32,8 +32,8 @@ class LocalPlanner:
         self.map = world_map
         
         self.waypoint_queue = deque(maxlen=100)
-        self.lookahead_distance = Settings.LOOKAHEAD_DISTANCE
-        self.waypoint_spacing = Settings.WAYPOINT_SPACING
+        self.lookahead_distance = CONTROL['planning']['lookahead_distance']
+        self.waypoint_spacing = CONTROL['planning']['waypoint_spacing']
     
     def get_current_waypoint(self):
         """Get waypoint at vehicle's current location."""

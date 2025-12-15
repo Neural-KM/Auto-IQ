@@ -8,8 +8,7 @@ Automatically adapts to available sensors from config.
 
 import pygame
 import numpy as np
-from config.settings import Settings
-from config.sensors import SENSORS
+from config.config import SENSORS
 from config.visualization import get_layout_config, get_all_sensor_names
 
 
