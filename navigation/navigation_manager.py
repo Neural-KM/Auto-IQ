@@ -437,10 +437,6 @@ class NavigationManager:
         # Draw Pure Pursuit lookahead point if using PID
         if self.controller_type == 'pid':
             self._draw_pure_pursuit_target()
-        
-        # Draw obstacle detection visualization
-        if self._obstacle_detection and self._obstacle_detection.get('obstacle_detected'):
-            self._draw_obstacle_warning()
 
         # Live 2D visualizer update
         if 'live' in self.visualize_options or 'all' in self.visualize_options:
