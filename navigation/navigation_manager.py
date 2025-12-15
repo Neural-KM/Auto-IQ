@@ -17,7 +17,6 @@ from perception.obstacle_detector import ObstacleDetector
 from control.vehicle_controller import VehicleController
 from config.config import CONTROL
 from visualization.live_2d_visualizer import visualizer as live_visualizer
-from config.settings import Settings
 
 
 class NavigationManager:
