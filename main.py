@@ -287,6 +287,11 @@ class AutoIQDemo:
         telemetry['nav_remaining'] = f"{nav_status['remaining_distance']:.0f}m"
         telemetry['behavior_state'] = nav_status.get('behavior_state', 'N/A')
         
+        # Add MPC solve time if using MPC
+        mpc_info = self.nav_manager.controller.get_mpc_info()
+        if mpc_info:
+            telemetry['mpc_solve_time_ms'] = mpc_info.get('solve_time_ms', 0)
+        
         # Build obstacle detection dict
         obstacle_detection = {
             'obstacle_detected': nav_status.get('obstacle_detected', False),

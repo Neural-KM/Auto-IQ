@@ -336,6 +336,14 @@ class TelemetryPanel(Panel):
         # Title
         title = self.font_big.render("AutoIQ Autonomous", True, (0, 200, 255))
         self.surface.blit(title, (10, y))
+        
+        # MPC solve time on right side of title row (if available)
+        if data:
+            mpc_solve_time = data.get('mpc_solve_time_ms')
+            if mpc_solve_time is not None:
+                mpc_text = self.font.render(f"MPC: {mpc_solve_time:.1f} ms", True, (200, 200, 200))
+                mpc_x = self.width - mpc_text.get_width() - 10
+                self.surface.blit(mpc_text, (mpc_x, y + 4))
         y += 28
         
         if data:
@@ -487,20 +495,6 @@ class ObstaclePanel(Panel):
         
         self.draw_border(self.border_color)
         return self.surface
-
-
-class HelpPanel(Panel):
-    """Panel for keyboard shortcuts."""
-    
-    def __init__(self, name, width, height):
-        super().__init__(name, width, height)
-        self.border_color = (80, 80, 80)
-        self.font = pygame.font.Font(None, 16)
-    
-    def render(self, data=None):
-        self.surface.fill((30, 30, 30))
-        return self.surface
-
 
 class TiledDisplay:
     """

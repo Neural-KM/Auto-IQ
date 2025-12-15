@@ -128,10 +128,7 @@ class VehicleController:
         """Run MPC control step."""
         # Get current state
         current_state = self.get_current_state()
-        
-        # DEBUG: Print vehicle state
-        print(f"[MPC] Vehicle state: x={current_state[0]:.1f}, y={current_state[1]:.1f}, yaw={np.degrees(current_state[2]):.1f}°, v={current_state[3]:.1f}m/s")
-        
+
         # Convert target speed to m/s
         target_speed_ms = target_speed / 3.6
         
@@ -144,10 +141,6 @@ class VehicleController:
         
         # Convert MPC output to CARLA control
         steering_rad, accel = optimal_control
-        
-        # Negate steering for CARLA: MPC uses standard coords where +steering = left turn,
-        # but CARLA uses +steer = right turn
-        # steering_rad = -steering_rad
         
         # Convert steering angle to normalized steering [-1, 1]
         max_steer_rad = self.mpc.MAX_STEER
@@ -241,10 +234,10 @@ class VehicleController:
             return None
         
         return {
-            'solve_time_ms': self.mpc.get_avg_solve_time(),
             'predicted_trajectory': self.mpc.get_predicted_trajectory(),
             'planned_controls': self.mpc.get_planned_controls(),
-            'reference_trajectory': self.mpc.get_reference_trajectory()
+            'reference_trajectory': self.mpc.get_reference_trajectory(),
+            'solve_time_ms': self.mpc.get_last_solve_time_ms()
         }
     
     def get_pure_pursuit_info(self):

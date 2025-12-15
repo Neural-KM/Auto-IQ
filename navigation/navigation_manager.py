@@ -432,8 +432,8 @@ class NavigationManager:
         # Draw MPC trajectory if using MPC
         if self.controller_type == 'mpc':
             self._draw_mpc_trajectory()
-            self._draw_coordinate_axes()  # Debug: show coordinate system
-        
+            # self._draw_coordinate_axes()
+            
         # Draw Pure Pursuit lookahead point if using PID
         if self.controller_type == 'pid':
             self._draw_pure_pursuit_target()
@@ -604,21 +604,6 @@ class NavigationManager:
         predicted_trajectory = mpc_info.get('predicted_trajectory')
         if predicted_trajectory is None or len(predicted_trajectory) == 0:
             return
-
-        # Print solve time
-        solve_time = mpc_info.get('solve_time_ms', 0)
-        print(f"[MPC] Solve time: {solve_time:.2f} ms")
-
-        # Print a concise snapshot of XY + heading coordinates
-        try:
-            max_print = min(10, len(predicted_trajectory))
-            lines = [
-                f"{i:02d}: x={float(state[0]):7.2f}, y={float(state[1]):7.2f}, psi={float(state[2])*180/3.14159:6.1f}°"
-                for i, state in enumerate(predicted_trajectory[:max_print])
-            ]
-            print(f"[MPC] Predicted trajectory (first {max_print}/{len(predicted_trajectory)}):\n  " + "\n  ".join(lines))
-        except Exception:
-            pass
         
         # Draw predicted trajectory points with longer lifetime
         life_time = 2.0  # 2 seconds so we can see the path clearly
@@ -871,14 +856,6 @@ class NavigationManager:
             status['obstacle_bbox'] = self._obstacle_detection.get('bbox', None)
             status['obstacle_type'] = self._obstacle_detection.get('obstacle_type', None)
             status['obstacle_pixels'] = self._obstacle_detection.get('pixel_count', 0)
-        
-        # Add MPC-specific info
-        if self.controller_type == 'mpc':
-            mpc_info = self.controller.get_mpc_info()
-            if mpc_info:
-                status['mpc_solve_time'] = mpc_info.get('solve_time_ms', 0)
-                status['mpc_cost'] = mpc_info.get('cost', 0)
-                status['mpc_feasible'] = mpc_info.get('feasible', False)
         
         return status
     

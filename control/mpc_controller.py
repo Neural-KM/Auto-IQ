@@ -57,12 +57,12 @@ class MPCController:
         self.n_controls = 2  # [delta, a]
         
         # Cost weights
-        self.w_pos = 10.0
-        self.w_heading = 0.0
-        self.w_vel = 0.0
+        self.w_pos = 1.0
+        self.w_heading = 1.0
+        self.w_vel = 1.0
         self.w_delta = 0.0
         self.w_accel = 0.0
-        self.w_delta_rate = 0.0
+        self.w_delta_rate = 0.1
         self.w_accel_rate = 0.0
         
         # Spline for trajectory
@@ -73,12 +73,10 @@ class MPCController:
         # Previous solution for warm start
         self._prev_u = None
         self._prev_x = None
+        self._last_solve_time_ms = 0.0
         
         # Build solver
         self._build_solver()
-        
-        # Performance tracking
-        self._solve_times = []
         
         print(f"[MPC] Initialized: dt={dt}s, horizon={horizon}, prediction={horizon*dt:.1f}s ahead")
     
@@ -132,7 +130,6 @@ class MPCController:
             return False
         
         self._waypoints = np.array(unique_points)
-        print(f"[MPC] Waypoint List(length={len(self._waypoints)}): {self._waypoints}")
         # Fit parametric spline
         tck, _ = splprep([self._waypoints[:, 0], self._waypoints[:, 1]], 
                          s=0.1, k=min(3, len(self._waypoints)-1))
@@ -144,7 +141,6 @@ class MPCController:
         distances = np.sqrt(np.diff(x_dense)**2 + np.diff(y_dense)**2)
         self._spline_length = np.sum(distances)
         
-        print(f"[MPC] Spline fitted: {len(self._waypoints)} pts, length={self._spline_length:.1f}m")
         return True
     
     def _generate_reference(self, current_state, target_speed=None):
@@ -356,10 +352,7 @@ class MPCController:
             self._prev_x = X_opt
             self._prev_u = U_opt
             
-            solve_time = time.time() - t_start
-            self._solve_times.append(solve_time)
-            if len(self._solve_times) > 100:
-                self._solve_times.pop(0)
+            self._last_solve_time_ms = (time.time() - t_start) * 1000
             
             return U_opt[:, 0]
             
@@ -387,17 +380,15 @@ class MPCController:
             return None
         return self._prev_u.T
     
-    def get_avg_solve_time(self):
-        """Get average solve time in milliseconds."""
-        if not self._solve_times:
-            return 0
-        return np.mean(self._solve_times) * 1000
+    def get_last_solve_time_ms(self):
+        """Get the last solve time in milliseconds."""
+        return self._last_solve_time_ms
     
     def reset(self):
         """Reset controller state."""
         self._prev_x = None
         self._prev_u = None
-        self._solve_times = []
+        self._last_solve_time_ms = 0.0
         self._spline = None
         self._spline_length = 0
         self._waypoints = None
