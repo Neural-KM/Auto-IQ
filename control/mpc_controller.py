@@ -60,10 +60,10 @@ class MPCController:
         self.w_pos = 1.0
         self.w_heading = 1.0
         self.w_vel = 1.0
-        self.w_delta = 0.0
-        self.w_accel = 0.0
+        self.w_delta = 0.1
+        self.w_accel = 0.1
         self.w_delta_rate = 0.1
-        self.w_accel_rate = 0.0
+        self.w_accel_rate = 0.1
         
         # Spline for trajectory
         self._spline = None

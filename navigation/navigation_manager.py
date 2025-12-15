@@ -605,8 +605,7 @@ class NavigationManager:
         if predicted_trajectory is None or len(predicted_trajectory) == 0:
             return
         
-        # Draw predicted trajectory points with longer lifetime
-        life_time = 2.0  # 2 seconds so we can see the path clearly
+        life_time = 0.1
         for i, state in enumerate(predicted_trajectory):
             loc = carla.Location(x=state[0], y=state[1], z=0.5)
             # Color gradient: start=bright green, end=dark green
@@ -617,34 +616,17 @@ class NavigationManager:
                 color=carla.Color(0, intensity, 0),  # Green gradient
                 life_time=life_time
             )
-            
-            # Draw heading arrow at every 5th point
-            if i % 5 == 0 and len(state) > 2:
-                psi = state[2]
-                arrow_len = 1.0
-                end_loc = carla.Location(
-                    x=state[0] + arrow_len * float(np.cos(psi)),
-                    y=state[1] + arrow_len * float(np.sin(psi)),
-                    z=0.5
-                )
-                self.world.debug.draw_arrow(
-                    loc, end_loc,
-                    thickness=0.05,
-                    arrow_size=0.1,
-                    color=carla.Color(255, 255, 0),  # Yellow for heading
-                    life_time=life_time
-                )
         
         # Draw connecting lines between trajectory points
-        for i in range(len(predicted_trajectory) - 1):
-            loc1 = carla.Location(x=predicted_trajectory[i][0], y=predicted_trajectory[i][1], z=0.5)
-            loc2 = carla.Location(x=predicted_trajectory[i+1][0], y=predicted_trajectory[i+1][1], z=0.5)
-            self.world.debug.draw_line(
-                loc1, loc2,
-                thickness=0.03,
-                color=carla.Color(0, 200, 0),
-                life_time=life_time
-            )
+        # for i in range(len(predicted_trajectory) - 1):
+        #     loc1 = carla.Location(x=predicted_trajectory[i][0], y=predicted_trajectory[i][1], z=0.5)
+        #     loc2 = carla.Location(x=predicted_trajectory[i+1][0], y=predicted_trajectory[i+1][1], z=0.5)
+        #     self.world.debug.draw_line(
+        #         loc1, loc2,
+        #         thickness=0.03,
+        #         color=carla.Color(0, 200, 0),
+        #         life_time=life_time
+        #     )
         
         # Draw REFERENCE trajectory (CYAN) - what MPC is trying to track
         reference_trajectory = mpc_info.get('reference_trajectory')
@@ -657,23 +639,6 @@ class NavigationManager:
                     color=carla.Color(0, 255, 255),  # Cyan for reference
                     life_time=life_time
                 )
-                
-                # Draw reference heading arrow at every 5th point
-                if i % 5 == 0 and len(state) > 2:
-                    psi = state[2]
-                    arrow_len = 1.5
-                    end_loc = carla.Location(
-                        x=state[0] + arrow_len * float(np.cos(psi)),
-                        y=state[1] + arrow_len * float(np.sin(psi)),
-                        z=0.7
-                    )
-                    self.world.debug.draw_arrow(
-                        loc, end_loc,
-                        thickness=0.06,
-                        arrow_size=0.15,
-                        color=carla.Color(0, 200, 255),  # Cyan for reference heading
-                        life_time=life_time
-                    )
     
     def _draw_coordinate_axes(self):
         """Draw world coordinate axes at origin and vehicle location for debugging."""
