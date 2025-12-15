@@ -213,6 +213,10 @@ class AutoIQDemo:
                     # Fullscreen layout with dropdown
                     self.tiled_display.reconfigure_layout('fullscreen')
                     print("[AutoIQ] Layout: Fullscreen (click dropdown to select sensor)")
+                elif event.key == pygame.K_4:
+                    # LiDAR layout
+                    self.tiled_display.reconfigure_layout('lidar')
+                    print("[AutoIQ] Layout: LiDAR BEV")
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:  # Left click
                     self.tiled_display.handle_click(event.pos)
@@ -339,6 +343,10 @@ class AutoIQDemo:
                     'image': sensor.get_normalized_image(),
                     'obstacle_detection': obstacle_detection
                 }
+            elif sensor_type == 'lidar':
+                panel_data[sensor_name] = {
+                    'image': sensor.get_bev_image()
+                }
             else:
                 panel_data[sensor_name] = {
                     'image': sensor.get_data()
@@ -376,7 +384,7 @@ class AutoIQDemo:
         print("  LEFT/RIGHT: Force lane change")
         print("  SPACE     : Pause/Resume navigation")
         print("  B         : Reset behavior state")
-        print("  1/2/3     : Switch layout (Default/Surround/Fullscreen)")
+        print("  1/2/3/4   : Switch layout (Default/Surround/Fullscreen/LiDAR)")
         print("  ESC/Q     : Quit\n")
         
         if self._pending_destination is not None:

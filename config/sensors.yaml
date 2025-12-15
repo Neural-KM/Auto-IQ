@@ -86,3 +86,18 @@ sensors:
     width: 1280
     height: 720
     sensor_tick: 0.0
+
+  # ---------------------------------------------------------------------------
+  # LiDAR Sensors
+  # ---------------------------------------------------------------------------
+  - type: lidar
+    name: lidar
+    position: {x: -0.4, y: 0.0, z: 1.6}
+    rotation: {pitch: 0.0, yaw: 0.0, roll: 0.0}
+    channels: 32
+    range: 100.0
+    points_per_second: 500000
+    rotation_frequency: 20.0
+    upper_fov: 10.0
+    lower_fov: -30.0
+    sensor_tick: 0.0

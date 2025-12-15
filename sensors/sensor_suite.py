@@ -9,6 +9,7 @@ import carla
 from sensors.camera_rgb import CameraRGB
 from sensors.camera_semantic import CameraSemantic
 from sensors.camera_depth import CameraDepth
+from sensors.lidar import LiDAR
 from config.config import SENSORS
 
 
@@ -17,6 +18,7 @@ SENSOR_CLASSES = {
     'rgb': CameraRGB,
     'semantic': CameraSemantic,
     'depth': CameraDepth,
+    'lidar': LiDAR,
 }
 
 # Colors for different sensor types (R, G, B)
@@ -24,6 +26,7 @@ SENSOR_COLORS = {
     'rgb': carla.Color(0, 255, 0),       # Green
     'semantic': carla.Color(255, 0, 255), # Magenta
     'depth': carla.Color(0, 255, 255),    # Cyan
+    'lidar': carla.Color(255, 255, 0),    # Yellow
 }
 
 
@@ -90,13 +93,24 @@ class SensorSuite:
                 'roll': config['rotation']['roll'],
             }
             
-            # Build kwargs
-            kwargs = {
-                'width': config.get('width', 1280),
-                'height': config.get('height', 720),
-                'fov': config.get('fov', 90),
-                'sensor_tick': config.get('sensor_tick', 0.0),
-            }
+            # Build kwargs based on sensor type
+            if sensor_type == 'lidar':
+                kwargs = {
+                    'channels': config.get('channels', 32),
+                    'range': config.get('range', 100.0),
+                    'points_per_second': config.get('points_per_second', 500000),
+                    'rotation_frequency': config.get('rotation_frequency', 20.0),
+                    'upper_fov': config.get('upper_fov', 10.0),
+                    'lower_fov': config.get('lower_fov', -30.0),
+                    'sensor_tick': config.get('sensor_tick', 0.0),
+                }
+            else:
+                kwargs = {
+                    'width': config.get('width', 1280),
+                    'height': config.get('height', 720),
+                    'fov': config.get('fov', 90),
+                    'sensor_tick': config.get('sensor_tick', 0.0),
+                }
             
             try:
                 self.add_sensor(sensor_type, name, position, **kwargs)
