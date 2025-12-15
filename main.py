@@ -27,8 +27,7 @@ import numpy as np
 import cv2
 
 # AutoIQ modules
-from config.settings import Settings
-from config.sensors import SENSORS
+from config.config import CARLA, CONTROL, SENSORS
 from sensors.sensor_suite import SensorSuite
 from visualization.tiled_display import TiledDisplay
 from navigation.navigation_manager import NavigationManager
@@ -71,7 +70,7 @@ class AutoIQDemo:
         # Connect to CARLA
         print(f"[AutoIQ] Connecting to CARLA at {self.args.host}:{self.args.port}...")
         self.client = carla.Client(self.args.host, self.args.port)
-        self.client.set_timeout(Settings.CARLA_TIMEOUT)
+        self.client.set_timeout(CARLA['connection']['timeout'])
         
         self.world = self.client.get_world()
         self.world_map = self.world.get_map()
@@ -81,7 +80,7 @@ class AutoIQDemo:
         if self.args.sync:
             settings = self.world.get_settings()
             settings.synchronous_mode = True
-            settings.fixed_delta_seconds = Settings.FIXED_DELTA_SECONDS
+            settings.fixed_delta_seconds = CARLA['simulation']['fixed_delta_seconds']
             self.world.apply_settings(settings)
             print("[AutoIQ] Synchronous mode enabled")
         
@@ -221,6 +220,10 @@ class AutoIQDemo:
                     # Fullscreen layout with dropdown
                     self.tiled_display.reconfigure_layout('fullscreen')
                     print("[AutoIQ] Layout: Fullscreen (click dropdown to select sensor)")
+                elif event.key == pygame.K_4:
+                    # LiDAR layout
+                    self.tiled_display.reconfigure_layout('lidar')
+                    print("[AutoIQ] Layout: LiDAR BEV")
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:  # Left click
                     self.tiled_display.handle_click(event.pos)
@@ -348,6 +351,10 @@ class AutoIQDemo:
                     'image': sensor.get_normalized_image(),
                     'obstacle_detection': obstacle_detection
                 }
+            elif sensor_type == 'lidar':
+                panel_data[sensor_name] = {
+                    'image': sensor.get_bev_image()
+                }
             else:
                 panel_data[sensor_name] = {
                     'image': sensor.get_data()
@@ -385,7 +392,7 @@ class AutoIQDemo:
         print("  LEFT/RIGHT: Force lane change")
         print("  SPACE     : Pause/Resume navigation")
         print("  B         : Reset behavior state")
-        print("  1/2/3     : Switch layout (Default/Surround/Fullscreen)")
+        print("  1/2/3/4   : Switch layout (Default/Surround/Fullscreen/LiDAR)")
         print("  ESC/Q     : Quit\n")
         
         if self._pending_destination is not None:

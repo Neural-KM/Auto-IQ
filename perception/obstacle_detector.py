@@ -6,8 +6,16 @@ Detects static obstacles on the road ahead.
 """
 
 import numpy as np
-from config.settings import Settings
+from config.config import CONTROL, SENSORS
 from sensors.camera_semantic import SemanticLabels
+
+
+def _get_semantic_sensor_config():
+    """Get semantic sensor config from SENSORS list."""
+    for sensor in SENSORS:
+        if sensor['name'] == 'semantic':
+            return sensor
+    return None
 
 
 class ObstacleDetector:
@@ -17,16 +25,22 @@ class ObstacleDetector:
     Detects objects on the road that aren't road surface.
     """
     
-    def __init__(self, image_width=None, image_height=None):
+    def __init__(self):
         """
         Initialize obstacle detector.
         
-        Args:
-            image_width: Camera image width
-            image_height: Camera image height
+        Uses width/height from the semantic sensor defined in config/sensors.yaml.
         """
-        self.width = image_width or Settings.CAMERA_WIDTH
-        self.height = image_height or Settings.CAMERA_HEIGHT
+        # Get image dimensions from semantic sensor config
+        semantic_config = _get_semantic_sensor_config()
+        if semantic_config:
+            self.width = semantic_config['width']
+            self.height = semantic_config['height']
+        else:
+            # Fallback if no semantic sensor defined
+            self.width = 1280
+            self.height = 720
+            print("[ObstacleDetector] Warning: No semantic sensor in config, using defaults")
         
         # Detection region - narrower to focus on the lane ahead
         # Only center 30% of image width (was 40%)
@@ -37,7 +51,7 @@ class ObstacleDetector:
         
         # Detection thresholds
         self.min_obstacle_pixels = 150  # Increased from 100 for fewer false positives
-        self.detection_distance = Settings.OBSTACLE_DETECTION_DISTANCE
+        self.detection_distance = CONTROL['obstacle']['detection_distance']
         
         # Debug visualization data (updated each detect() call)
         self.debug_data = {
@@ -185,7 +199,7 @@ class ObstacleDetector:
         position = detection_result['position']
         
         return (position == 'center' and 
-                distance < Settings.LANE_CHANGE_TRIGGER_DISTANCE)
+                distance < CONTROL['obstacle']['lane_change_trigger_distance'])
     
     def get_avoidance_direction(self, detection_result):
         """

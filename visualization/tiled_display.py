@@ -8,8 +8,7 @@ Automatically adapts to available sensors from config.
 
 import pygame
 import numpy as np
-from config.settings import Settings
-from config.sensors import SENSORS
+from config.config import SENSORS
 from config.visualization import get_layout_config, get_all_sensor_names
 
 
@@ -191,6 +190,45 @@ class SemanticPanel(Panel):
                 cy = int(center[1] * scale_y) + view_y
                 pygame.draw.line(self.surface, (255, 0, 0), (cx - 8, cy), (cx + 8, cy), 2)
                 pygame.draw.line(self.surface, (255, 0, 0), (cx, cy - 8), (cx, cy + 8), 2)
+
+
+class LidarPanel(Panel):
+    """Panel for LiDAR bird's eye view visualization."""
+    
+    def __init__(self, name, width, height):
+        super().__init__(name, width, height)
+        self.border_color = (255, 255, 0)  # Yellow for LiDAR
+    
+    def render(self, data=None):
+        self.surface.fill(self.bg_color)
+        
+        content_height = self.height - 25
+        img_y_offset = 22
+        
+        if data and 'image' in data and data['image'] is not None:
+            img = data['image']
+            
+            if isinstance(img, np.ndarray) and img.size > 0:
+                h, w = img.shape[:2]
+                if h > 0 and w > 0:
+                    # Scale to fit panel while maintaining aspect ratio
+                    scale = min((self.width - 10) / w, content_height / h)
+                    new_w, new_h = int(w * scale), int(h * scale)
+                    
+                    if new_w > 0 and new_h > 0:
+                        surface = pygame.surfarray.make_surface(img.swapaxes(0, 1))
+                        surface = pygame.transform.scale(surface, (new_w, new_h))
+                        x_offset = (self.width - new_w) // 2
+                        self.surface.blit(surface, (x_offset, img_y_offset))
+        
+        # Draw legend
+        legend_y = self.height - 18
+        legend_text = self.font_small.render("BEV: Blue=Low  Green=Mid  Red=High", True, (150, 150, 150))
+        self.surface.blit(legend_text, (5, legend_y))
+        
+        self.draw_title("LiDAR BEV", self.border_color)
+        self.draw_border(self.border_color)
+        return self.surface
 
 
 class DepthPanel(Panel):
@@ -588,6 +626,8 @@ class TiledDisplay:
             return SemanticPanel(sensor_name, width, height)
         elif sensor_type == 'depth':
             return DepthPanel(sensor_name, width, height)
+        elif sensor_type == 'lidar':
+            return LidarPanel(sensor_name, width, height)
         else:  # rgb or unknown
             return CameraPanel(sensor_name, width, height, sensor_name.replace('_', ' ').title())
     
@@ -657,6 +697,29 @@ class TiledDisplay:
             self._setup_surround_layout()
         elif layout_name == 'fullscreen':
             self._setup_fullscreen_layout()
+        elif layout_name == 'lidar':
+            self._setup_lidar_layout()
+    
+    def _setup_lidar_layout(self):
+        """Setup layout with LiDAR BEV view alongside main camera."""
+        # Bottom bar needs fixed height
+        bottom_h = 175
+        main_h = self.height - bottom_h
+        
+        # Split horizontally: main camera (left) and LiDAR BEV (right)
+        main_w = int(self.width * 0.6)
+        lidar_w = self.width - main_w
+        
+        # Main camera panel (3rd person view)
+        main_panel = CameraPanel('3rd_person', main_w, main_h, '3rd Person')
+        self.add_panel('3rd_person', main_panel, 0, 0)
+        
+        # LiDAR BEV panel
+        lidar_panel = LidarPanel('lidar', lidar_w, main_h)
+        self.add_panel('lidar', lidar_panel, main_w, 0)
+        
+        # Bottom bar
+        self._add_bottom_bar(main_h)
     
     def _setup_surround_layout(self):
         """Setup surround layout showing all sensors in a grid."""

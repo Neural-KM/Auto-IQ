@@ -15,6 +15,7 @@ from planning.local_planner import LocalPlanner
 from planning.behavior_planner import BehaviorPlanner, BehaviorState
 from perception.obstacle_detector import ObstacleDetector
 from control.vehicle_controller import VehicleController
+from config.config import CONTROL
 from visualization.live_2d_visualizer import visualizer as live_visualizer
 from config.settings import Settings
 
@@ -62,7 +63,7 @@ class NavigationManager:
         self.controller = VehicleController(vehicle, controller_type=controller_type)
         
         # Navigation state
-        self.target_speed = Settings.TARGET_SPEED
+        self.target_speed = CONTROL['planning']['target_speed']
         self.destination = None
         self.is_navigating = False
         self._route_planned = False  # Route computed but not yet started
@@ -542,7 +543,7 @@ class NavigationManager:
         """
         waypoints = []
         wp = start_waypoint
-        spacing = Settings.WAYPOINT_SPACING
+        spacing = CONTROL['planning']['waypoint_spacing']
         
         for _ in range(count):
             next_wps = wp.next(spacing)

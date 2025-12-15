@@ -6,7 +6,7 @@ State machine for high-level behavior decisions.
 """
 
 from enum import Enum, auto
-from config.settings import Settings
+from config.config import CONTROL
 
 
 class BehaviorState(Enum):
@@ -86,7 +86,7 @@ class BehaviorPlanner:
             position = obstacle_detection.get('position', '')
             
             # Obstacle in our lane and close
-            if position == 'center' and distance < Settings.LANE_CHANGE_TRIGGER_DISTANCE:
+            if position == 'center' and distance < CONTROL['obstacle']['lane_change_trigger_distance']:
                 self.state = BehaviorState.PREPARING_LANE_CHANGE
                 self.original_lane_id = self.local_planner.get_current_waypoint().lane_id
                 print(f"[Behavior] Obstacle detected at {distance:.1f}m - preparing lane change")
