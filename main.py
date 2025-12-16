@@ -111,7 +111,8 @@ class AutoIQDemo:
             self.vehicle, self.world, 
             sensor_suite=self.sensors,
             controller_type=self.args.controller,
-            visualize_options=self.args.visualize
+            visualize_options=self.args.visualize,
+            trajectory_mode=self.args.trajectory_mode
         )
         self.nav_manager.set_target_speed(self.target_speed)
         
@@ -492,6 +493,8 @@ def main():
                         help='Disable lane detection pipeline (use map waypoints only)')
     parser.add_argument('--controller', type=str, default='mpc',
                         choices=['mpc', 'pid'], help='Type of vehicle controller to use (default: mpc)')
+    parser.add_argument('--trajectory-mode', type=int, default=0,
+                        help='Trajectory generation mode: 0=Heuristic, 1=Trapezoidal (default: 0)')
     args = parser.parse_args()
 
     # Parse visualize options

@@ -26,7 +26,7 @@ class VehicleController:
     PID: Pure Pursuit lateral + PID longitudinal for waypoint following
     """
     
-    def __init__(self, vehicle, controller_type='mpc', mpc_horizon=20, mpc_dt=0.05):
+    def __init__(self, vehicle, controller_type='mpc', mpc_horizon=20, mpc_dt=0.05, trajectory_mode=0):
         """
         Initialize vehicle controller.
         
@@ -35,13 +35,16 @@ class VehicleController:
             controller_type: 'mpc' or 'pid'
             mpc_horizon: MPC prediction horizon steps
             mpc_dt: MPC timestep in seconds
+            trajectory_mode: 0 for heuristic, 1 for trapezoidal (MPC only)
         """
         self.vehicle = vehicle
         self.controller_type = controller_type.lower()
         
         if self.controller_type == 'mpc':
-            print("[VehicleController] Using MPC control (path tracking)")
-            self.mpc = MPCController(dt=mpc_dt, horizon=mpc_horizon, target_speed=CONTROL['planning']['target_speed'])
+            print(f"[VehicleController] Using MPC control (mode={trajectory_mode})")
+            self.mpc = MPCController(dt=mpc_dt, horizon=mpc_horizon, 
+                                   target_speed=CONTROL['planning']['target_speed'],
+                                   trajectory_mode=trajectory_mode)
             self._mpc_horizon = mpc_horizon
             self._mpc_dt = mpc_dt
             

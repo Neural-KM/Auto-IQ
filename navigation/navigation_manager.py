@@ -32,7 +32,7 @@ class NavigationManager:
     """
     
     def __init__(self, vehicle, world, sensor_suite=None,
-                 controller_type='mpc', visualize_options=None):
+                 controller_type='mpc', visualize_options=None, trajectory_mode=0):
         """
         Initialize navigation manager.
         
@@ -42,6 +42,7 @@ class NavigationManager:
             sensor_suite: Optional SensorSuite instance for perception
             controller_type: 'mpc' for Model Predictive Control, 'pid' for PID control
             visualize_options: Set of visualization tags to draw in simulator
+            trajectory_mode: 0 for heuristic, 1 for trapezoidal (MPC only)
         """
         self.vehicle = vehicle
         self.world = world
@@ -59,7 +60,7 @@ class NavigationManager:
         self.obstacle_detector = ObstacleDetector()
         
         # Initialize controller with selected type
-        self.controller = VehicleController(vehicle, controller_type=controller_type)
+        self.controller = VehicleController(vehicle, controller_type=controller_type, trajectory_mode=trajectory_mode)
         
         # Navigation state
         self.target_speed = CONTROL['planning']['target_speed']
