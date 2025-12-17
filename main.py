@@ -36,7 +36,7 @@ from perception.fake_perception import FakePerception
 from utils.helpers import spawn_vehicle, get_vehicle_telemetry
 
 
-class AutoIQDemo:
+class AutoIQ:
     """Main demo application."""
     
     def __init__(self, args):
@@ -486,7 +486,6 @@ def main():
     parser.add_argument('--res', default='1280x860', help='Window resolution (default: 1280x860)')
     parser.add_argument('--spawn', type=int, default=0, help='Spawn point index for vehicle (default: 0)')
     parser.add_argument('--dest', type=int, default=None, help='Destination spawn point index')
-    parser.add_argument('--list', action='store_true', help='List spawn points and exit')
     parser.add_argument('--visualize', type=str, default='',
                         help='Comma-separated items to draw in simulator (e.g., "route,waypoints,bbox,all")')
     parser.add_argument('--no-lane-detection', action='store_true',
@@ -509,18 +508,9 @@ def main():
     
     if (args.width, args.height) != (req_width, req_height):
         print(f"[AutoIQ] Adjusted window size to {args.width}x{args.height} for tiled layout")
+
     
-    # List spawn points if requested
-    if args.list:
-        client = carla.Client(args.host, args.port)
-        client.set_timeout(10.0)
-        spawn_points = client.get_world().get_map().get_spawn_points()
-        print(f"\n{len(spawn_points)} spawn points:")
-        for i, sp in enumerate(spawn_points):
-            print(f"  [{i:3d}] x={sp.location.x:8.1f}, y={sp.location.y:8.1f}")
-        return
-    
-    demo = AutoIQDemo(args)
+    demo = AutoIQ(args)
     
     # Register cleanup handlers for various exit scenarios
     def signal_handler(sig, frame):

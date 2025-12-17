@@ -13,7 +13,9 @@ import numpy as np
 import time
 import casadi as ca
 from scipy.interpolate import splprep, splev
-
+import matplotlib.pyplot as plt
+import argparse
+import math
 
 class MPCController:
     """
@@ -30,8 +32,8 @@ class MPCController:
     WHEELBASE = 2.875           # meters
     MAX_STEER = np.radians(35)  # ~35 degrees
     MAX_STEER_RATE = np.radians(60)
-    MAX_ACCEL = 2.0             # m/s^2
-    MAX_DECEL = -4.0            # m/s^2
+    MAX_ACCEL = 4.0             # m/s^2
+    MAX_DECEL = -5.0            # m/s^2
     MAX_SPEED = 50.0            # m/s
     MIN_SPEED = 0.0             # m/s
     
@@ -62,9 +64,9 @@ class MPCController:
         self.w_pos = 1.0
         self.w_heading = 1.0
         self.w_vel = 1.0
-        self.w_delta = 0.1
-        self.w_accel = 0.1
-        self.w_delta_rate = 0.1
+        self.w_delta = 0.0
+        self.w_accel = 0.
+        self.w_delta_rate = 0.5
         self.w_accel_rate = 0.5
         
         # Spline for trajectory
@@ -76,6 +78,10 @@ class MPCController:
         self._prev_u = None
         self._prev_x = None
         self._last_solve_time_ms = 0.0
+        
+        # Fail counts
+        self._solve_fail_count = 0
+        self._generation_fail_count = 0
         
         # Build solver
         self._build_solver()
@@ -232,6 +238,7 @@ class MPCController:
         
         # 2. Curvature Limit Pass
         max_lat_accel = 3.0 # m/s^2
+
         for p in points:
             # v_max = sqrt(a_lat_max / k)
             v_k = np.sqrt(max_lat_accel / (p['k'] + 1e-3))
@@ -262,32 +269,58 @@ class MPCController:
             
         # Store debug info
         self._last_trapezoidal_points = points
-            
+        # print("GENERATE")
+        # for i, point in enumerate(points):
+        #     print(f"{i}: {point}")
         # 5. Resample to Time Domain for MPC
         reference = []
         
         # Create interpolators
-        s_vals = [0]
+        t_vals = [0.0]
+        s_vals = [0.0]
+        v_vals = [points[0]['v_final']]
+        u_vals_list = [points[0]['u']]
+        
         for i in range(1, len(points)):
             ds = np.sqrt((points[i]['x']-points[i-1]['x'])**2 + (points[i]['y']-points[i-1]['y'])**2)
-            s_vals.append(s_vals[-1] + ds)
+            v_start = points[i-1]['v_final']
+            v_end = points[i]['v_final']
             
-        v_vals = [p['v_final'] for p in points]
-        u_vals = [p['u'] for p in points]
+            # Avoid division by zero
+            if v_start + v_end < 1e-4:
+                # If velocity is effectively 0 for a segment, time delta is large
+                # But since we strip duplicates, ds > 0. 
+                # Theoretically dt -> infinity, but we cap it or assume small creep speed
+                dt_segment = 1.0 # Fallback, shouldn't happen often due to fwd pass
+            else:
+                # Average velocity assumption for constant acceleration segment
+                dt_segment = 2.0 * ds / (v_start + v_end)
+            
+            t_vals.append(t_vals[-1] + dt_segment)
+            s_vals.append(s_vals[-1] + ds)
+            v_vals.append(v_end)
+            u_vals_list.append(points[i]['u'])
+
+        # ==========================================================
+        # 6. Resample to MPC Time Domain
+        # ==========================================================
         
-        current_s = 0
+        reference = []
+        
         for k in range(self.horizon + 1):
-            # Interpolate v and u at current_s
-            v_ref = np.interp(current_s, s_vals, v_vals)
-            u_ref = np.interp(current_s, s_vals, u_vals)
+            target_t = k * self.dt
+            
+            # We interpolate based on TIME, not distance integration
+            # If target_t exceeds our profile generation, interp creates a stop (const value)
+            
+            u_ref = np.interp(target_t, t_vals, u_vals_list)
+            v_ref = np.interp(target_t, t_vals, v_vals)
             
             x, y = splev(u_ref, self._spline)
             dx, dy = splev(u_ref, self._spline, der=1)
             psi = np.arctan2(dy, dx)
             
             reference.append([float(x), float(y), float(psi), float(v_ref)])
-            
-            current_s += v_ref * self.dt
             
         return np.array(reference)
     
@@ -422,7 +455,9 @@ class MPCController:
         
         # Generate reference trajectory
         reference = self._generate_reference(current_state, target_speed)
+        
         if reference is None or len(reference) < self.horizon + 1:
+            self._generation_fail_count += 1
             print("[MPC] Failed to generate reference trajectory")
             return None
         
@@ -468,6 +503,7 @@ class MPCController:
             
         except Exception as e:
             print(f"[MPC] Solver failed: {e}")
+            self._solve_fail_count += 1
             return None
     
     # ========================
@@ -496,16 +532,7 @@ class MPCController:
     
     def plot_velocity_profile(self):
         """Plot the last generated trapezoidal velocity profile."""
-        if not hasattr(self, '_last_trapezoidal_points') or not self._last_trapezoidal_points:
-            print("[MPC] No trapezoidal profile data available to plot")
-            return
-            
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            print("[MPC] matplotlib not found")
-            return
-            
+        
         points = self._last_trapezoidal_points
         
         # Calculate distances
@@ -532,48 +559,23 @@ class MPCController:
         plt.legend()
         plt.show()
 
-    def reset(self):
-        """Reset controller state."""
-        self._prev_x = None
-        self._prev_u = None
-        self._last_solve_time_ms = 0.0
-        self._spline = None
-        self._spline_length = 0
-        self._waypoints = None
-    
-    def set_weights(self, pos=None, heading=None, vel=None, delta=None, 
-                    accel=None, delta_rate=None, accel_rate=None):
-        """Update cost function weights. Requires rebuilding solver."""
-        if pos is not None:
-            self.w_pos = pos
-        if heading is not None:
-            self.w_heading = heading
-        if vel is not None:
-            self.w_vel = vel
-        if delta is not None:
-            self.w_delta = delta
-        if accel is not None:
-            self.w_accel = accel
-        if delta_rate is not None:
-            self.w_delta_rate = delta_rate
-        if accel_rate is not None:
-            self.w_accel_rate = accel_rate
-        
-        self._build_solver()
-        self.reset()
+
 
 
 # Test
 if __name__ == '__main__':
-    import math
-    import matplotlib.pyplot as plt
+
+    parser = argparse.ArgumentParser(description="Test MPC Controller")
+    parser.add_argument('--trajectory-mode', type=int, default=0, choices=[0,1],
+                        help='Trajectory mode: 0=heuristic (curvature-based), 1=trapezoidal (forward-backward)')
+    args = parser.parse_args()
 
     # ---- EDIT THESE INITIAL CONDITIONS ----
     init_x = 405.7
     init_y = -95.4
     init_yaw_deg = -89.4  # degrees
     init_v = 0        # m/s
-    horizon = 30
+    horizon = 40
     mpc_dt = 0.05
     target_speed_kmh = 36.0  # km/h
     # --------------------------------------
@@ -618,12 +620,11 @@ if __name__ == '__main__':
     print(f"[test_mpc] Using {len(waypoints)} waypoints: first={waypoints[0]}, last={waypoints[-1]}")
 
     # Initialize MPC (includes trajectory generation)
-    # Use trajectory_mode=1 for Trapezoidal (Forward-Backward) generation
     mpc = MPCController(dt=mpc_dt, 
                         horizon=horizon, 
                         target_speed=target_speed_kmh, 
-                        trajectory_mode=1)
-    
+                        trajectory_mode=args.trajectory_mode)
+
     # Set waypoints (fits spline internally)
     success = mpc.set_waypoints(waypoints)
     if not success:
@@ -680,14 +681,12 @@ if __name__ == '__main__':
     plt.figure(figsize=(8,6))
     plt.plot(way_x, way_y, 'bo-', label='Waypoints')
     
-    if reference is not None:
-        ref_x, ref_y = reference[:,0], reference[:,1]
-        plt.plot(ref_x, ref_y, 'c.-', label='Reference Trajectory')
-    
-    if pred is not None:
-        pred_x = [p[0] for p in pred]
-        pred_y = [p[1] for p in pred]
-        plt.plot(pred_x, pred_y, 'g.-', linewidth=2, label='MPC Prediction')
+    ref_x, ref_y = reference[:,0], reference[:,1]
+    plt.plot(ref_x, ref_y, 'c.-', label='Reference Trajectory')
+
+    pred_x = [p[0] for p in pred]
+    pred_y = [p[1] for p in pred]
+    plt.plot(pred_x, pred_y, 'g.-', linewidth=2, label='MPC Prediction')
 
     plt.scatter([current_state[0]], [current_state[1]], color='red', s=100, label='Initial State')
 
