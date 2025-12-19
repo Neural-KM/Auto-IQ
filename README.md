@@ -17,8 +17,9 @@ Auto-IQ is a modular autonomous driving system that integrates perception, plann
 
 1. Start main.py
    ```bash
-   python main.py --spawn 50 --dest 250 --sync --visualize waypoints,sensors,route --controller pid
+   python main.py --spawn 50 --dest 250 --sync --visualize waypoints,sensors,route,live --controller mpc
    ```
+   Use relevant visualize option to avoid crowding
 2. Generate static obstacle
    ```bash
    python3 tools/spawn_obstacle.py --type car --distance 40 30 --lane  right center

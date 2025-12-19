@@ -1,15 +1,18 @@
 """
-Tiled Display System
-====================
-
-Modular visualization system with configurable tiled panels.
-Automatically adapts to available sensors from config.
+Tiled Display System - Modular visualization system with configurable panels.
 """
 
 import pygame
 import numpy as np
 from config.config import SENSORS
-from config.visualization import get_layout_config, get_all_sensor_names
+from config.visualization import (
+    get_layout_config, 
+    get_all_sensor_names,
+    DISPLAY_WIDTH,
+    DISPLAY_HEIGHT,
+    BOTTOM_BAR_HEIGHT,
+    MIN_SIDE_PANEL_HEIGHT
+)
 
 
 class Panel:
@@ -336,6 +339,14 @@ class TelemetryPanel(Panel):
         # Title
         title = self.font_big.render("AutoIQ Autonomous", True, (0, 200, 255))
         self.surface.blit(title, (10, y))
+        
+        # MPC solve time on right side of title row (if available)
+        if data:
+            mpc_solve_time = data.get('mpc_solve_time_ms')
+            if mpc_solve_time is not None:
+                mpc_text = self.font.render(f"MPC: {mpc_solve_time:.1f} ms", True, (200, 200, 200))
+                mpc_x = self.width - mpc_text.get_width() - 10
+                self.surface.blit(mpc_text, (mpc_x, y + 4))
         y += 28
         
         if data:
@@ -365,6 +376,15 @@ class TelemetryPanel(Panel):
             lane_id = data.get('lane_id', 'N/A')
             road_text = self.font.render(f"Road: {road_id} | Lane: {lane_id}", True, (200, 200, 200))
             self.surface.blit(road_text, (10, y))
+            y += 22
+
+            # Location (car position)
+            loc = data.get('location') or {}
+            lx = loc.get('x', 0.0)
+            ly = loc.get('y', 0.0)
+            lz = loc.get('z', 0.0)
+            loc_text = self.font.render(f"Pos: x={lx:7.1f}  y={ly:7.1f}  z={lz:5.1f}", True, (180, 220, 255))
+            self.surface.blit(loc_text, (10, y))
             y += 22
             
             # Control
@@ -479,48 +499,13 @@ class ObstaclePanel(Panel):
         self.draw_border(self.border_color)
         return self.surface
 
-
-class HelpPanel(Panel):
-    """Panel for keyboard shortcuts."""
-    
-    def __init__(self, name, width, height):
-        super().__init__(name, width, height)
-        self.border_color = (80, 80, 80)
-        self.font = pygame.font.Font(None, 16)
-    
-    def render(self, data=None):
-        self.surface.fill((30, 30, 30))
-        return self.surface
-
-
 class TiledDisplay:
-    """
-    Manages a tiled display layout with multiple panels.
+    """Manages a tiled display layout with multiple panels."""
     
-    Layout:
-    +-------------------+------------------+
-    |                   |  Camera/Semantic |
-    |   Main Camera     +------------------+
-    |                   |      Depth       |
-    +-------------------+------------------+
-    |  Telemetry  | Obstacle  |   Help     |
-    +-------------+-----------+------------+
-    """
-    
-    # Minimum panel heights
-    MIN_BOTTOM_HEIGHT = 175
-    MIN_SIDE_PANEL_HEIGHT = 150
-    
-    def __init__(self, width, height):
-        """
-        Initialize tiled display.
-        
-        Args:
-            width: Total display width
-            height: Total display height
-        """
-        self.width = width
-        self.height = height
+    def __init__(self):
+        """Initialize tiled display with standard dimensions."""
+        self.width = DISPLAY_WIDTH
+        self.height = DISPLAY_HEIGHT
         self.panels = {}
         self.layout = []
         self._current_layout = 'default'
@@ -528,57 +513,22 @@ class TiledDisplay:
         self._dropdown_open = False
         
         pygame.font.init()
-        
-        # Calculate panel sizes
         self._setup_default_layout()
     
     @staticmethod
-    def get_recommended_size(base_width=1280, base_height=720):
-        """
-        Get recommended window size for the tiled layout.
-        
-        Args:
-            base_width: Base width (default 1280)
-            base_height: Base height (default 720)
-            
-        Returns:
-            Tuple (width, height) with minimum required size
-        """
-        # Ensure minimum height for bottom panels + main content
-        min_height = max(base_height, TiledDisplay.MIN_BOTTOM_HEIGHT + 480)
-        # Ensure minimum width for side panels
-        min_width = max(base_width, 1024)
-        return (min_width, min_height)
-    
-    def resize(self, width, height):
-        """
-        Resize the display and reconfigure layout.
-        
-        Args:
-            width: New width
-            height: New height
-        """
-        self.width = width
-        self.height = height
-        # Reconfigure with current layout style
-        current_layout = getattr(self, '_current_layout', 'default')
-        self.reconfigure_layout(current_layout)
+    def get_recommended_size():
+        """Get display size from config."""
+        return (DISPLAY_WIDTH, DISPLAY_HEIGHT)
     
     def _setup_default_layout(self):
         """Setup default panel layout dynamically based on available sensors."""
-        # Get layout config (filters to only existing sensors)
         layout = get_layout_config('default')
         
-        # Bottom panels need fixed minimum height for text
-        bottom_h = 175
-        
-        # Main view takes remaining height
+        bottom_h = BOTTOM_BAR_HEIGHT
         main_h = self.height - bottom_h
         
-        # Get side sensors that exist
         side_sensors = layout.get('side', [])
         
-        # If we have side panels, split the width
         if side_sensors:
             main_w = int(self.width * 0.72)
             side_w = self.width - main_w
@@ -588,18 +538,15 @@ class TiledDisplay:
             side_w = 0
             side_h = 0
         
-        # Create main camera panel
         main_sensor = layout.get('main')
         if main_sensor:
             panel = self._create_panel_for_sensor(main_sensor, main_w, main_h)
             self.add_panel(main_sensor, panel, 0, 0)
         
-        # Create side panels dynamically
         for i, sensor_name in enumerate(side_sensors):
             panel = self._create_panel_for_sensor(sensor_name, side_w, side_h)
             self.add_panel(sensor_name, panel, main_w, i * side_h)
         
-        # Bottom bar
         self._add_bottom_bar(main_h)
     
     def _get_sensor_type(self, sensor_name):
@@ -622,21 +569,14 @@ class TiledDisplay:
         else:  # rgb or unknown
             return CameraPanel(sensor_name, width, height, sensor_name.replace('_', ' ').title())
     
-    def _add_bottom_bar(self, y_position, height=175):
-        """
-        Add telemetry and obstacle panels at the bottom.
-        Called by all layouts.
-        
-        Args:
-            y_position: Y position for the bottom bar
-            height: Height of the bottom bar
-        """
+    def _add_bottom_bar(self, y_position):
+        """Add telemetry and obstacle panels at the bottom."""
         telem_w = self.width // 2
         obstacle_w = self.width - telem_w
         
-        self.add_panel('telemetry', TelemetryPanel('telemetry', telem_w, height),
+        self.add_panel('telemetry', TelemetryPanel('telemetry', telem_w, BOTTOM_BAR_HEIGHT),
                       0, y_position)
-        self.add_panel('obstacle', ObstaclePanel('obstacle', obstacle_w, height),
+        self.add_panel('obstacle', ObstaclePanel('obstacle', obstacle_w, BOTTOM_BAR_HEIGHT),
                       telem_w, y_position)
     
     def add_panel(self, name, panel, x, y):
@@ -693,23 +633,18 @@ class TiledDisplay:
     
     def _setup_lidar_layout(self):
         """Setup layout with LiDAR BEV view alongside main camera."""
-        # Bottom bar needs fixed height
-        bottom_h = 175
+        bottom_h = BOTTOM_BAR_HEIGHT
         main_h = self.height - bottom_h
         
-        # Split horizontally: main camera (left) and LiDAR BEV (right)
         main_w = int(self.width * 0.6)
         lidar_w = self.width - main_w
         
-        # Main camera panel (3rd person view)
         main_panel = CameraPanel('3rd_person', main_w, main_h, '3rd Person')
         self.add_panel('3rd_person', main_panel, 0, 0)
         
-        # LiDAR BEV panel
         lidar_panel = LidarPanel('lidar', lidar_w, main_h)
         self.add_panel('lidar', lidar_panel, main_w, 0)
         
-        # Bottom bar
         self._add_bottom_bar(main_h)
     
     def _setup_surround_layout(self):
@@ -717,7 +652,6 @@ class TiledDisplay:
         layout = get_layout_config('surround')
         grid_sensors = layout.get('grid', [])
         
-        # If no grid sensors defined, fall back to all sensors
         if not grid_sensors:
             grid_sensors = [s['name'] for s in SENSORS]
         
@@ -727,11 +661,9 @@ class TiledDisplay:
             self._setup_default_layout()
             return
         
-        # Bottom bar needs fixed height
-        bottom_h = 175
+        bottom_h = BOTTOM_BAR_HEIGHT
         available_h = self.height - bottom_h
         
-        # Calculate grid dimensions
         if num_sensors <= 2:
             cols, rows = num_sensors, 1
         elif num_sensors <= 4:
@@ -744,7 +676,6 @@ class TiledDisplay:
         cell_w = self.width // cols
         cell_h = available_h // rows
         
-        # Create panels in grid
         for i, sensor_name in enumerate(grid_sensors):
             row = i // cols
             col = i % cols
@@ -754,27 +685,22 @@ class TiledDisplay:
             panel = self._create_panel_for_sensor(sensor_name, cell_w, cell_h)
             self.add_panel(sensor_name, panel, x, y)
         
-        # Bottom bar
         self._add_bottom_bar(rows * cell_h)
     
     def _setup_fullscreen_layout(self):
         """Setup fullscreen layout with dropdown sensor selector."""
-        # Initialize selected sensor if not set
         if not hasattr(self, '_fullscreen_sensor'):
             self._fullscreen_sensor = '3rd_person'
         if not hasattr(self, '_dropdown_open'):
             self._dropdown_open = False
         
-        # Header bar for dropdown
         header_h = 40
-        bottom_h = 175
+        bottom_h = BOTTOM_BAR_HEIGHT
         content_h = self.height - header_h - bottom_h
         
-        # Create fullscreen panel for current sensor
         panel = self._create_panel_for_sensor(self._fullscreen_sensor, self.width, content_h)
         self.add_panel('fullscreen_view', panel, 0, header_h)
         
-        # Bottom bar
         self._add_bottom_bar(header_h + content_h)
     
     def render(self, display, data=None):

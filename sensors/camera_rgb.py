@@ -76,10 +76,7 @@ class CameraRGB(BaseSensor):
         if self.data is None:
             return None
         
-        try:
-            import pygame
-            # Data is already RGB
-            self.surface = pygame.surfarray.make_surface(self.data.swapaxes(0, 1))
-            return self.surface
-        except ImportError:
-            return None
+        import pygame
+        # Data is already RGB
+        self.surface = pygame.surfarray.make_surface(self.data.swapaxes(0, 1))
+        return self.surface

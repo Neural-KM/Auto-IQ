@@ -56,7 +56,7 @@ class BehaviorPlanner:
         Update behavior state based on perception.
         
         Args:
-            obstacle_detection: Result from ObstacleDetector.detect()
+            obstacle_detection: Obstacle dataclass instance (closest obstacle) or None
             
         Returns:
             Target waypoint for current behavior
@@ -81,12 +81,16 @@ class BehaviorPlanner:
     
     def _handle_lane_following(self, obstacle_detection):
         """Handle lane following state."""
-        if obstacle_detection and obstacle_detection.get('obstacle_detected'):
-            distance = obstacle_detection.get('distance', float('inf'))
-            position = obstacle_detection.get('position', '')
+        if obstacle_detection:
+            # Compute distance from ego-relative position
+            distance = (obstacle_detection.x**2 + obstacle_detection.y**2 + obstacle_detection.z**2)**0.5
+            
+            # Determine position: check if obstacle is in center (forward direction, small lateral offset)
+            # Assume center lane is within +/- 2m lateral offset and forward (x > 0)
+            is_center = obstacle_detection.x > 0 and abs(obstacle_detection.y) < 2.0
             
             # Obstacle in our lane and close
-            if position == 'center' and distance < CONTROL['obstacle']['lane_change_trigger_distance']:
+            if is_center and distance < CONTROL['obstacle']['lane_change_trigger_distance']:
                 self.state = BehaviorState.PREPARING_LANE_CHANGE
                 self.original_lane_id = self.local_planner.get_current_waypoint().lane_id
                 print(f"[Behavior] Obstacle detected at {distance:.1f}m - preparing lane change")

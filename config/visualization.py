@@ -7,6 +7,13 @@ Defines which sensors appear in each layout.
 
 from config.config import SENSORS
 
+# Display dimensions
+DISPLAY_WIDTH = 1280
+DISPLAY_HEIGHT = 860
+
+# Minimum panel heights for tiled layout
+BOTTOM_BAR_HEIGHT = 175
+MIN_SIDE_PANEL_HEIGHT = 150
 
 # Define which sensors to show in which layout
 # These reference sensor names from config/sensors.py

@@ -98,16 +98,16 @@ class PurePursuitController:
         vx, vy = vehicle_location.x, vehicle_location.y
         
         for wp in self._waypoints:
-            wp_loc = wp.transform.location
-            dist = math.sqrt((wp_loc.x - vx)**2 + (wp_loc.y - vy)**2)
+            wx, wy = wp[0], wp[1]
+            dist = math.sqrt((wx - vx)**2 + (wy - vy)**2)
             
             if dist >= lookahead_distance:
-                return (wp_loc.x, wp_loc.y)
+                return (wx, wy)
         
         # If no waypoint is far enough, use the last waypoint
         if self._waypoints:
             last_wp = self._waypoints[-1]
-            return (last_wp.transform.location.x, last_wp.transform.location.y)
+            return (last_wp[0], last_wp[1])
         
         return None
     
@@ -129,26 +129,26 @@ class PurePursuitController:
         
         # Find the two waypoints that straddle the lookahead distance
         for i in range(len(self._waypoints) - 1):
-            wp1 = self._waypoints[i].transform.location
-            wp2 = self._waypoints[i + 1].transform.location
+            wp1_x, wp1_y = self._waypoints[i][0], self._waypoints[i][1]
+            wp2_x, wp2_y = self._waypoints[i+1][0], self._waypoints[i+1][1]
             
-            d1 = math.sqrt((wp1.x - vx)**2 + (wp1.y - vy)**2)
-            d2 = math.sqrt((wp2.x - vx)**2 + (wp2.y - vy)**2)
+            d1 = math.sqrt((wp1_x - vx)**2 + (wp1_y - vy)**2)
+            d2 = math.sqrt((wp2_x - vx)**2 + (wp2_y - vy)**2)
             
             # Check if lookahead distance is between these two waypoints
             if d1 < lookahead_distance <= d2:
                 # Interpolate between wp1 and wp2
-                segment_length = math.sqrt((wp2.x - wp1.x)**2 + (wp2.y - wp1.y)**2)
+                segment_length = math.sqrt((wp2_x - wp1_x)**2 + (wp2_y - wp1_y)**2)
                 if segment_length < 0.001:
-                    return (wp2.x, wp2.y)
+                    return (wp2_x, wp2_y)
                 
                 # How far along the segment to reach lookahead distance
                 # Using linear approximation
                 ratio = (lookahead_distance - d1) / (d2 - d1 + 0.001)
                 ratio = np.clip(ratio, 0.0, 1.0)
                 
-                lx = wp1.x + ratio * (wp2.x - wp1.x)
-                ly = wp1.y + ratio * (wp2.y - wp1.y)
+                lx = wp1_x + ratio * (wp2_x - wp1_x)
+                ly = wp1_y + ratio * (wp2_y - wp1_y)
                 
                 return (lx, ly)
         

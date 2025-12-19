@@ -1,36 +1,19 @@
-"""
-Fake Perception Module
-======================
+"""Fake Perception - Ground truth obstacle detection from CARLA."""
 
-Mimics a perception system by retrieving ground truth data from CARLA
-and filtering for obstacles within a certain radius of the ego vehicle.
-"""
-
-import carla
 import math
-from visualization.bounding_box_visualizer import BoundingBoxVisualizer
+from typing import List
+
+from navigation.obstacle_state import Obstacle
 
 
-class FakePerception(BoundingBoxVisualizer):
-    """
-    Simulates a perfect perception system using ground truth data.
-    Inherits from BoundingBoxVisualizer for debug visualization capabilities.
-    """
+class FakePerception:
+    """Ground truth perception using CARLA world state."""
     
-    def __init__(self, vehicle, world, debug=False):
-        """
-        Initialize fake perception.
-        
-        Args:
-            vehicle: The ego vehicle actor.
-            world: The CARLA world instance.
-            debug: Whether to draw debug visualizations.
-        """
-        super().__init__(world, ego_vehicle=vehicle)
+    def __init__(self, vehicle, world):
         self.vehicle = vehicle
-        self.debug_mode = debug
+        self.world = world
         
-    def detect_obstacles(self, radius=50.0):
+    def detect_obstacles(self, radius: float = 50.0) -> List[Obstacle]:
         """
         Detect obstacles within a given radius.
         
@@ -38,28 +21,14 @@ class FakePerception(BoundingBoxVisualizer):
             radius: Detection radius in meters.
             
         Returns:
-            List of dictionaries containing obstacle details:
-            {
-                'id': actor_id,
-                'type': 'vehicle' or 'pedestrian',
-                'type_id': blueprint_id,
-                'location': carla.Location,
-                'distance': float (meters),
-                'velocity': carla.Vector3D,
-                'speed': float (m/s),
-                'bounding_box': {
-                    'relative_location': carla.Location, # Center of BB relative to ego
-                    'extent': carla.Vector3D,            # Half-size (x, y, z)
-                    'dimensions': carla.Vector3D         # Full size (length, width, height)
-                }
-            }
+            List of Obstacle dataclass instances, sorted by distance.
         """
         if not self.vehicle or not self.vehicle.is_alive:
             return []
             
         ego_transform = self.vehicle.get_transform()
         ego_location = ego_transform.location
-        obstacles = []
+        obstacles: List[Obstacle] = []
         
         # Get all relevant actors
         actor_list = self.world.get_actors()
@@ -78,7 +47,6 @@ class FakePerception(BoundingBoxVisualizer):
             
             if distance <= radius:
                 velocity = actor.get_velocity()
-                speed = math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2)
                 
                 obstacle_type = 'vehicle' if 'vehicle' in actor.type_id else 'pedestrian'
                 
@@ -94,41 +62,36 @@ class FakePerception(BoundingBoxVisualizer):
                 # 2. Transform world coordinate to ego vehicle local coordinate
                 bbox_center_relative = ego_transform.inverse_transform(bbox_center_world)
                 
-                # Dimensions
-                dimensions = carla.Vector3D(
-                    x=bbox.extent.x * 2,
-                    y=bbox.extent.y * 2,
-                    z=bbox.extent.z * 2
+                # Transform velocity to ego-relative frame
+                ego_forward = ego_transform.get_forward_vector()
+                ego_right = ego_transform.get_right_vector()
+                ego_up = ego_transform.get_up_vector()
+                
+                vx_rel = velocity.x * ego_forward.x + velocity.y * ego_forward.y + velocity.z * ego_forward.z
+                vy_rel = velocity.x * ego_right.x + velocity.y * ego_right.y + velocity.z * ego_right.z
+                vz_rel = velocity.x * ego_up.x + velocity.y * ego_up.y + velocity.z * ego_up.z
+                
+                # Dimensions (full extent)
+                dims_x = bbox.extent.x * 2
+                dims_y = bbox.extent.y * 2
+                dims_z = bbox.extent.z * 2
+                
+                obstacle = Obstacle(
+                    id=actor.id,
+                    obstacle_type=obstacle_type,
+                    x=bbox_center_relative.x,
+                    y=bbox_center_relative.y,
+                    z=bbox_center_relative.z,
+                    vx=vx_rel,
+                    vy=vy_rel,
+                    vz=vz_rel,
+                    length=dims_x,
+                    width=dims_y,
+                    height=dims_z,
                 )
+                obstacles.append(obstacle)
                 
-                obstacle_info = {
-                    'id': actor.id,
-                    'type': obstacle_type,
-                    'type_id': actor.type_id,
-                    'location': actor_location,
-                    'distance': distance,
-                    'velocity': velocity,
-                    'speed': speed,
-                    'bounding_box': {
-                        'relative_location': bbox_center_relative,
-                        'extent': bbox.extent,
-                        'dimensions': dimensions
-                    }
-                }
-                obstacles.append(obstacle_info)
-                
-                # Draw debug bounding box if enabled
-                if self.debug_mode:
-                    self.draw_bounding_box(
-                        relative_location=bbox_center_relative,
-                        dimensions=dimensions,
-                        yaw=actor_transform.rotation.yaw - ego_transform.rotation.yaw,
-                        color=carla.Color(255, 0, 0) if obstacle_type == 'vehicle' else carla.Color(0, 255, 0),
-                        life_time=0.5,
-                        thickness=0.1
-                    )
-                
-        # Sort by distance
-        obstacles.sort(key=lambda x: x['distance'])
+        # Sort by distance (computed from position)
+        obstacles.sort(key=lambda o: (o.x**2 + o.y**2 + o.z**2)**0.5)
         
         return obstacles

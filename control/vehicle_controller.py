@@ -3,7 +3,7 @@ Vehicle Controller
 ==================
 
 Unified vehicle control with MPC or PID modes (selectable via argument).
-MPC: Full NMPC for trajectory tracking with obstacle avoidance
+MPC: Full NMPC for trajectory tracking
 PID: Pure Pursuit (lateral) + PID (longitudinal) for waypoint following
 """
 
@@ -15,10 +15,8 @@ from control.pure_pursuit_controller import PurePursuitController
 from control.longitudinal_controller import LongitudinalController
 from config.config import CARLA, CONTROL
 
-# MPC components
+# MPC (unified controller with integrated vehicle model and trajectory generation)
 from control.mpc_controller import MPCController
-from control.trajectory_generator import TrajectoryGenerator
-from control.vehicle_model import VehicleModel
 
 class VehicleController:
     """
@@ -28,7 +26,7 @@ class VehicleController:
     PID: Pure Pursuit lateral + PID longitudinal for waypoint following
     """
     
-    def __init__(self, vehicle, controller_type='mpc', mpc_horizon=20, mpc_dt=0.05):
+    def __init__(self, vehicle, controller_type='mpc', mpc_horizon=20, mpc_dt=0.05, trajectory_mode=0):
         """
         Initialize vehicle controller.
         
@@ -37,16 +35,16 @@ class VehicleController:
             controller_type: 'mpc' or 'pid'
             mpc_horizon: MPC prediction horizon steps
             mpc_dt: MPC timestep in seconds
+            trajectory_mode: 0 for heuristic, 1 for trapezoidal (MPC only)
         """
         self.vehicle = vehicle
         self.controller_type = controller_type.lower()
         
         if self.controller_type == 'mpc':
-            raise NotImplementedError("MPC controller is currently disabled.")
-            print("[VehicleController] Using MPC control (path tracking, no obstacles)")
-            self.mpc = MPCController(dt=mpc_dt, horizon=mpc_horizon)
-            self.trajectory_gen = TrajectoryGenerator(target_speed=CONTROL['planning']['target_speed'])
-            self.model = VehicleModel()
+            print(f"[VehicleController] Using MPC control (mode={trajectory_mode})")
+            self.mpc = MPCController(dt=mpc_dt, horizon=mpc_horizon, 
+                                   target_speed=CONTROL['planning']['target_speed'],
+                                   trajectory_mode=trajectory_mode)
             self._mpc_horizon = mpc_horizon
             self._mpc_dt = mpc_dt
             
@@ -70,37 +68,31 @@ class VehicleController:
         # Previous control
         self._prev_control = np.array([0.0, 0.0])
         
-        # Obstacles for MPC
-        self._obstacles = []
-        
         # Waypoints for trajectory generation
         self._waypoints = None
+    def update_obstacles(self, obstacles):
+        """Update detected obstacles for the controller (for MPC or PID)."""
+        self._obstacles = obstacles
+        if self.controller_type == 'mpc':
+            self.mpc.update_obstacles(obstacles)
     
     def set_waypoints(self, waypoints):
         """
         Set waypoints for trajectory generation.
         
         Args:
-            waypoints: List of carla.Waypoint or (x, y) tuples
+            waypoints: List of carla.Waypoint
         """
-        self._waypoints = waypoints
+        # Convert to (x, y) tuples
+        self._waypoints = [(wp.transform.location.x, wp.transform.location.y) for wp in waypoints] if waypoints else []
         
-        if self.controller_type == 'mpc' and waypoints:
-            success = self.trajectory_gen.set_waypoints(waypoints)
+        if self.controller_type == 'mpc' and self._waypoints:
+            success = self.mpc.set_waypoints(self._waypoints)
             if not success:
                 print("[VehicleController] Failed to set waypoints for MPC")
-        elif self.controller_type == 'pid' and waypoints:
+        elif self.controller_type == 'pid' and self._waypoints:
             # Pass waypoints to Pure Pursuit controller
-            self.lateral.set_waypoints(waypoints)
-    
-    def set_obstacles(self, obstacles):
-        """
-        Set obstacles for MPC avoidance.
-        
-        Args:
-            obstacles: List of (x, y, radius) tuples
-        """
-        self._obstacles = obstacles if obstacles else []
+            self.lateral.set_waypoints(self._waypoints)
     
     def get_current_state(self):
         """
@@ -144,31 +136,12 @@ class VehicleController:
         """Run MPC control step."""
         # Get current state
         current_state = self.get_current_state()
-        
+
         # Convert target speed to m/s
         target_speed_ms = target_speed / 3.6
         
-        # Generate reference trajectory from waypoints
-        if len(self._waypoints) > 3:
-            # Use spline-based trajectory from waypoints
-            reference = self.trajectory_gen.generate_reference(
-                current_state, 
-                self._mpc_horizon, 
-                self._mpc_dt,
-                target_speed_ms
-            )
-        else:
-            # Generate simple reference from first waypoint
-            reference = self._generate_simple_reference(
-                current_state, self._waypoints[0], target_speed_ms
-            )
-        
-        if reference is None:
-            print("[VehicleController] No reference trajectory available")
-            return self.emergency_stop()
-        
-        # Solve MPC
-        optimal_control = self.mpc.solve(current_state, reference, self._obstacles)
+        # Solve MPC (reference trajectory generated internally)
+        optimal_control = self.mpc.solve(current_state, target_speed_ms)
         
         if optimal_control is None:
             print("[VehicleController] MPC solve failed")
@@ -178,16 +151,16 @@ class VehicleController:
         steering_rad, accel = optimal_control
         
         # Convert steering angle to normalized steering [-1, 1]
-        max_steer_rad = self.model.MAX_STEER
+        max_steer_rad = self.mpc.MAX_STEER
         steering = np.clip(steering_rad / max_steer_rad, -1.0, 1.0)
         
         # Convert acceleration to throttle/brake
         if accel >= 0:
-            throttle = np.clip(accel / self.model.MAX_ACCEL, 0.0, 1.0)
+            throttle = np.clip(accel / self.mpc.MAX_ACCEL, 0.0, 1.0)
             brake = 0.0
         else:
             throttle = 0.0
-            brake = np.clip(-accel / abs(self.model.MAX_DECEL), 0.0, 1.0)
+            brake = np.clip(-accel / abs(self.mpc.MAX_DECEL), 0.0, 1.0)
         
         # Create control command
         control = carla.VehicleControl()
@@ -202,47 +175,6 @@ class VehicleController:
         self.previous_steering = steering
         
         return control
-    
-    def _generate_simple_reference(self, current_state, target_waypoint, target_speed_ms):
-        """Generate simple reference trajectory from single waypoint."""
-        if target_waypoint is None:
-            return None
-        
-        # Get target position
-        if hasattr(target_waypoint, 'transform'):
-            target_x = target_waypoint.transform.location.x
-            target_y = target_waypoint.transform.location.y
-        else:
-            return None
-        
-        # Generate trajectory towards target
-        reference = np.zeros((self._mpc_horizon + 1, 4))
-        
-        x, y, psi, v = current_state
-        
-        # Direction to target
-        dx = target_x - x
-        dy = target_y - y
-        dist = math.sqrt(dx**2 + dy**2)
-        
-        if dist < 0.1:
-            target_psi = psi
-        else:
-            target_psi = math.atan2(dy, dx)
-        
-        # Interpolate towards target
-        for i in range(self._mpc_horizon + 1):
-            t = i * self._mpc_dt
-            progress = min(1.0, (target_speed_ms * t) / (dist + 0.1))
-            
-            ref_x = x + progress * dx
-            ref_y = y + progress * dy
-            ref_psi = target_psi
-            ref_v = target_speed_ms
-            
-            reference[i] = [ref_x, ref_y, ref_psi, ref_v]
-        
-        return reference
     
     def _run_step_pid(self, target_speed):
         """Run PID control step."""
@@ -297,7 +229,6 @@ class VehicleController:
         """Reset controller state."""
         self.previous_steering = 0.0
         self._prev_control = np.array([0.0, 0.0])
-        self._obstacles = []
         
         if self.controller_type == 'pid':
             self.lateral.reset()
@@ -311,10 +242,10 @@ class VehicleController:
             return None
         
         return {
-            'solve_time_ms': self.mpc.get_avg_solve_time(),
             'predicted_trajectory': self.mpc.get_predicted_trajectory(),
             'planned_controls': self.mpc.get_planned_controls(),
-            'num_obstacles': len(self._obstacles)
+            'reference_trajectory': self.mpc.get_reference_trajectory(),
+            'solve_time_ms': self.mpc.get_last_solve_time_ms()
         }
     
     def get_pure_pursuit_info(self):
