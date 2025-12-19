@@ -1,13 +1,11 @@
 #!/usr/bin/env python
 
 """
-AutoIQ Demo Runner
+AutoIQ Runner
 ==================
 
 Main entry point for running the autonomous vehicle demo.
 
-Usage:
-    python run_demo.py [--host HOST] [--port PORT] [--speed SPEED]
 """
 
 import sys
@@ -22,19 +20,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'carla'))
 
 import carla
 import pygame
-from pygame.locals import K_ESCAPE, K_q, K_UP, K_DOWN, K_SPACE, K_LEFT, K_RIGHT, K_b, K_g, K_n, K_i
+from pygame.locals import K_ESCAPE, K_q, K_UP, K_DOWN, K_SPACE, K_g, K_n
 import numpy as np
 import cv2
 
 # AutoIQ modules
 from config.config import CARLA, CONTROL, SENSORS
+from config.visualization import DISPLAY_WIDTH, DISPLAY_HEIGHT
+
 from sensors.sensor_suite import SensorSuite
 from visualization.tiled_display import TiledDisplay
 from navigation.navigation_manager import NavigationManager
-from perception.lane_detector import LaneDetector, LaneDetectorDebugWindow
-from perception.fake_perception import FakePerception
+from perception.perception_manager import PerceptionManager
 from utils.helpers import spawn_vehicle, get_vehicle_telemetry
-
+from navigation.obstacle_state import ObstacleState
+from navigation.lane_state import LaneState
 
 class AutoIQ:
     """Main demo application."""
@@ -54,16 +54,14 @@ class AutoIQ:
         self.target_speed = args.speed
         self.running = True
         self.layout_mode = 'default'  # 'default', 'minimal', 'debug'
-        self.enable_lane_detection = not args.no_lane_detection
         self.visualize_options = args.visualize
         
-        # Lane detection
-        self.lane_detector = None
-        self.lane_debug_window = None
-        self.lane_detection_result = None
+        # Perception manager (handles obstacle & lane detection)
+        self.perception = None
         
-        # Fake perception
-        self.fake_perception = None
+        # Shared perception state
+        self.obstacle_state = None
+        self.lane_state = None
     
     def setup(self):
         """Initialize everything."""
@@ -88,46 +86,53 @@ class AutoIQ:
         self.vehicle = spawn_vehicle(self.world, spawn_index=self.args.spawn)
         print(f"[AutoIQ] Spawned: {self.vehicle.type_id} at spawn point {self.args.spawn}")
         # Print initial pose and speed
-        try:
-            transform = self.vehicle.get_transform()
-            velocity = self.vehicle.get_velocity()
-            speed_ms = (velocity.x**2 + velocity.y**2 + velocity.z**2)**0.5
-            print(f"[AutoIQ] Initial vehicle pose: x={transform.location.x:.2f}, y={transform.location.y:.2f}, yaw={transform.rotation.yaw:.2f}°, v={speed_ms:.2f} m/s")
-        except Exception as e:
-            print(f"[AutoIQ] Warning: couldn't read initial vehicle pose: {e}")
-        
-        # Initialize fake perception
-        fake_perception_debug = ('all' in self.args.visualize) or ('bbox' in self.args.visualize)
-        self.fake_perception = FakePerception(self.vehicle, self.world, debug=fake_perception_debug)
-        print("[AutoIQ] Fake perception initialized")
+
+        transform = self.vehicle.get_transform()
+        velocity = self.vehicle.get_velocity()
+        speed_ms = (velocity.x**2 + velocity.y**2 + velocity.z**2)**0.5
+        print(f"[AutoIQ] Initial vehicle pose: x={transform.location.x:.2f}, y={transform.location.y:.2f}, yaw={transform.rotation.yaw:.2f}°, v={speed_ms:.2f} m/s")
+
+        # Initialize shared perception state
+        self.obstacle_state = ObstacleState()
+        self.lane_state = LaneState()
         
         # Setup sensors from config
         self.sensors = SensorSuite(self.vehicle, self.world)
         self.sensors.add_sensors_from_config()
         print("[AutoIQ] Sensors attached")
         
-        # Setup navigation manager with sensor integration
-        self.nav_manager = NavigationManager(
-            self.vehicle, self.world, 
+        # Initialize perception manager
+        self.perception = PerceptionManager(
+            vehicle=self.vehicle,
+            world=self.world,
             sensor_suite=self.sensors,
+            enable_lane_detection=not self.args.no_lane_detection,
+            visualize_options=self.visualize_options
+        )
+        print("[AutoIQ] Perception manager initialized")
+        
+        # Setup navigation manager with shared state
+        self.nav_manager = NavigationManager(
+            self.vehicle, self.world,
+            obstacle_state=self.obstacle_state,
+            lane_state=self.lane_state,
             controller_type=self.args.controller,
             visualize_options=self.args.visualize,
             trajectory_mode=self.args.trajectory_mode
         )
-        self.nav_manager.set_target_speed(self.target_speed)
         
         # Store destination but don't start navigation yet - wait for G key
-        self._pending_destination = self.args.dest
+        self.destination_index_carla = self.args.dest
         
         # Setup pygame display
         pygame.init()
         pygame.display.set_caption("AutoIQ - Autonomous Demo")
         self.display = pygame.display.set_mode(
-            (self.args.width, self.args.height),
+            (DISPLAY_WIDTH, DISPLAY_HEIGHT),
             pygame.HWSURFACE | pygame.DOUBLEBUF
         )
         self.clock = pygame.time.Clock()
-        self.tiled_display = TiledDisplay(self.args.width, self.args.height)
+        self.tiled_display = TiledDisplay()
         
         # Wait for sensors
         print("[AutoIQ] Waiting for sensors...")
@@ -136,29 +141,6 @@ class AutoIQ:
                 self.world.tick()
         else:
             time.sleep(1.0)
-        
-        # Setup lane detection
-        semantic_sensor = self.sensors.get_sensor('semantic')
-        if self.enable_lane_detection and semantic_sensor:
-            # Get camera parameters for proper BEV transform
-            camera_fov = semantic_sensor.fov
-            camera_pitch = semantic_sensor.position.get('pitch', 0.0)
-            camera_height = semantic_sensor.position.get('z', 1.5)
-            
-            self.lane_detector = LaneDetector(
-                image_width=semantic_sensor.width,
-                image_height=semantic_sensor.height,
-                camera_fov=camera_fov,
-                camera_pitch=camera_pitch,
-                camera_height=camera_height
-            )
-            self.lane_debug_window = LaneDetectorDebugWindow("Lane Detection Debug")
-            print(f"[AutoIQ] Lane detector initialized (FOV={camera_fov}°, pitch={camera_pitch}°, height={camera_height}m)")
-        else:
-            if not self.enable_lane_detection:
-                print("[AutoIQ] Lane detection disabled via CLI flag")
-            else:
-                print("[AutoIQ] Warning: No semantic sensor found, lane detection disabled")
         
         print("[AutoIQ] Ready!")
     
@@ -185,23 +167,10 @@ class AutoIQ:
                     else:
                         self.nav_manager.resume()
                         print("[AutoIQ] Navigation resumed")
-                elif event.key == K_LEFT:
-                    # Force lane change left
-                    self.nav_manager.force_lane_change('left')
-                elif event.key == K_RIGHT:
-                    # Force lane change right
-                    self.nav_manager.force_lane_change('right')
-                elif event.key == K_b:
-                    # Reset behavior to lane following
-                    self.nav_manager.reset_behavior()
-                    print("[AutoIQ] Behavior reset")
                 elif event.key == K_g:
                     # Plan route to destination (but don't start driving yet)
-                    if self._pending_destination is not None:
-                        print(f"[AutoIQ] Planning route to spawn point {self._pending_destination}...")
-                        self.nav_manager.plan_route_by_index(self._pending_destination)
-                    else:
-                        print("[AutoIQ] No destination set. Use --dest argument.")
+                    print(f"[AutoIQ] Planning route to spawn point {self.destination_index_carla}...")
+                    self.nav_manager.plan_route_by_index(self.destination_index_carla)
                 elif event.key == K_n:
                     # Start navigation (begin driving the planned route)
                     if self.nav_manager.is_route_planned():
@@ -231,48 +200,20 @@ class AutoIQ:
     
     def run_step(self):
         """Execute one simulation step."""
-        # Run fake perception
-        if self.fake_perception:
-            obstacles = self.fake_perception.detect_obstacles(radius=50.0)
-            if obstacles:
-                print(f"\n[FakePerception] Detected {len(obstacles)} obstacles:")
-                for obs in obstacles:
-                    bbox = obs['bounding_box']
-                    rel_loc = bbox['relative_location']
-                    dims = bbox['dimensions']
-                    print(f"  - {obs['type']} (ID: {obs['id']}) at {obs['distance']:.1f}m | Speed: {obs['speed']:.1f} m/s")
-                    print(f"    Relative Pos: (x={rel_loc.x:.2f}, y={rel_loc.y:.2f}, z={rel_loc.z:.2f})")
-                    print(f"    Dimensions:   (l={dims.x:.2f}, w={dims.y:.2f}, h={dims.z:.2f})")
-        
-        # Run lane detection pipeline first so nav manager has latest data
-        if self.enable_lane_detection and self.lane_detector:
-            semantic_sensor = self.sensors.get_sensor('semantic')
-            if semantic_sensor:
-                semantic_image = semantic_sensor.get_data()
-                if semantic_image is not None:
-                    self.lane_detection_result = self.lane_detector.detect(semantic_image)
-                    
-                    # Update navigation manager with perception data
-                    if self.nav_manager:
-                        self.nav_manager.update_perception(self.lane_detection_result)
-                    
-                    # Print lane detection control inferences
-                    if self.lane_detection_result['valid']:
-                        confidence = self.lane_detection_result['confidence']
-                        print(f"[Lane] Detected | Conf: {confidence:.2f}")
-        
+        obstacles, lanes_result = self.perception.run_step(obstacle_radius=50.0)
+        self.obstacle_state.update(obstacles)
+        self.lane_state.update(lanes_result)
+
         control = self.nav_manager.run_step()
-        
+
         if control:
             self.vehicle.apply_control(control)
         else:
-            # Not navigating - apply brakes
             self.vehicle.apply_control(carla.VehicleControl(brake=0.5))
-        
-        # Draw sensor markers in simulator
+
         if self.visualize_options and ('all' in self.visualize_options or 'sensors' in self.visualize_options):
             self.sensors.draw_sensor_markers()
-        
+
         return control
     
     def render(self, control):
@@ -304,8 +245,8 @@ class AutoIQ:
             'obstacle_type': nav_status.get('obstacle_type', 'unknown')
         }
         
-        # Get debug images from obstacle detector
-        debug_images = self.nav_manager.obstacle_detector.get_debug_images()
+        # Get debug images from perception
+        debug_images = self.perception.get_debug_images()
         
         # Build panel data dynamically from configured sensors
         panel_data = {
@@ -375,20 +316,7 @@ class AutoIQ:
         self.tiled_display.render(self.display, panel_data)
         
         pygame.display.flip()
-        
-        # Show lane detection debug window (separate OpenCV window)
-        if self.lane_debug_window and self.lane_detector:
-            semantic_sensor = self.sensors.get_sensor('semantic')
-            if semantic_sensor:
-                semantic_image = semantic_sensor.get_data()
-                self.lane_debug_window.show(
-                    self.lane_detector,
-                    semantic_image,
-                    self.lane_detection_result
-                )
-                # Process OpenCV window events
-                LaneDetectorDebugWindow.wait_key(1)
-    
+            
     def run(self):
         """Main loop."""
         print("\n[AutoIQ] Starting autonomous demo...")
@@ -401,8 +329,8 @@ class AutoIQ:
         print("  1/2/3/4   : Switch layout (Default/Surround/Fullscreen/LiDAR)")
         print("  ESC/Q     : Quit\n")
         
-        if self._pending_destination is not None:
-            print(f"[AutoIQ] Press G to start navigation to spawn point {self._pending_destination}")
+        if self.destination_index_carla is not None:
+            print(f"[AutoIQ] Press G to start navigation to spawn point {self.destination_index_carla}")
         
         try:
             while self.running:
@@ -458,11 +386,10 @@ class AutoIQ:
         except Exception as e:
             print(f"[AutoIQ] Warning: Error restoring world settings: {e}")
         
-        # Close lane detection debug window
+        # Close perception debug windows
         try:
-            if self.lane_debug_window:
-                self.lane_debug_window.close()
-                self.lane_debug_window = None
+            if self.perception:
+                self.perception.close()
             cv2.destroyAllWindows()
         except Exception as e:
             print(f"[AutoIQ] Warning: Error closing debug windows: {e}")
@@ -483,7 +410,6 @@ def main():
     parser.add_argument('--port', type=int, default=2000, help='CARLA port')
     parser.add_argument('--speed', type=float, default=30.0, help='Target speed km/h')
     parser.add_argument('--sync', action='store_true', help='Synchronous mode')
-    parser.add_argument('--res', default='1280x860', help='Window resolution (default: 1280x860)')
     parser.add_argument('--spawn', type=int, default=0, help='Spawn point index for vehicle (default: 0)')
     parser.add_argument('--dest', type=int, default=None, help='Destination spawn point index')
     parser.add_argument('--visualize', type=str, default='',
@@ -496,20 +422,10 @@ def main():
                         help='Trajectory generation mode: 0=Heuristic, 1=Trapezoidal (default: 0)')
     args = parser.parse_args()
 
-    # Parse visualize options
     args.visualize = set([item.strip().lower() for item in args.visualize.split(',') if item.strip()])
     if 'all' in args.visualize:
         args.visualize = {'all'}
-    args.draw_on_simulator = bool(args.visualize)  # backward compat for downstream checks
-    
-    # Parse resolution and ensure minimum size for tiled display
-    req_width, req_height = [int(x) for x in args.res.split('x')]
-    args.width, args.height = TiledDisplay.get_recommended_size(req_width, req_height)
-    
-    if (args.width, args.height) != (req_width, req_height):
-        print(f"[AutoIQ] Adjusted window size to {args.width}x{args.height} for tiled layout")
 
-    
     demo = AutoIQ(args)
     
     # Register cleanup handlers for various exit scenarios
@@ -526,13 +442,9 @@ def main():
     # Register atexit handler as backup
     atexit.register(demo.cleanup)
     
-    try:
-        demo.setup()
-        demo.run()
-    except Exception as e:
-        print(f"[AutoIQ] Error: {e}")
-    finally:
-        demo.cleanup()
+    demo.setup()
+    demo.run()
+    demo.cleanup()
 
 
 if __name__ == '__main__':

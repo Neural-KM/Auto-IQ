@@ -13,10 +13,11 @@ import carla
 from planning.global_planner import GlobalPlanner, RoadOption
 from planning.local_planner import LocalPlanner
 from planning.behavior_planner import BehaviorPlanner, BehaviorState
-from perception.obstacle_detector import ObstacleDetector
 from control.vehicle_controller import VehicleController
 from config.config import CONTROL
 from visualization.live_2d_visualizer import visualizer as live_visualizer
+from navigation.obstacle_state import ObstacleState
+from navigation.lane_state import LaneState
 
 
 class NavigationManager:
@@ -31,15 +32,16 @@ class NavigationManager:
     - Vehicle Controller: Low-level vehicle control (MPC or PID)
     """
     
-    def __init__(self, vehicle, world, sensor_suite=None,
-                 controller_type='mpc', visualize_options=None, trajectory_mode=0):
+    def __init__(self, vehicle, world, obstacle_state: ObstacleState, lane_state: LaneState,
+                 controller_type='mpc', visualize_options=set(), trajectory_mode=0):
         """
         Initialize navigation manager.
         
         Args:
             vehicle: CARLA vehicle actor
             world: CARLA world instance
-            sensor_suite: Optional SensorSuite instance for perception
+            obstacle_state: Shared obstacle state container
+            lane_state: Shared lane state container
             controller_type: 'mpc' for Model Predictive Control, 'pid' for PID control
             visualize_options: Set of visualization tags to draw in simulator
             trajectory_mode: 0 for heuristic, 1 for trapezoidal (MPC only)
@@ -47,18 +49,16 @@ class NavigationManager:
         self.vehicle = vehicle
         self.world = world
         self.map = world.get_map()
-        self.sensor_suite = sensor_suite
-        self.visualize_options = set(visualize_options) if visualize_options else set()
+        self.obstacle_state = obstacle_state
+        self.lane_state = lane_state
+        self.visualize_options = visualize_options
         self.controller_type = controller_type
         
         # Initialize planners
         self.global_planner = GlobalPlanner(self.map, sampling_resolution=2.0)
         self.local_planner = LocalPlanner(vehicle, self.map)
         self.behavior_planner = BehaviorPlanner(self.local_planner)
-        
-        # Initialize perception
-        self.obstacle_detector = ObstacleDetector()
-        
+                
         # Initialize controller with selected type
         self.controller = VehicleController(vehicle, controller_type=controller_type, trajectory_mode=trajectory_mode)
         
@@ -75,7 +75,6 @@ class NavigationManager:
         self._previous_behavior = BehaviorState.LANE_FOLLOWING
         self._lane_change_speed_factor = 0.7  # Slow down during lane change
         self._obstacle_detection = None
-        self.lane_detection_result = None
         
         # MPC-specific: waypoint lookahead for trajectory
         self._mpc_lookahead_waypoints = 30  # Number of waypoints to feed MPC
@@ -88,10 +87,6 @@ class NavigationManager:
                 print("[Navigation] Live 2D visualizer started")
             except Exception as e:
                 print(f"[Navigation] Failed to start live visualizer: {e}")
-    
-    def update_perception(self, lane_detection_result):
-        """Update lane detection result from perception system."""
-        self.lane_detection_result = lane_detection_result
     
     def plan_route(self, destination):
         """Plan route to destination without starting navigation."""
@@ -184,16 +179,6 @@ class NavigationManager:
         
         return success
     
-    def set_sensor_suite(self, sensor_suite):
-        """
-        Set sensor suite for perception.
-        
-        Args:
-            sensor_suite: SensorSuite instance
-        """
-        self.sensor_suite = sensor_suite
-        print("[Navigation] Sensor suite connected")
-    
     def _draw_route(self):
         """Draw route with short lifetime - refreshed each frame so they disappear when script stops."""
         self.global_planner.draw_route(self.world, life_time=1.0)
@@ -234,57 +219,6 @@ class NavigationManager:
             return False
         return self.set_destination(spawn_points[spawn_index].location)
     
-    def _get_perception_data(self):
-        """
-        Get perception data from sensors.
-        
-        Returns:
-            Tuple of (semantic_labels, depth_meters) or (None, None)
-        """
-        if self.sensor_suite is None:
-            return None, None
-        
-        # Get semantic segmentation camera
-        semantic_camera = self.sensor_suite.get_sensor('semantic')
-        depth_camera = self.sensor_suite.get_sensor('depth')
-        
-        semantic_labels = None
-        depth_meters = None
-        
-        if semantic_camera is not None:
-            semantic_data = semantic_camera.get_data()
-            if semantic_data is not None:
-                # Semantic camera may return 2D labels directly or 3D BGRA
-                if len(semantic_data.shape) == 2:
-                    semantic_labels = semantic_data
-                elif len(semantic_data.shape) == 3:
-                    # Semantic camera stores label in red channel (index 2 in BGRA)
-                    semantic_labels = semantic_data[:, :, 2]
-        
-        if depth_camera is not None:
-            # Depth camera already processes depth to meters via get_depth_meters()
-            depth_meters = depth_camera.get_depth_meters()
-        
-        return semantic_labels, depth_meters
-    
-    def _detect_obstacles(self):
-        """
-        Run obstacle detection.
-        
-        Returns:
-            Detection result dictionary
-        """
-        semantic_labels, depth_meters = self._get_perception_data()
-        
-        if semantic_labels is None or depth_meters is None:
-            # No sensor data - assume clear
-            return {
-                'obstacle_detected': False,
-                'distance': float('inf'),
-                'position': None
-            }
-        
-        return self.obstacle_detector.detect(semantic_labels, depth_meters)
 
     def run_step(self):
         """
@@ -313,13 +247,16 @@ class NavigationManager:
             self._clear_debug_drawings()
             return self.controller.emergency_stop()
         
-        # Run obstacle detection
-        self._obstacle_detection = self._detect_obstacles()
+        # Read latest obstacles from shared state
+        obstacles = self.obstacle_state.get_all() if self.obstacle_state else []
+        self._obstacle_detection = self.obstacle_state.get_closest() if self.obstacle_state else None
         
         # Update behavior planner with obstacle detection
         self._previous_behavior = self._current_behavior
         self._current_behavior = self.behavior_planner.get_state()
         self.behavior_planner.update(self._obstacle_detection)
+
+        self.controller.update_obstacles(obstacles)
         
         # Check if lane change just completed - replan route from new lane
         if (self._previous_behavior in [BehaviorState.LANE_CHANGING_LEFT, 
@@ -372,8 +309,8 @@ class NavigationManager:
         use_perception = self._should_use_perception(vehicle_location)
         
         if use_perception:
-            # Generate waypoints from lane detection
-            waypoints = self.local_planner.generate_waypoints_from_lane_fits(self.lane_detection_result)
+            # Generate waypoints from lane detection (use dict format for local_planner)
+            waypoints = self.local_planner.generate_waypoints_from_lane_fits(self.lane_state.to_dict())
             if waypoints:
                 return waypoints
             # Fall through to map-based if perception fails
@@ -395,9 +332,8 @@ class NavigationManager:
         3. Not changing lanes
         4. Controller supports it (PID)
         """
-        if not (self.lane_detection_result and 
-                self.lane_detection_result['valid'] and 
-                self.lane_detection_result['confidence'] > 0.5 and
+        if not (self.lane_state.valid and 
+                self.lane_state.confidence > 0.5 and
                 self._current_behavior == BehaviorState.LANE_FOLLOWING and
                 self.controller_type == 'pid'):
             return False
@@ -553,42 +489,30 @@ class NavigationManager:
     
     def _convert_obstacles_to_world(self):
         """
-        Convert detected obstacles from camera frame to world coordinates.
+        Convert detected obstacles from ego-relative to world coordinates.
         
         Returns:
             List of [x, y] world coordinates for obstacles
         """
         obstacles = []
         
-        if not self._obstacle_detection or not self._obstacle_detection.get('obstacle_detected'):
+        if not self._obstacle_detection:
             return obstacles
         
-        # Get obstacle distance and estimate world position
-        distance = self._obstacle_detection.get('distance', float('inf'))
+        # Transform ego-relative position to world coordinates
+        vehicle_transform = self.vehicle.get_transform()
         
-        if distance < float('inf'):
-            vehicle_transform = self.vehicle.get_transform()
-            forward = vehicle_transform.get_forward_vector()
-            
-            # Estimate obstacle world position (straight ahead)
-            obstacle_x = vehicle_transform.location.x + forward.x * distance
-            obstacle_y = vehicle_transform.location.y + forward.y * distance
-            
-            obstacles.append([obstacle_x, obstacle_y])
-            
-            # If we have lateral offset info from detection
-            center = self._obstacle_detection.get('center')
-            if center is not None:
-                # center[0] is horizontal pixel position
-                # Estimate lateral offset (assuming 90 degree FOV camera)
-                image_width = 800  # Default camera width
-                lateral_offset = (center[0] - image_width / 2) / image_width * distance * 0.8
-                
-                right = vehicle_transform.get_right_vector()
-                obstacle_x += right.x * lateral_offset
-                obstacle_y += right.y * lateral_offset
-                
-                obstacles[0] = [obstacle_x, obstacle_y]
+        # Ego-relative to world: rotate by vehicle yaw and translate
+        import math
+        yaw = math.radians(vehicle_transform.rotation.yaw)
+        cos_yaw = math.cos(yaw)
+        sin_yaw = math.sin(yaw)
+        
+        # Rotate ego-relative (x forward, y left) to world frame
+        world_x = vehicle_transform.location.x + (self._obstacle_detection.x * cos_yaw - self._obstacle_detection.y * sin_yaw)
+        world_y = vehicle_transform.location.y + (self._obstacle_detection.x * sin_yaw + self._obstacle_detection.y * cos_yaw)
+        
+        obstacles.append([world_x, world_y])
         
         return obstacles
     
@@ -716,15 +640,18 @@ class NavigationManager:
             return
         
         vehicle_transform = self.vehicle.get_transform()
-        forward = vehicle_transform.get_forward_vector()
-        distance = self._obstacle_detection.get('distance', 10)
         
-        # Draw warning point ahead
-        obstacle_loc = vehicle_transform.location + carla.Location(
-            x=forward.x * distance,
-            y=forward.y * distance,
-            z=1.0
-        )
+        # Transform ego-relative position to world coordinates
+        import math
+        yaw = math.radians(vehicle_transform.rotation.yaw)
+        cos_yaw = math.cos(yaw)
+        sin_yaw = math.sin(yaw)
+        
+        world_x = vehicle_transform.location.x + (self._obstacle_detection.x * cos_yaw - self._obstacle_detection.y * sin_yaw)
+        world_y = vehicle_transform.location.y + (self._obstacle_detection.x * sin_yaw + self._obstacle_detection.y * cos_yaw)
+        
+        # Draw warning point
+        obstacle_loc = carla.Location(x=world_x, y=world_y, z=vehicle_transform.location.z + 1.0)
         
         self.world.debug.draw_point(
             obstacle_loc,
@@ -811,13 +738,17 @@ class NavigationManager:
         
         # Add obstacle detection details if available
         if self._obstacle_detection:
-            status['obstacle_detected'] = self._obstacle_detection.get('obstacle_detected', False)
-            status['obstacle_distance'] = self._obstacle_detection.get('distance', float('inf'))
-            status['obstacle_position'] = self._obstacle_detection.get('position', None)
-            status['obstacle_center'] = self._obstacle_detection.get('center', None)
-            status['obstacle_bbox'] = self._obstacle_detection.get('bbox', None)
-            status['obstacle_type'] = self._obstacle_detection.get('obstacle_type', None)
-            status['obstacle_pixels'] = self._obstacle_detection.get('pixel_count', 0)
+            distance = (self._obstacle_detection.x**2 + self._obstacle_detection.y**2 + self._obstacle_detection.z**2)**0.5
+            is_center = self._obstacle_detection.x > 0 and abs(self._obstacle_detection.y) < 2.0
+            position = 'center' if is_center else ('left' if self._obstacle_detection.y > 0 else 'right')
+            
+            status['obstacle_detected'] = True
+            status['obstacle_distance'] = distance
+            status['obstacle_position'] = position
+            status['obstacle_center'] = None  # Legacy field
+            status['obstacle_bbox'] = None    # Legacy field
+            status['obstacle_type'] = self._obstacle_detection.obstacle_type
+            status['obstacle_pixels'] = 0     # Legacy field
         
         return status
     
@@ -844,37 +775,4 @@ class NavigationManager:
         if self.global_planner.get_route():
             self.is_navigating = True
     
-    def reset_behavior(self):
-        """Reset behavior planner to lane following."""
-        self.behavior_planner.reset()
-        print("[Navigation] Behavior reset to lane following")
     
-    def force_lane_change(self, direction):
-        """
-        Force a lane change in specified direction.
-        
-        Args:
-            direction: 'left' or 'right'
-            
-        Returns:
-            True if lane change initiated, False otherwise
-        """
-        if not self.local_planner.can_change_lane(direction):
-            print(f"[Navigation] Cannot change lane {direction} - no valid lane")
-            return False
-        
-        waypoints = self.local_planner.generate_lane_change_waypoints(direction)
-        if not waypoints:
-            print(f"[Navigation] Failed to generate lane change path")
-            return False
-        
-        # Manually set behavior planner state
-        self.behavior_planner.lane_change_waypoints = waypoints
-        self.behavior_planner.lane_change_index = 0
-        if direction == 'left':
-            self.behavior_planner.state = BehaviorState.LANE_CHANGING_LEFT
-        else:
-            self.behavior_planner.state = BehaviorState.LANE_CHANGING_RIGHT
-        
-        print(f"[Navigation] Forced lane change {direction}")
-        return True
