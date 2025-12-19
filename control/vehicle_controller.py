@@ -70,11 +70,12 @@ class VehicleController:
         
         # Waypoints for trajectory generation
         self._waypoints = None
-    def update_obstacles(self, obstacles):
-        """Update detected obstacles for the controller (for MPC or PID)."""
-        self._obstacles = obstacles
-        if self.controller_type == 'mpc':
-            self.mpc.update_obstacles(obstacles)
+    
+    # def update_obstacles(self, obstacles):
+    #     """Update detected obstacles for the controller (for MPC or PID)."""
+    #     self._obstacles = obstacles
+    #     if self.controller_type == 'mpc':
+    #         self.mpc.update_obstacles(obstacles)
     
     def set_waypoints(self, waypoints):
         """

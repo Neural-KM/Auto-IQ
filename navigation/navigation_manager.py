@@ -256,7 +256,7 @@ class NavigationManager:
         self._current_behavior = self.behavior_planner.get_state()
         self.behavior_planner.update(self._obstacle_detection)
 
-        self.controller.update_obstacles(obstacles)
+        # self.controller.update_obstacles(obstacles)
         
         # Check if lane change just completed - replan route from new lane
         if (self._previous_behavior in [BehaviorState.LANE_CHANGING_LEFT, 
