@@ -19,7 +19,7 @@ class PerceptionManager:
         vehicle,
         world,
         sensor_suite,
-        use_fake_perception: bool = False,
+        perception_mode: str = 'fake',
         enable_lane_detection: bool = True,
         visualize_options: Optional[set] = None,
         debug: bool = False,
@@ -28,21 +28,21 @@ class PerceptionManager:
         self.world = world
         self.sensor_suite = sensor_suite
         self.visualize_options = visualize_options or set()
-        self.use_fake_perception = use_fake_perception
+        self.perception_mode = perception_mode
         
         # Read perception config
         model_path = PERCEPTION['object_detector']['model_path']
         conf_threshold = PERCEPTION['object_detector']['conf_threshold']
         
         # Obstacle detection
-        if self.use_fake_perception:
+        if self.perception_mode == 'fake':
             self._obstacle_detector = FakePerception(vehicle, world)
             print("[Perception] Using FakePerception (ground truth)")
         else:
             self._obstacle_detector = Perception(
                 vehicle, world, sensor_suite,
-                # model_path=model_path,
-                # conf_threshold=conf_threshold
+                model_path=model_path,
+                conf_threshold=conf_threshold
             )
             print("[Perception] Using real perception (YOLO + Depth)")
         
@@ -118,7 +118,7 @@ class PerceptionManager:
         
         for obs in obstacles:
             # For real perception, we don't have actor IDs, so yaw is estimated as 0
-            if self.use_fake_perception:
+            if self.perception_mode == 'fake':
                 actor = self.world.get_actor(obs.id)
                 if actor:
                     actor_yaw = actor.get_transform().rotation.yaw

@@ -118,7 +118,7 @@ class AutoIQ:
             vehicle=self.vehicle,
             world=self.world,
             sensor_suite=self.sensors,
-            use_fake_perception=self.args.fake_perception,
+            perception_mode=self.args.perception,
             enable_lane_detection=not self.args.no_lane_detection,
             visualize_options=self.visualize_options,
         )
@@ -421,8 +421,8 @@ def main():
                         help='Comma-separated items to draw in simulator (e.g., "route,waypoints,bbox,all")')
     parser.add_argument('--no-lane-detection', action='store_true',
                         help='Disable lane detection pipeline (use map waypoints only)')
-    parser.add_argument('--fake-perception', action='store_true',
-                        help='Use fake perception (ground truth) instead of real perception')
+    parser.add_argument('--perception', type=str, default='fake',
+                        choices=['real', 'fake'], help='Perception mode: real (YOLO+Depth) or fake (ground truth)')
     parser.add_argument('--controller', type=str, default='mpc',
                         choices=['mpc', 'pid'], help='Type of vehicle controller to use (default: mpc)')
     parser.add_argument('--trajectory-mode', type=int, default=0,

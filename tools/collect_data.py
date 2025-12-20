@@ -37,7 +37,7 @@ class CollectorArgs:
     sync: bool = True
     visualize: set = None
     no_lane_detection: bool = True
-    fake_perception: bool = True
+    perception: str = 'fake'
     controller: str = 'mpc'
     trajectory_mode: int = 0
     
