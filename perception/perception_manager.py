@@ -3,6 +3,7 @@
 import carla
 from typing import Optional, List
 
+from config.config import PERCEPTION
 from navigation.obstacle_state import Obstacle
 from perception.fake_perception import FakePerception
 from perception.perception import Perception
@@ -18,7 +19,7 @@ class PerceptionManager:
         vehicle,
         world,
         sensor_suite,
-        use_fake_perception: bool = True,
+        use_fake_perception: bool = False,
         enable_lane_detection: bool = True,
         visualize_options: Optional[set] = None,
         debug: bool = False,
@@ -27,14 +28,23 @@ class PerceptionManager:
         self.world = world
         self.sensor_suite = sensor_suite
         self.visualize_options = visualize_options or set()
+        self.use_fake_perception = use_fake_perception
+        
+        # Read perception config
+        model_path = PERCEPTION['object_detector']['model_path']
+        conf_threshold = PERCEPTION['object_detector']['conf_threshold']
         
         # Obstacle detection
-        if use_fake_perception:
+        if self.use_fake_perception:
             self._obstacle_detector = FakePerception(vehicle, world)
             print("[Perception] Using FakePerception (ground truth)")
         else:
-            self._obstacle_detector = Perception(vehicle, world, sensor_suite)
-            print("[Perception] Using real perception")
+            self._obstacle_detector = Perception(
+                vehicle, world, sensor_suite,
+                # model_path=model_path,
+                # conf_threshold=conf_threshold
+            )
+            print("[Perception] Using real perception (YOLO + Depth)")
         
         # Bounding box visualization (handled here, not in detector)
         self._bbox_visualizer = None
@@ -76,14 +86,14 @@ class PerceptionManager:
         
         print(f"[Perception] Lane detector initialized (FOV={camera_fov}°, pitch={camera_pitch}°, height={camera_height}m)")
     
-    def run_step(self, obstacle_radius: float = 50.0) -> tuple:
+    def run_step(self) -> tuple:
         """
         Execute one perception cycle.
         
         Returns:
             (obstacles, lanes) - tuple of detection results for caller to update shared state
         """
-        obstacles = self._obstacle_detector.detect_obstacles(radius=obstacle_radius)
+        obstacles = self._obstacle_detector.detect_obstacles(radius=PERCEPTION['obstacle_radius'])
         
         if self._bbox_visualizer and obstacles:
             self._visualize_obstacles(obstacles)
@@ -107,12 +117,16 @@ class PerceptionManager:
         ego_transform = self.vehicle.get_transform()
         
         for obs in obstacles:
-            # Get actor for yaw calculation
-            actor = self.world.get_actor(obs.id)
-            if actor:
-                actor_yaw = actor.get_transform().rotation.yaw
-                relative_yaw = actor_yaw - ego_transform.rotation.yaw
+            # For real perception, we don't have actor IDs, so yaw is estimated as 0
+            if self.use_fake_perception:
+                actor = self.world.get_actor(obs.id)
+                if actor:
+                    actor_yaw = actor.get_transform().rotation.yaw
+                    relative_yaw = actor_yaw - ego_transform.rotation.yaw
+                else:
+                    relative_yaw = 0.0
             else:
+                # Real perception: assume obstacle is facing same direction as ego
                 relative_yaw = 0.0
             
             color = carla.Color(255, 0, 0) if obs.obstacle_type == 'vehicle' else carla.Color(0, 255, 0)

@@ -57,14 +57,15 @@ class AutoIQ:
         self.visualize_options = args.visualize
         
         # Perception manager (handles obstacle & lane detection)
-        self.perception = None
+        self.perception_manager = None
         
         # Shared perception state
         self.obstacle_state = None
         self.lane_state = None
     
-    def setup(self):
-        """Initialize everything."""
+    def _setup_carla(self):
+        """Setup CARLA client, world, and vehicle."""
+
         # Connect to CARLA
         print(f"[AutoIQ] Connecting to CARLA at {self.args.host}:{self.args.port}...")
         self.client = carla.Client(self.args.host, self.args.port)
@@ -92,22 +93,34 @@ class AutoIQ:
         speed_ms = (velocity.x**2 + velocity.y**2 + velocity.z**2)**0.5
         print(f"[AutoIQ] Initial vehicle pose: x={transform.location.x:.2f}, y={transform.location.y:.2f}, yaw={transform.rotation.yaw:.2f}°, v={speed_ms:.2f} m/s")
 
-        # Initialize shared perception state
-        self.obstacle_state = ObstacleState()
-        self.lane_state = LaneState()
-        
         # Setup sensors from config
         self.sensors = SensorSuite(self.vehicle, self.world)
         self.sensors.add_sensors_from_config()
         print("[AutoIQ] Sensors attached")
-        
+
+        # Wait for sensors
+        print("[AutoIQ] Waiting for sensors...")
+        if self.args.sync:
+            for _ in range(20):
+                self.world.tick()
+        else:
+            time.sleep(1.0)
+
+    def setup(self):
+
+        self._setup_carla()
+
+        # Initialize shared perception state
+        self.obstacle_state = ObstacleState()
+        self.lane_state = LaneState()
         # Initialize perception manager
-        self.perception = PerceptionManager(
+        self.perception_manager = PerceptionManager(
             vehicle=self.vehicle,
             world=self.world,
             sensor_suite=self.sensors,
+            use_fake_perception=self.args.fake_perception,
             enable_lane_detection=not self.args.no_lane_detection,
-            visualize_options=self.visualize_options
+            visualize_options=self.visualize_options,
         )
         print("[AutoIQ] Perception manager initialized")
         
@@ -133,14 +146,6 @@ class AutoIQ:
         )
         self.clock = pygame.time.Clock()
         self.tiled_display = TiledDisplay()
-        
-        # Wait for sensors
-        print("[AutoIQ] Waiting for sensors...")
-        if self.args.sync:
-            for _ in range(20):
-                self.world.tick()
-        else:
-            time.sleep(1.0)
         
         print("[AutoIQ] Ready!")
     
@@ -200,7 +205,7 @@ class AutoIQ:
     
     def run_step(self):
         """Execute one simulation step."""
-        obstacles, lanes_result = self.perception.run_step(obstacle_radius=50.0)
+        obstacles, lanes_result = self.perception_manager.run_step()
         self.obstacle_state.update(obstacles)
         self.lane_state.update(lanes_result)
 
@@ -246,7 +251,7 @@ class AutoIQ:
         }
         
         # Get debug images from perception
-        debug_images = self.perception.get_debug_images()
+        debug_images = self.perception_manager.get_debug_images()
         
         # Build panel data dynamically from configured sensors
         panel_data = {
@@ -388,8 +393,8 @@ class AutoIQ:
         
         # Close perception debug windows
         try:
-            if self.perception:
-                self.perception.close()
+            if self.perception_manager:
+                self.perception_manager.close()
             cv2.destroyAllWindows()
         except Exception as e:
             print(f"[AutoIQ] Warning: Error closing debug windows: {e}")
@@ -416,6 +421,8 @@ def main():
                         help='Comma-separated items to draw in simulator (e.g., "route,waypoints,bbox,all")')
     parser.add_argument('--no-lane-detection', action='store_true',
                         help='Disable lane detection pipeline (use map waypoints only)')
+    parser.add_argument('--fake-perception', action='store_true',
+                        help='Use fake perception (ground truth) instead of real perception')
     parser.add_argument('--controller', type=str, default='mpc',
                         choices=['mpc', 'pid'], help='Type of vehicle controller to use (default: mpc)')
     parser.add_argument('--trajectory-mode', type=int, default=0,

@@ -1,0 +1,13 @@
+# Perception Configuration
+# ========================
+
+# Lane detection
+enable_lane_detection: true
+
+# Object detector settings (used when --fake-perception is NOT passed)
+object_detector:
+  model_path: 'yolov8n.pt'  # YOLO model: yolov8n.pt (fast), yolov8s.pt (balanced), yolov8m.pt (accurate)
+  conf_threshold: 0.5  # Detection confidence threshold (0.0 - 1.0)
+
+# Detection radius (meters)
+obstacle_radius: 50.0
