@@ -168,12 +168,6 @@ class DataCollector:
         frame_id = self._get_next_frame_id()
         frame_str = f"{frame_id:06d}"
         
-        obstacle_info = []
-        for actor_id in _spawned_actors:
-            actor = world.get_actor(actor_id)
-            if actor:
-                obstacle_info.append({'id': actor.id, 'type_id': actor.type_id})
-        
         metadata = {
             'frame_id': frame_id,
             'timestamp': datetime.now().isoformat(),
@@ -181,7 +175,7 @@ class DataCollector:
             'ego_vehicle': self.auto_iq.vehicle.type_id,
             'ego_spawn_index': self.spawn_index,
             'sensors': SENSORS,
-            'obstacles': obstacle_info
+            'obstacles': self._get_obstacle_annotations()
         }
         with open(self.output_dir / 'metadata' / f"{frame_str}.json", 'w') as f:
             json.dump(metadata, f, indent=2)
