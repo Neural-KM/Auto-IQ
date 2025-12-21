@@ -7,6 +7,7 @@ Uses YOLO for 2D object detection, then projects to 3D using depth.
 """
 
 import math
+import time
 import numpy as np
 import cv2
 from typing import List, Optional
@@ -205,8 +206,11 @@ class Perception:
         if not self._intrinsics_computed:
             self._compute_intrinsics(rgb_sensor.width, rgb_sensor.height, rgb_sensor.fov)
         
-        # Run 2D detection
+        # Run 2D detection with timing
+        start_time = time.time()
         detections = self.detector.detect(rgb_image)
+        inference_time = time.time() - start_time
+        print(f"[Perception] YOLO inference time: {inference_time:.3f}s, detections: {len(detections)}")
         
         # Store for visualization
         self._last_rgb_image = rgb_image.copy()

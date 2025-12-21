@@ -142,7 +142,7 @@ class PerceptionManager:
     
     def _print_obstacles(self, obstacles: List[Obstacle]) -> None:
         """Print obstacle detection results for debugging."""
-        print(f"\n[Perception] Detected {len(obstacles)} obstacles:")
+        print(f"\n[Perception Manager] Detected {len(obstacles)} obstacles:")
         for obs in obstacles:
             distance = (obs.x**2 + obs.y**2 + obs.z**2)**0.5
             speed = (obs.vx**2 + obs.vy**2 + obs.vz**2)**0.5
@@ -161,12 +161,6 @@ class PerceptionManager:
                 )
                 LaneDetectorDebugWindow.wait_key(1)
     
-    def get_debug_images(self) -> dict:
-        """Get debug visualization images from obstacle detector."""
-        if hasattr(self._obstacle_detector, 'get_debug_images'):
-            return self._obstacle_detector.get_debug_images()
-        return {}
-    
     def get_images(self) -> dict:
         """
         Get all perception images for display.
@@ -176,11 +170,8 @@ class PerceptionManager:
         """
         images = {}
         
-        # Get debug images from obstacle detector
-        images.update(self.get_debug_images())
-        
-        # Get annotated image with detections (if real perception)
-        if hasattr(self._obstacle_detector, 'get_annotated_image'):
+        if self.perception_mode == 'real':
+            # Real perception: get YOLO annotated image
             annotated = self._obstacle_detector.get_annotated_image()
             if annotated is not None:
                 images['yolo_detections'] = annotated

@@ -209,9 +209,9 @@ class AutoIQ:
         })
         # Map slots to data sources
         self._slot_mapping = {
-            'main': '3rd_person',
+            'main': 'yolo_detections',
             'side_0': 'front_rgb', 
-            'side_1': 'semantic',
+            'side_1': '3rd_person',
             'side_2': 'depth'
         }
     
