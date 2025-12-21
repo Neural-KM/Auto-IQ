@@ -109,7 +109,7 @@ class CameraPanel(Panel):
 
 
 class SemanticPanel(Panel):
-    """Panel for semantic segmentation with obstacle overlay."""
+    """Panel for semantic segmentation display."""
     
     def __init__(self, name, width, height):
         super().__init__(name, width, height)
@@ -137,60 +137,10 @@ class SemanticPanel(Panel):
             surface = pygame.transform.scale(surface, (new_w, new_h))
             x_offset = (self.width - new_w) // 2
             self.surface.blit(surface, (x_offset, img_y_offset))
-                
-                # Draw obstacle overlay
-            obstacle = data.get('obstacle_detection')
-            if obstacle:
-                self._draw_obstacle_overlay(x_offset, img_y_offset, new_w, new_h, 
-                                            w, h, obstacle)
         
         self.draw_title("Semantic", self.border_color)
         self.draw_border(self.border_color)
         return self.surface
-    
-    def _draw_obstacle_overlay(self, view_x, view_y, view_w, view_h, 
-                                orig_w, orig_h, obstacle):
-        """Draw ROI and obstacle markers."""
-        scale_x = view_w / orig_w
-        scale_y = view_h / orig_h
-        
-        # Draw ROI rectangle
-        roi_left = int(orig_w * 0.3 * scale_x)
-        roi_right = int(orig_w * 0.7 * scale_x)
-        roi_top = int(orig_h * 0.4 * scale_y)
-        roi_bottom = int(orig_h * 0.8 * scale_y)
-        
-        roi_color = (0, 255, 0) if not obstacle.get('obstacle_detected') else (255, 0, 0)
-        pygame.draw.rect(self.surface, roi_color,
-                        (view_x + roi_left, view_y + roi_top,
-                         roi_right - roi_left, roi_bottom - roi_top), 1)
-        
-        # Draw bounding box if obstacle detected
-        if obstacle.get('obstacle_detected'):
-            bbox = obstacle.get('bbox')
-            if bbox:
-                x1, y1, x2, y2 = bbox
-                sx1 = int(x1 * scale_x) + view_x
-                sy1 = int(y1 * scale_y) + view_y
-                sx2 = int(x2 * scale_x) + view_x
-                sy2 = int(y2 * scale_y) + view_y
-                pygame.draw.rect(self.surface, (255, 0, 0),
-                               (sx1, sy1, sx2 - sx1, sy2 - sy1), 2)
-                
-                # Label
-                obs_type = obstacle.get('obstacle_type', 'OBJ')
-                dist = obstacle.get('distance', 0)
-                label = f"{obs_type.upper()} {dist:.1f}m"
-                label_surf = self.font_small.render(label, True, (255, 255, 0))
-                self.surface.blit(label_surf, (sx1, sy1 - 12))
-            
-            # Crosshair at center
-            center = obstacle.get('center')
-            if center:
-                cx = int(center[0] * scale_x) + view_x
-                cy = int(center[1] * scale_y) + view_y
-                pygame.draw.line(self.surface, (255, 0, 0), (cx - 8, cy), (cx + 8, cy), 2)
-                pygame.draw.line(self.surface, (255, 0, 0), (cx, cy - 8), (cx, cy + 8), 2)
 
 
 class LidarPanel(Panel):
