@@ -39,10 +39,16 @@
 ---
 
 ## Tasks
-- [x] Implement rgb+depth camera based object detection
+- [*] Implement rgb+depth camera based object detection
+    * Basic functionality works
+    * But bounding box accuracy is very less
     * Need to test robustness in different lighting/weather conditions.
+- [*] Lane segmentation and lane line detection
+    * Works if only one lane present in the camera view
+    * Need to modify for multiple lanes and curved roads
+    * Is lane detection necessary if HD map + localization is available?
 - [ ] Use Lidar point cloud instead of depth camera for depth estimation in YOLO-based detection.
-- [ ] Use all cameras for multi-view object detection.
+- [ ] Use all cameras for multi-view object detection
 - [ ] Traffic light detection
 - [ ] Lidar only 3D object detection
 - [ ] 

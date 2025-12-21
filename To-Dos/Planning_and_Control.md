@@ -73,9 +73,9 @@
 ---
 
 ## Tasks
-- [x] Implement basic PID + Pure Pursuit controller
+- [X] Implement basic PID + Pure Pursuit controller
     * Works better than mpc at currrent progress
-- [x] Implement Model Predictive Control (MPC) controller
+- [*] Implement Model Predictive Control (MPC) controller
     * Jittery throttle and steerings. Needs tuning(if tuning is a problem that is)
 - [ ] Check why is mpc misbehaving on lane change maneuvers
 - [ ] Use a dynamic bicycle model in MPC instead of kinematic
