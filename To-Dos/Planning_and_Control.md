@@ -69,3 +69,18 @@
 *   **Friction-aware limits:** Adjusts target speed/accel based on estimated tire-road friction.
 *   **Friction circle (combined slip):** Couples longitudinal and lateral feasibility, e.g. $\sqrt{F_x^2 + F_y^2} \le \mu F_z$. In practice this is often enforced as $a_x^2 + a_y^2 \le (\mu g)^2$ inside MPC so braking/accel and steering are coordinated.
 *   **Real-time OCP solvers (acados + HPIPM):** Implement the combined planner+tracker as an OCP solved with acados (real-time SQP/RTI), typically using HPIPM as the QP backend.
+
+---
+
+## Tasks
+- [x] Implement basic PID + Pure Pursuit controller
+    * Works better than mpc at currrent progress
+- [x] Implement Model Predictive Control (MPC) controller
+    * Jittery throttle and steerings. Needs tuning(if tuning is a problem that is)
+- [ ] Check why is mpc misbehaving on lane change maneuvers
+- [ ] Use a dynamic bicycle model in MPC instead of kinematic
+- [ ] Smmothen lane change trajectory generation
+- [ ] Implement friction circle constraints while generating velocity profiles from paths
+- [ ] Can the model of the car itself be used to generate trajectories? Is this equivlent to planning+tracking unification?
+- [ ] Find new methods to generate path+trajectory together for stronger feasibility
+- [ ] 

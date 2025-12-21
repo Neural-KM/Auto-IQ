@@ -38,3 +38,12 @@
 *   **Outlier rejection (RANSAC):** Filters bad correspondences when matching features/points.
 *   **Time synchronization:** Aligns sensor timestamps so fusion doesn’t inject artificial errors.
 *   **Pose Graph Optimization:** A backend optimization technique used in many SLAM systems. The vehicle's trajectory is represented as a graph where nodes are poses at different times and edges are relative motion constraints between poses (from odometry or loop closures). A non-linear least squares solver adjusts all poses to minimize the error in the constraints, correcting for accumulated drift.
+---
+
+## Tasks
+
+- [ ] Basic IMU + dead reckoning localization
+- [ ] IMU + GPS fusion localization
+- [ ] Visual SLAM implementation
+- [ ] Map matching localization with LiDAR
+- [ ] 

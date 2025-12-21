@@ -35,3 +35,14 @@
     *   **State Estimation:** Using a Kalman Filter to predict the next position of a tracked object.
     *   **Data Association:** Using the Hungarian algorithm or Joint Probability Data Association (JPDA) to match new detections to existing tracks based on a cost metric (e.g., IoU or distance).
 *   **Camera calibration & projection:** Intrinsics/extrinsics management; critical when projecting between image/depth/3D.
+
+---
+
+## Tasks
+- [x] Implement rgb+depth camera based object detection
+    * Need to test robustness in different lighting/weather conditions.
+- [ ] Use Lidar point cloud instead of depth camera for depth estimation in YOLO-based detection.
+- [ ] Use all cameras for multi-view object detection.
+- [ ] Traffic light detection
+- [ ] Lidar only 3D object detection
+- [ ] 
