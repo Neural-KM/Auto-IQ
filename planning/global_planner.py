@@ -86,11 +86,6 @@ class GlobalPlanner:
             True if route found, False otherwise
         """
         # Convert to carla.Location if needed
-        if isinstance(origin, (tuple, list)):
-            origin = carla.Location(x=origin[0], y=origin[1], z=origin[2] if len(origin) > 2 else 0)
-        if isinstance(destination, (tuple, list)):
-            destination = carla.Location(x=destination[0], y=destination[1], z=destination[2] if len(destination) > 2 else 0)
-        
         self._origin = origin
         self._destination = destination
         self._route_index = 0

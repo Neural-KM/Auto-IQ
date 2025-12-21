@@ -81,28 +81,27 @@ class CameraPanel(Panel):
             img = data['image']
             
             # Convert numpy array to surface
-            if isinstance(img, np.ndarray):
-                if len(img.shape) == 3:
-                    # Scale image to fit panel (leave room for title)
-                    content_height = self.height - 25
-                    h, w = img.shape[:2]
-                    scale = min((self.width - 10) / w, content_height / h)
-                    new_w, new_h = int(w * scale), int(h * scale)
-                    
-                    # Handle BGR vs RGB
-                    if img.shape[2] >= 3:
-                        rgb_img = img[:, :, :3]
-                        if data.get('bgr', False):
-                            rgb_img = rgb_img[:, :, ::-1]
-                        surface = pygame.surfarray.make_surface(rgb_img.swapaxes(0, 1))
-                    else:
-                        surface = pygame.surfarray.make_surface(img.swapaxes(0, 1))
-                    
-                    surface = pygame.transform.scale(surface, (new_w, new_h))
-                    
-                    # Center image in panel
-                    x_offset = (self.width - new_w) // 2
-                    self.surface.blit(surface, (x_offset, 22))
+            if len(img.shape) == 3:
+                # Scale image to fit panel (leave room for title)
+                content_height = self.height - 25
+                h, w = img.shape[:2]
+                scale = min((self.width - 10) / w, content_height / h)
+                new_w, new_h = int(w * scale), int(h * scale)
+                
+                # Handle BGR vs RGB
+                if img.shape[2] >= 3:
+                    rgb_img = img[:, :, :3]
+                    if data.get('bgr', False):
+                        rgb_img = rgb_img[:, :, ::-1]
+                    surface = pygame.surfarray.make_surface(rgb_img.swapaxes(0, 1))
+                else:
+                    surface = pygame.surfarray.make_surface(img.swapaxes(0, 1))
+                
+                surface = pygame.transform.scale(surface, (new_w, new_h))
+                
+                # Center image in panel
+                x_offset = (self.width - new_w) // 2
+                self.surface.blit(surface, (x_offset, 22))
         
         self.draw_title(self.camera_name, self.border_color)
         self.draw_border(self.border_color)
@@ -125,26 +124,25 @@ class SemanticPanel(Panel):
         if data and 'image' in data and data['image'] is not None:
             img = data['image']
             
-            if isinstance(img, np.ndarray):
-                h, w = img.shape[:2]
-                scale = min((self.width - 10) / w, content_height / h)
-                new_w, new_h = int(w * scale), int(h * scale)
-                
-                # Image is already in RGB format
-                if len(img.shape) == 3 and img.shape[2] >= 3:
-                    surface = pygame.surfarray.make_surface(img[:, :, :3].swapaxes(0, 1))
-                else:
-                    surface = pygame.surfarray.make_surface(img.swapaxes(0, 1))
-                
-                surface = pygame.transform.scale(surface, (new_w, new_h))
-                x_offset = (self.width - new_w) // 2
-                self.surface.blit(surface, (x_offset, img_y_offset))
+            h, w = img.shape[:2]
+            scale = min((self.width - 10) / w, content_height / h)
+            new_w, new_h = int(w * scale), int(h * scale)
+            
+            # Image is already in RGB format
+            if len(img.shape) == 3 and img.shape[2] >= 3:
+                surface = pygame.surfarray.make_surface(img[:, :, :3].swapaxes(0, 1))
+            else:
+                surface = pygame.surfarray.make_surface(img.swapaxes(0, 1))
+            
+            surface = pygame.transform.scale(surface, (new_w, new_h))
+            x_offset = (self.width - new_w) // 2
+            self.surface.blit(surface, (x_offset, img_y_offset))
                 
                 # Draw obstacle overlay
-                obstacle = data.get('obstacle_detection')
-                if obstacle:
-                    self._draw_obstacle_overlay(x_offset, img_y_offset, new_w, new_h, 
-                                                w, h, obstacle)
+            obstacle = data.get('obstacle_detection')
+            if obstacle:
+                self._draw_obstacle_overlay(x_offset, img_y_offset, new_w, new_h, 
+                                            w, h, obstacle)
         
         self.draw_title("Semantic", self.border_color)
         self.draw_border(self.border_color)
@@ -211,7 +209,7 @@ class LidarPanel(Panel):
         if data and 'image' in data and data['image'] is not None:
             img = data['image']
             
-            if isinstance(img, np.ndarray) and img.size > 0:
+            if img.size > 0:
                 h, w = img.shape[:2]
                 if h > 0 and w > 0:
                     # Scale to fit panel while maintaining aspect ratio
@@ -250,28 +248,27 @@ class DepthPanel(Panel):
         if data and 'image' in data and data['image'] is not None:
             img = data['image']
             
-            if isinstance(img, np.ndarray):
-                h, w = img.shape[:2]
-                scale = min((self.width - 10) / w, content_height / h)
-                new_w, new_h = int(w * scale), int(h * scale)
-                
-                surface = pygame.surfarray.make_surface(img.swapaxes(0, 1))
-                surface = pygame.transform.scale(surface, (new_w, new_h))
-                x_offset = (self.width - new_w) // 2
-                self.surface.blit(surface, (x_offset, img_y_offset))
+            h, w = img.shape[:2]
+            scale = min((self.width - 10) / w, content_height / h)
+            new_w, new_h = int(w * scale), int(h * scale)
+            
+            surface = pygame.surfarray.make_surface(img.swapaxes(0, 1))
+            surface = pygame.transform.scale(surface, (new_w, new_h))
+            x_offset = (self.width - new_w) // 2
+            self.surface.blit(surface, (x_offset, img_y_offset))
                 
                 # Draw obstacle marker
-                obstacle = data.get('obstacle_detection')
-                if obstacle and obstacle.get('obstacle_detected'):
-                    bbox = obstacle.get('bbox')
-                    if bbox:
-                        x1, y1, x2, y2 = bbox
-                        sx1 = int(x1 * (new_w / w)) + x_offset
-                        sy1 = int(y1 * (new_h / h)) + img_y_offset
-                        sx2 = int(x2 * (new_w / w)) + x_offset
-                        sy2 = int(y2 * (new_h / h)) + img_y_offset
-                        pygame.draw.rect(self.surface, (255, 0, 0),
-                                       (sx1, sy1, sx2 - sx1, sy2 - sy1), 2)
+            obstacle = data.get('obstacle_detection')
+            if obstacle and obstacle.get('obstacle_detected'):
+                bbox = obstacle.get('bbox')
+                if bbox:
+                    x1, y1, x2, y2 = bbox
+                    sx1 = int(x1 * (new_w / w)) + x_offset
+                    sy1 = int(y1 * (new_h / h)) + img_y_offset
+                    sx2 = int(x2 * (new_w / w)) + x_offset
+                    sy2 = int(y2 * (new_h / h)) + img_y_offset
+                    pygame.draw.rect(self.surface, (255, 0, 0),
+                                    (sx1, sy1, sx2 - sx1, sy2 - sy1), 2)
         
         self.draw_title("Depth", self.border_color)
         self.draw_border(self.border_color)
@@ -295,7 +292,7 @@ class DebugMaskPanel(Panel):
         if data and 'image' in data and data['image'] is not None:
             img = data['image']
             
-            if isinstance(img, np.ndarray) and img.size > 0:
+            if img.size > 0:
                 h, w = img.shape[:2]
                 if h > 0 and w > 0:
                     scale = min((self.width - 10) / w, content_height / h)

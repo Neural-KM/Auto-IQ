@@ -90,12 +90,6 @@ class NavigationManager:
     
     def plan_route(self, destination):
         """Plan route to destination without starting navigation."""
-        if isinstance(destination, carla.Transform):
-            destination = destination.location
-        elif isinstance(destination, (tuple, list)):
-            destination = carla.Location(x=destination[0], y=destination[1], 
-                                         z=destination[2] if len(destination) > 2 else 0)
-        
         self.destination = destination
         self._destination_reached = False  # Reset for new route
         origin = self.vehicle.get_location()
@@ -138,12 +132,6 @@ class NavigationManager:
     
     def set_destination(self, destination):
         """Set navigation destination, compute route, and start immediately."""
-        if isinstance(destination, carla.Transform):
-            destination = destination.location
-        elif isinstance(destination, (tuple, list)):
-            destination = carla.Location(x=destination[0], y=destination[1], 
-                                         z=destination[2] if len(destination) > 2 else 0)
-        
         self.destination = destination
         origin = self.vehicle.get_location()
         
@@ -393,8 +381,6 @@ class NavigationManager:
                     for w in waypoints:
                         if hasattr(w, 'transform') and w.transform is not None:
                             wp_pairs.append((w.transform.location.x, w.transform.location.y))
-                        elif isinstance(w, (tuple, list)) and len(w) >= 2:
-                            wp_pairs.append((float(w[0]), float(w[1])))
                 live_visualizer.update(vehicle_state, wp_pairs, ref, pred)
             except Exception as e:
                 print(f"[Navigation] Live visualizer update failed: {e}")
