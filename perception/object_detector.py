@@ -10,6 +10,9 @@ import numpy as np
 from ultralytics import YOLO
 import torch
 
+from config.config import PERCEPTION
+
+
 class ObjectDetector:
     """
     YOLO-based object detector.
@@ -46,6 +49,11 @@ class ObjectDetector:
             5: 'vehicle',
             7: 'vehicle'
         }
+        
+        # Ego vehicle filtering (ignore hood/bumper in bottom of image)
+        ego_filter = PERCEPTION['ego_filter']
+        self._ego_bottom_cutoff = ego_filter['bottom_cutoff']
+        self._ego_top_threshold = ego_filter['top_threshold']
     
     def detect(self, image):
         """
@@ -59,6 +67,11 @@ class ObjectDetector:
         """
         if self.model is None or image is None:
             return []
+        
+        # Ego vehicle filter thresholds
+        image_height = image.shape[0]
+        ego_cutoff_y = image_height * self._ego_bottom_cutoff
+        ego_top_y = image_height * self._ego_top_threshold
             
         # Run inference
         # verbose=False to suppress stdout
@@ -76,6 +89,10 @@ class ObjectDetector:
                     class_name = self.target_classes[cls_id]
                     conf = float(box.conf[0])
                     xyxy = box.xyxy[0].cpu().numpy() # [x1, y1, x2, y2]
+                    
+                    # Skip detections in ego vehicle zone (hood/bumper)
+                    if xyxy[3] > ego_cutoff_y and xyxy[1] > ego_top_y:
+                        continue
                     
                     detections.append({
                         'bbox': xyxy.tolist(),

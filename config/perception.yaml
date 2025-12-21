@@ -11,3 +11,12 @@ object_detector:
 
 # Detection radius (meters)
 obstacle_radius: 50.0
+
+# Ego vehicle filtering
+# Detections in the bottom portion of the image are filtered to avoid detecting the ego vehicle's hood/bumper.
+# Adjust these values based on your camera placement (height, pitch, position).
+ego_filter:
+  # Ignore detections where bounding box bottom is below this percentage of image height (0.0 - 1.0)
+  bottom_cutoff: 0.85
+  # Only filter if bounding box top is also below this percentage (to avoid filtering tall objects)
+  top_threshold: 0.70
