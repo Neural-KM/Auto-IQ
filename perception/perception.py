@@ -321,3 +321,7 @@ class Perception:
                 cv2.putText(annotated, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         return annotated
+    
+    def get_masked_image(self) -> Optional[np.ndarray]:
+        """Get the masked image used for YOLO detection (with hood blacked out)."""
+        return self.detector.get_masked_image()

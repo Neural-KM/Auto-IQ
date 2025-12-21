@@ -32,3 +32,4 @@ CARLA = _load_yaml('carla.yaml')
 CONTROL = _load_yaml('control.yaml')
 SENSORS = _load_yaml('sensors.yaml')['sensors']
 PERCEPTION = _load_yaml('perception.yaml')
+DISPLAY = _load_yaml('display.yaml')

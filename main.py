@@ -25,7 +25,7 @@ import numpy as np
 import cv2
 
 # AutoIQ modules
-from config.config import CARLA, CONTROL, SENSORS
+from config.config import CARLA, CONTROL, SENSORS, DISPLAY
 from config.visualization import DISPLAY_WIDTH, DISPLAY_HEIGHT
 
 from sensors.sensor_suite import SensorSuite
@@ -146,7 +146,12 @@ class AutoIQ:
         )
         self.clock = pygame.time.Clock()
         self.tiled_display = TiledDisplay()
-        self._setup_default_display_layout()
+        
+        # Apply initial layout based on perception mode
+        if self.args.perception == 'fake':
+            self._apply_display_layout('default', 'fake_perception')
+        else:
+            self._apply_display_layout('default', 'real_perception')
         
         print("[AutoIQ] Ready!")
     
@@ -185,61 +190,49 @@ class AutoIQ:
                     else:
                         print("[AutoIQ] No route planned. Press G first to plan a route.")
                 elif event.key == pygame.K_1:
-                    # Default layout
-                    self._setup_default_display_layout()
-                    print("[AutoIQ] Layout: Default")
+                    # Default layout (choose based on perception mode)
+                    if self.args.perception == 'fake':
+                        self._apply_display_layout('default', 'fake_perception')
+                        print("[AutoIQ] Layout: Default")
+                    else:
+                        self._apply_display_layout('default', 'real_perception')
+                        print("[AutoIQ] Layout: YOLO Detection")
                 elif event.key == pygame.K_2:
                     # Grid layout (all sensors)
-                    self._setup_grid_display_layout()
+                    self._apply_display_layout('grid', 'all_sensors')
                     print("[AutoIQ] Layout: Grid")
                 elif event.key == pygame.K_3:
                     # Fullscreen layout
-                    self._setup_fullscreen_display_layout()
+                    self._apply_display_layout('fullscreen', 'third_person')
                     print("[AutoIQ] Layout: Fullscreen")
                 elif event.key == pygame.K_4:
                     # Dual layout (main + lidar)
-                    self._setup_dual_display_layout()
+                    self._apply_display_layout('dual', 'lidar')
                     print("[AutoIQ] Layout: Dual (Camera + LiDAR)")
     
-    def _setup_default_display_layout(self):
-        """Setup default layout: main panel + side panels."""
-        self.tiled_display.setup_layout('default', {
-            'main': 'main',
-            'side': ['side_0', 'side_1', 'side_2']
-        })
-        # Map slots to data sources
-        self._slot_mapping = {
-            'main': 'yolo_detections',
-            'side_0': 'front_rgb', 
-            'side_1': '3rd_person',
-            'side_2': 'depth'
-        }
-    
-    def _setup_grid_display_layout(self):
-        """Setup grid layout showing all sensors."""
-        sensor_names = [s['name'] for s in SENSORS]
-        slots = [f'slot_{i}' for i in range(len(sensor_names))]
-        self.tiled_display.setup_layout('grid', {
-            'slots': slots,
-            'cols': 3 if len(slots) > 4 else 2
-        })
-        self._slot_mapping = dict(zip(slots, sensor_names))
-    
-    def _setup_fullscreen_display_layout(self):
-        """Setup fullscreen layout with single main view."""
-        self.tiled_display.setup_layout('fullscreen', {'main': 'main'})
-        self._slot_mapping = {'main': '3rd_person'}
-    
-    def _setup_dual_display_layout(self):
-        """Setup dual layout with camera and LiDAR."""
-        self.tiled_display.setup_layout('dual', {
-            'left': 'left',
-            'right': 'right'
-        })
-        self._slot_mapping = {
-            'left': '3rd_person',
-            'right': 'lidar'
-        }
+    def _apply_display_layout(self, layout_type, option):
+        """
+        Apply a display layout from config.
+        
+        Args:
+            layout_type: Layout type ('default', 'dual', 'grid', 'fullscreen')
+            option: Option name within that layout type
+        """
+        if layout_type not in DISPLAY:
+            print(f"[AutoIQ] Warning: Layout type '{layout_type}' not found, using 'default'")
+            layout_type = 'default'
+        
+        layout = DISPLAY[layout_type]
+        options = layout['options']
+        
+        if option not in options:
+            print(f"[AutoIQ] Warning: Option '{option}' not found in '{layout_type}', using first available")
+            option = list(options.keys())[0]
+        
+        slot_mapping = options[option]['slot_mapping']
+        
+        self.tiled_display.setup_layout(layout_type)
+        self._slot_mapping = slot_mapping
     
     def run_step(self):
         """Execute one simulation step."""

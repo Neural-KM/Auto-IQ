@@ -171,10 +171,14 @@ class PerceptionManager:
         images = {}
         
         if self.perception_mode == 'real':
-            # Real perception: get YOLO annotated image
+            # Real perception: get YOLO annotated image and masked image
             annotated = self._obstacle_detector.get_annotated_image()
             if annotated is not None:
                 images['yolo_detections'] = annotated
+            
+            masked = self._obstacle_detector.get_masked_image()
+            if masked is not None:
+                images['yolo_input'] = masked
         
         return images
     

@@ -337,24 +337,24 @@ class TiledDisplay:
         
         pygame.font.init()
         
-        # Setup default layout with generic slot names
-        self.setup_layout('default', {'main': 'main', 'side': ['side_0', 'side_1', 'side_2']})
+        # Setup default layout with standard slot names
+        self.setup_layout('default')
     
-    def setup_layout(self, layout_type, config=None):
+    def setup_layout(self, layout_type):
         """
         Setup panel layout.
         
         Args:
             layout_type: 'default', 'dual', 'grid', or 'fullscreen'
-            config: Layout-specific configuration dict:
-                - 'default': {'main': 'slot_name', 'side': ['slot1', 'slot2', ...]}
-                - 'dual': {'left': 'slot_name', 'right': 'slot_name'}
-                - 'grid': {'slots': ['slot1', 'slot2', ...], 'cols': 2}
-                - 'fullscreen': {'main': 'slot_name'}
+        
+        Standard slot names by layout:
+            - default: 'main', 'side_0', 'side_1', 'side_2'
+            - dual: 'left', 'right'
+            - grid: 'slot_0' through 'slot_5'
+            - fullscreen: 'main'
         """
         self.panels.clear()
         self._current_layout = layout_type
-        self._layout_config = config or {}
         
         if layout_type == 'default':
             self._setup_default_layout()
@@ -368,26 +368,19 @@ class TiledDisplay:
             self._setup_default_layout()
     
     def _setup_default_layout(self):
-        """Setup default layout: main panel + side panels + bottom bar."""
-        config = self._layout_config
-        main_slot = config.get('main', 'main')
-        side_slots = config.get('side', [])
+        """Setup default layout: main panel + 3 side panels + bottom bar."""
+        side_slots = ['side_0', 'side_1', 'side_2']
         
         bottom_h = BOTTOM_BAR_HEIGHT
         main_h = self.height - bottom_h
         
-        if side_slots:
-            main_w = int(self.width * 0.72)
-            side_w = self.width - main_w
-            side_h = main_h // max(len(side_slots), 1)
-        else:
-            main_w = self.width
-            side_w = 0
-            side_h = 0
+        main_w = int(self.width * 0.72)
+        side_w = self.width - main_w
+        side_h = main_h // len(side_slots)
         
         # Main panel
-        panel = ImagePanel(main_slot, main_w, main_h)
-        self.add_panel(main_slot, panel, 0, 0)
+        panel = ImagePanel('main', main_w, main_h)
+        self.add_panel('main', panel, 0, 0)
         
         # Side panels
         for i, slot_name in enumerate(side_slots):
@@ -398,34 +391,23 @@ class TiledDisplay:
     
     def _setup_dual_layout(self):
         """Setup dual layout: two equal panels side by side + bottom bar."""
-        config = self._layout_config
-        left_slot = config.get('left', 'left')
-        right_slot = config.get('right', 'right')
-        
         bottom_h = BOTTOM_BAR_HEIGHT
         main_h = self.height - bottom_h
         panel_w = self.width // 2
         
-        left_panel = ImagePanel(left_slot, panel_w, main_h)
-        self.add_panel(left_slot, left_panel, 0, 0)
+        left_panel = ImagePanel('left', panel_w, main_h)
+        self.add_panel('left', left_panel, 0, 0)
         
-        right_panel = ImagePanel(right_slot, self.width - panel_w, main_h)
-        self.add_panel(right_slot, right_panel, panel_w, 0)
+        right_panel = ImagePanel('right', self.width - panel_w, main_h)
+        self.add_panel('right', right_panel, panel_w, 0)
         
         self._add_bottom_bar(main_h)
     
     def _setup_grid_layout(self):
-        """Setup grid layout: NxM grid of panels + bottom bar."""
-        config = self._layout_config
-        slots = config.get('slots', ['slot_0', 'slot_1', 'slot_2', 'slot_3'])
-        cols = config.get('cols', 2)
-        
-        num_slots = len(slots)
-        if num_slots == 0:
-            self._setup_default_layout()
-            return
-        
-        rows = (num_slots + cols - 1) // cols
+        """Setup grid layout: 2x3 grid of panels + bottom bar."""
+        slots = ['slot_0', 'slot_1', 'slot_2', 'slot_3', 'slot_4', 'slot_5']
+        cols = 3
+        rows = 2
         
         bottom_h = BOTTOM_BAR_HEIGHT
         available_h = self.height - bottom_h
@@ -449,14 +431,11 @@ class TiledDisplay:
     
     def _setup_fullscreen_layout(self):
         """Setup fullscreen layout: one large panel + bottom bar."""
-        config = self._layout_config
-        main_slot = config.get('main', 'main')
-        
         bottom_h = BOTTOM_BAR_HEIGHT
         content_h = self.height - bottom_h
         
-        panel = ImagePanel(main_slot, self.width, content_h)
-        self.add_panel(main_slot, panel, 0, 0)
+        panel = ImagePanel('main', self.width, content_h)
+        self.add_panel('main', panel, 0, 0)
         
         self._add_bottom_bar(content_h)
     

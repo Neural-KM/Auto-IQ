@@ -50,10 +50,51 @@ class ObjectDetector:
             7: 'vehicle'
         }
         
-        # Ego vehicle filtering (ignore hood/bumper in bottom of image)
-        ego_filter = PERCEPTION['ego_filter']
-        self._ego_bottom_cutoff = ego_filter['bottom_cutoff']
-        self._ego_top_threshold = ego_filter['top_threshold']
+        # Ego vehicle hood mask (trapezoid to black out hood region)
+        hood_mask = PERCEPTION['ego_hood_mask']
+        self._hood_mask_enabled = hood_mask['enabled']
+        self._hood_mask_points = {
+            'top_y': hood_mask['top_y'],
+            'top_left_x': hood_mask['top_left_x'],
+            'top_right_x': hood_mask['top_right_x'],
+            'bottom_y': hood_mask['bottom_y'],
+            'bottom_left_x': hood_mask['bottom_left_x'],
+            'bottom_right_x': hood_mask['bottom_right_x'],
+        }
+        
+        # Store last masked image for visualization
+        self._last_masked_image = None
+    
+    def _apply_hood_mask(self, image):
+        """
+        Apply trapezoid mask to black out ego vehicle hood region.
+        
+        Args:
+            image: RGB numpy array (H, W, 3)
+            
+        Returns:
+            Masked image with hood region blacked out
+        """
+        if not self._hood_mask_enabled:
+            return image
+        
+        h, w = image.shape[:2]
+        p = self._hood_mask_points
+        
+        # Convert normalized coordinates to pixel coordinates
+        # Trapezoid: top-left, top-right, bottom-right, bottom-left
+        pts = np.array([
+            [int(p['top_left_x'] * w), int(p['top_y'] * h)],
+            [int(p['top_right_x'] * w), int(p['top_y'] * h)],
+            [int(p['bottom_right_x'] * w), int(p['bottom_y'] * h)],
+            [int(p['bottom_left_x'] * w), int(p['bottom_y'] * h)],
+        ], dtype=np.int32)
+        
+        # Create masked copy
+        masked = image.copy()
+        cv2.fillPoly(masked, [pts], (0, 0, 0))
+        
+        return masked
     
     def detect(self, image):
         """
@@ -68,14 +109,13 @@ class ObjectDetector:
         if self.model is None or image is None:
             return []
         
-        # Ego vehicle filter thresholds
-        image_height = image.shape[0]
-        ego_cutoff_y = image_height * self._ego_bottom_cutoff
-        ego_top_y = image_height * self._ego_top_threshold
+        # Apply hood mask to prevent detecting ego vehicle
+        masked_image = self._apply_hood_mask(image)
+        self._last_masked_image = masked_image
             
         # Run inference
         # verbose=False to suppress stdout
-        results = self.model(image, verbose=False, conf=self.conf_threshold, device=self.device)
+        results = self.model(masked_image, verbose=False, conf=self.conf_threshold, device=self.device)
         
         detections = []
         
@@ -90,10 +130,6 @@ class ObjectDetector:
                     conf = float(box.conf[0])
                     xyxy = box.xyxy[0].cpu().numpy() # [x1, y1, x2, y2]
                     
-                    # Skip detections in ego vehicle zone (hood/bumper)
-                    if xyxy[3] > ego_cutoff_y and xyxy[1] > ego_top_y:
-                        continue
-                    
                     detections.append({
                         'bbox': xyxy.tolist(),
                         'class': class_name,
@@ -101,3 +137,7 @@ class ObjectDetector:
                     })
                     
         return detections
+    
+    def get_masked_image(self):
+        """Get the last masked image used for detection."""
+        return self._last_masked_image
