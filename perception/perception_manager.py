@@ -40,7 +40,7 @@ class PerceptionManager:
             print("[Perception] Using FakePerception (ground truth)")
         else:
             self._obstacle_detector = Perception(
-                vehicle, world, sensor_suite,
+                vehicle=vehicle, world=world, sensor_suite=sensor_suite,
                 model_path=model_path,
                 conf_threshold=conf_threshold
             )
@@ -94,7 +94,6 @@ class PerceptionManager:
             (obstacles, lanes) - tuple of detection results for caller to update shared state
         """
         obstacles = self._obstacle_detector.detect_obstacles(radius=PERCEPTION['obstacle_radius'])
-        
         if self._bbox_visualizer and obstacles:
             self._visualize_obstacles(obstacles)
         
@@ -167,6 +166,26 @@ class PerceptionManager:
         if hasattr(self._obstacle_detector, 'get_debug_images'):
             return self._obstacle_detector.get_debug_images()
         return {}
+    
+    def get_images(self) -> dict:
+        """
+        Get all perception images for display.
+        
+        Returns:
+            Dict of image name -> image data for visualization.
+        """
+        images = {}
+        
+        # Get debug images from obstacle detector
+        images.update(self.get_debug_images())
+        
+        # Get annotated image with detections (if real perception)
+        if hasattr(self._obstacle_detector, 'get_annotated_image'):
+            annotated = self._obstacle_detector.get_annotated_image()
+            if annotated is not None:
+                images['yolo_detections'] = annotated
+        
+        return images
     
     def close(self) -> None:
         """Clean up perception resources."""
