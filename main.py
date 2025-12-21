@@ -146,6 +146,7 @@ class AutoIQ:
         )
         self.clock = pygame.time.Clock()
         self.tiled_display = TiledDisplay()
+        self._setup_default_display_layout()
         
         print("[AutoIQ] Ready!")
     
@@ -185,23 +186,60 @@ class AutoIQ:
                         print("[AutoIQ] No route planned. Press G first to plan a route.")
                 elif event.key == pygame.K_1:
                     # Default layout
-                    self.tiled_display.reconfigure_layout('default')
+                    self._setup_default_display_layout()
                     print("[AutoIQ] Layout: Default")
                 elif event.key == pygame.K_2:
-                    # Surround layout (all sensors)
-                    self.tiled_display.reconfigure_layout('surround')
-                    print("[AutoIQ] Layout: Surround")
+                    # Grid layout (all sensors)
+                    self._setup_grid_display_layout()
+                    print("[AutoIQ] Layout: Grid")
                 elif event.key == pygame.K_3:
-                    # Fullscreen layout with dropdown
-                    self.tiled_display.reconfigure_layout('fullscreen')
-                    print("[AutoIQ] Layout: Fullscreen (click dropdown to select sensor)")
+                    # Fullscreen layout
+                    self._setup_fullscreen_display_layout()
+                    print("[AutoIQ] Layout: Fullscreen")
                 elif event.key == pygame.K_4:
-                    # LiDAR layout
-                    self.tiled_display.reconfigure_layout('lidar')
-                    print("[AutoIQ] Layout: LiDAR BEV")
-            elif event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button == 1:  # Left click
-                    self.tiled_display.handle_click(event.pos)
+                    # Dual layout (main + lidar)
+                    self._setup_dual_display_layout()
+                    print("[AutoIQ] Layout: Dual (Camera + LiDAR)")
+    
+    def _setup_default_display_layout(self):
+        """Setup default layout: main panel + side panels."""
+        self.tiled_display.setup_layout('default', {
+            'main': 'main',
+            'side': ['side_0', 'side_1', 'side_2']
+        })
+        # Map slots to data sources
+        self._slot_mapping = {
+            'main': '3rd_person',
+            'side_0': 'front_rgb', 
+            'side_1': 'semantic',
+            'side_2': 'depth'
+        }
+    
+    def _setup_grid_display_layout(self):
+        """Setup grid layout showing all sensors."""
+        sensor_names = [s['name'] for s in SENSORS]
+        slots = [f'slot_{i}' for i in range(len(sensor_names))]
+        self.tiled_display.setup_layout('grid', {
+            'slots': slots,
+            'cols': 3 if len(slots) > 4 else 2
+        })
+        self._slot_mapping = dict(zip(slots, sensor_names))
+    
+    def _setup_fullscreen_display_layout(self):
+        """Setup fullscreen layout with single main view."""
+        self.tiled_display.setup_layout('fullscreen', {'main': 'main'})
+        self._slot_mapping = {'main': '3rd_person'}
+    
+    def _setup_dual_display_layout(self):
+        """Setup dual layout with camera and LiDAR."""
+        self.tiled_display.setup_layout('dual', {
+            'left': 'left',
+            'right': 'right'
+        })
+        self._slot_mapping = {
+            'left': '3rd_person',
+            'right': 'lidar'
+        }
     
     def run_step(self):
         """Execute one simulation step."""
@@ -244,43 +282,16 @@ class AutoIQ:
         obstacle_detection = {
             'obstacle_detected': nav_status.get('obstacle_detected', False),
             'distance': nav_status.get('obstacle_distance', float('inf')),
-            'position': nav_status.get('obstacle_position', None),
-            'center': nav_status.get('obstacle_center', None),
-            'pixel_count': nav_status.get('obstacle_pixels', 0),
-            'bbox': nav_status.get('obstacle_bbox', None),
             'obstacle_type': nav_status.get('obstacle_type', 'unknown')
         }
         
-        # Get debug images from perception
-        debug_images = self.perception_manager.get_debug_images()
+        # Get all images from perception
+        perception_images = self.perception_manager.get_images()
         
-        # Build panel data dynamically from configured sensors
-        panel_data = {
-            'telemetry': telemetry,
-            'obstacle': {
-                'obstacle_detection': obstacle_detection
-            },
-            # Debug panels for perception layout
-            'roi_semantic': {
-                'image': debug_images.get('roi_semantic')
-            },
-            'vehicle_mask': {
-                'image': debug_images.get('vehicle_mask')
-            },
-            'raw_obstacles': {
-                'image': debug_images.get('raw_obstacles'),
-                'pixel_count': nav_status.get('obstacle_pixels', 0)
-            },
-            'filtered_obstacles': {
-                'image': debug_images.get('filtered_obstacles'),
-                'pixel_count': nav_status.get('obstacle_pixels', 0)
-            },
-            'combined_debug': {
-                'image': debug_images.get('combined')
-            }
-        }
+        # Build source data - collect all available images by source name
+        source_data = {}
         
-        # Dynamically add sensor data based on config
+        # Add sensor images
         for sensor_config in SENSORS:
             sensor_name = sensor_config['name']
             sensor_type = sensor_config['type']
@@ -289,34 +300,31 @@ class AutoIQ:
             if sensor is None:
                 continue
             
-            # Get appropriate data based on sensor type
             if sensor_type == 'rgb':
-                panel_data[sensor_name] = {
-                    'image': sensor.get_data()
-                }
+                source_data[sensor_name] = {'image': sensor.get_data(), 'title': sensor_name.replace('_', ' ').title()}
             elif sensor_type == 'semantic':
-                panel_data[sensor_name] = {
-                    'image': sensor.get_colored_image(),
-                    'obstacle_detection': obstacle_detection
-                }
+                source_data[sensor_name] = {'image': sensor.get_colored_image(), 'title': 'Semantic'}
             elif sensor_type == 'depth':
-                panel_data[sensor_name] = {
-                    'image': sensor.get_normalized_image(),
-                    'obstacle_detection': obstacle_detection
-                }
+                source_data[sensor_name] = {'image': sensor.get_normalized_image(), 'title': 'Depth'}
             elif sensor_type == 'lidar':
-                panel_data[sensor_name] = {
-                    'image': sensor.get_bev_image()
-                }
+                source_data[sensor_name] = {'image': sensor.get_bev_image(), 'title': 'LiDAR BEV'}
             else:
-                panel_data[sensor_name] = {
-                    'image': sensor.get_data()
-                }
+                source_data[sensor_name] = {'image': sensor.get_data(), 'title': sensor_name}
         
-        # Also add main_camera alias (for layouts that use main_camera panel name)
-        main_sensor = self.sensors.get_sensor('main')
-        if main_sensor:
-            panel_data['main_camera'] = {'image': main_sensor.get_data()}
+        # Add perception images
+        for name, image in perception_images.items():
+            source_data[name] = {'image': image, 'title': name.replace('_', ' ').title()}
+        
+        # Map slots to source data using slot mapping
+        panel_data = {
+            'telemetry': telemetry,
+            'obstacle': {'obstacle_detection': obstacle_detection},
+        }
+        
+        slot_mapping = getattr(self, '_slot_mapping', {})
+        for slot_name, source_name in slot_mapping.items():
+            if source_name in source_data:
+                panel_data[slot_name] = source_data[source_name]
         
         # Render tiled display
         self.tiled_display.render(self.display, panel_data)

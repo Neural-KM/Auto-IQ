@@ -1,17 +1,17 @@
 """
 Tiled Display System - Modular visualization system with configurable panels.
+
+This module is completely agnostic to data sources. It only manages panel
+layout, sizing, and positioning. The caller (main.py) decides what data
+goes into each slot.
 """
 
 import pygame
 import numpy as np
-from config.config import SENSORS
 from config.visualization import (
-    get_layout_config, 
-    get_all_sensor_names,
     DISPLAY_WIDTH,
     DISPLAY_HEIGHT,
     BOTTOM_BAR_HEIGHT,
-    MIN_SIDE_PANEL_HEIGHT
 )
 
 
@@ -66,204 +66,60 @@ class Panel:
         self.surface.blit(text, (5, 5))
 
 
-class CameraPanel(Panel):
-    """Panel for displaying camera feed."""
+class ImagePanel(Panel):
+    """
+    Generic panel for displaying any image.
     
-    def __init__(self, name, width, height, camera_name="Camera"):
+    Data format:
+        {
+            'image': np.ndarray,  # The image (RGB, BGR, or grayscale)
+            'format': str,        # Optional: 'rgb', 'bgr', or 'grayscale' (default: 'rgb')
+            'title': str,         # Optional: override panel title
+        }
+    """
+    
+    def __init__(self, name, width, height, title=None, border_color=(0, 200, 255)):
         super().__init__(name, width, height)
-        self.camera_name = camera_name
-        self.border_color = (0, 200, 255)
-    
-    def render(self, data=None):
-        self.surface.fill(self.bg_color)
-        
-        if data and 'image' in data and data['image'] is not None:
-            img = data['image']
-            
-            # Convert numpy array to surface
-            if len(img.shape) == 3:
-                # Scale image to fit panel (leave room for title)
-                content_height = self.height - 25
-                h, w = img.shape[:2]
-                scale = min((self.width - 10) / w, content_height / h)
-                new_w, new_h = int(w * scale), int(h * scale)
-                
-                # Handle BGR vs RGB
-                if img.shape[2] >= 3:
-                    rgb_img = img[:, :, :3]
-                    if data.get('bgr', False):
-                        rgb_img = rgb_img[:, :, ::-1]
-                    surface = pygame.surfarray.make_surface(rgb_img.swapaxes(0, 1))
-                else:
-                    surface = pygame.surfarray.make_surface(img.swapaxes(0, 1))
-                
-                surface = pygame.transform.scale(surface, (new_w, new_h))
-                
-                # Center image in panel
-                x_offset = (self.width - new_w) // 2
-                self.surface.blit(surface, (x_offset, 22))
-        
-        self.draw_title(self.camera_name, self.border_color)
-        self.draw_border(self.border_color)
-        return self.surface
-
-
-class SemanticPanel(Panel):
-    """Panel for semantic segmentation display."""
-    
-    def __init__(self, name, width, height):
-        super().__init__(name, width, height)
-        self.border_color = (255, 255, 255)
-    
-    def render(self, data=None):
-        self.surface.fill(self.bg_color)
-        
-        content_height = self.height - 25
-        img_y_offset = 22
-        
-        if data and 'image' in data and data['image'] is not None:
-            img = data['image']
-            
-            h, w = img.shape[:2]
-            scale = min((self.width - 10) / w, content_height / h)
-            new_w, new_h = int(w * scale), int(h * scale)
-            
-            # Image is already in RGB format
-            if len(img.shape) == 3 and img.shape[2] >= 3:
-                surface = pygame.surfarray.make_surface(img[:, :, :3].swapaxes(0, 1))
-            else:
-                surface = pygame.surfarray.make_surface(img.swapaxes(0, 1))
-            
-            surface = pygame.transform.scale(surface, (new_w, new_h))
-            x_offset = (self.width - new_w) // 2
-            self.surface.blit(surface, (x_offset, img_y_offset))
-        
-        self.draw_title("Semantic", self.border_color)
-        self.draw_border(self.border_color)
-        return self.surface
-
-
-class LidarPanel(Panel):
-    """Panel for LiDAR bird's eye view visualization."""
-    
-    def __init__(self, name, width, height):
-        super().__init__(name, width, height)
-        self.border_color = (255, 255, 0)  # Yellow for LiDAR
-    
-    def render(self, data=None):
-        self.surface.fill(self.bg_color)
-        
-        content_height = self.height - 25
-        img_y_offset = 22
-        
-        if data and 'image' in data and data['image'] is not None:
-            img = data['image']
-            
-            if img.size > 0:
-                h, w = img.shape[:2]
-                if h > 0 and w > 0:
-                    # Scale to fit panel while maintaining aspect ratio
-                    scale = min((self.width - 10) / w, content_height / h)
-                    new_w, new_h = int(w * scale), int(h * scale)
-                    
-                    if new_w > 0 and new_h > 0:
-                        surface = pygame.surfarray.make_surface(img.swapaxes(0, 1))
-                        surface = pygame.transform.scale(surface, (new_w, new_h))
-                        x_offset = (self.width - new_w) // 2
-                        self.surface.blit(surface, (x_offset, img_y_offset))
-        
-        # Draw legend
-        legend_y = self.height - 18
-        legend_text = self.font_small.render("BEV: Blue=Low  Green=Mid  Red=High", True, (150, 150, 150))
-        self.surface.blit(legend_text, (5, legend_y))
-        
-        self.draw_title("LiDAR BEV", self.border_color)
-        self.draw_border(self.border_color)
-        return self.surface
-
-
-class DepthPanel(Panel):
-    """Panel for depth visualization."""
-    
-    def __init__(self, name, width, height):
-        super().__init__(name, width, height)
-        self.border_color = (150, 150, 255)
-    
-    def render(self, data=None):
-        self.surface.fill(self.bg_color)
-        
-        content_height = self.height - 25
-        img_y_offset = 22
-        
-        if data and 'image' in data and data['image'] is not None:
-            img = data['image']
-            
-            h, w = img.shape[:2]
-            scale = min((self.width - 10) / w, content_height / h)
-            new_w, new_h = int(w * scale), int(h * scale)
-            
-            surface = pygame.surfarray.make_surface(img.swapaxes(0, 1))
-            surface = pygame.transform.scale(surface, (new_w, new_h))
-            x_offset = (self.width - new_w) // 2
-            self.surface.blit(surface, (x_offset, img_y_offset))
-                
-                # Draw obstacle marker
-            obstacle = data.get('obstacle_detection')
-            if obstacle and obstacle.get('obstacle_detected'):
-                bbox = obstacle.get('bbox')
-                if bbox:
-                    x1, y1, x2, y2 = bbox
-                    sx1 = int(x1 * (new_w / w)) + x_offset
-                    sy1 = int(y1 * (new_h / h)) + img_y_offset
-                    sx2 = int(x2 * (new_w / w)) + x_offset
-                    sy2 = int(y2 * (new_h / h)) + img_y_offset
-                    pygame.draw.rect(self.surface, (255, 0, 0),
-                                    (sx1, sy1, sx2 - sx1, sy2 - sy1), 2)
-        
-        self.draw_title("Depth", self.border_color)
-        self.draw_border(self.border_color)
-        return self.surface
-
-
-class DebugMaskPanel(Panel):
-    """Panel for showing debug masks from obstacle detection."""
-    
-    def __init__(self, name, width, height, title="Debug", border_color=(255, 165, 0)):
-        super().__init__(name, width, height)
-        self.title = title
+        self.default_title = title or name.replace('_', ' ').title()
         self.border_color = border_color
     
     def render(self, data=None):
         self.surface.fill(self.bg_color)
         
-        content_height = self.height - 25
-        img_y_offset = 22
+        # Get title (can be overridden per-frame)
+        title = self.default_title
+        if data and 'title' in data:
+            title = data['title']
         
         if data and 'image' in data and data['image'] is not None:
             img = data['image']
             
-            if img.size > 0:
-                h, w = img.shape[:2]
-                if h > 0 and w > 0:
-                    scale = min((self.width - 10) / w, content_height / h)
-                    new_w, new_h = int(w * scale), int(h * scale)
-                    
-                    if new_w > 0 and new_h > 0:
-                        # Handle both grayscale and color
-                        if len(img.shape) == 2:
-                            img = np.stack([img, img, img], axis=-1)
-                        
-                        surface = pygame.surfarray.make_surface(img.swapaxes(0, 1))
-                        surface = pygame.transform.scale(surface, (new_w, new_h))
-                        x_offset = (self.width - new_w) // 2
-                        self.surface.blit(surface, (x_offset, img_y_offset))
+            content_height = self.height - 25
+            h, w = img.shape[:2]
+            scale = min((self.width - 10) / w, content_height / h)
+            new_w, new_h = int(w * scale), int(h * scale)
+            
+            # Handle grayscale images
+            if len(img.shape) == 2:
+                img = np.stack([img, img, img], axis=-1)
+            
+            # Handle color format: 'bgr', 'rgb' (default), or legacy 'bgr' boolean
+            img_format = data.get('format', 'rgb')
+            is_bgr = img_format == 'bgr' or data.get('bgr', False)
+            
+            if len(img.shape) == 3 and img.shape[2] >= 3:
+                rgb_img = img[:, :, :3]
+                if is_bgr:
+                    rgb_img = rgb_img[:, :, ::-1]
+                surface = pygame.surfarray.make_surface(rgb_img.swapaxes(0, 1))
+            else:
+                surface = pygame.surfarray.make_surface(img.swapaxes(0, 1))
+            
+            surface = pygame.transform.scale(surface, (new_w, new_h))
+            x_offset = (self.width - new_w) // 2
+            self.surface.blit(surface, (x_offset, 22))
         
-        # Show pixel count if available
-        if data and 'pixel_count' in data:
-            count_text = self.font_small.render(f"Pixels: {data['pixel_count']}", True, (200, 200, 200))
-            self.surface.blit(count_text, (5, self.height - 18))
-        
-        self.draw_title(self.title, self.border_color)
+        self.draw_title(title, self.border_color)
         self.draw_border(self.border_color)
         return self.surface
 
@@ -451,75 +307,158 @@ class ObstaclePanel(Panel):
         self.draw_border(self.border_color)
         return self.surface
 
+
 class TiledDisplay:
-    """Manages a tiled display layout with multiple panels."""
+    """
+    Manages a tiled display layout with multiple panels.
+    
+    This class is completely agnostic to data sources. It only manages:
+    - Panel layout (positions and sizes)
+    - Panel rendering
+    
+    The caller provides:
+    - Layout configuration (which slots to create)
+    - Data for each slot (images with metadata)
+    
+    Layout types:
+    - 'default': 1 main panel + N side panels + bottom bar
+    - 'dual': 2 equal panels side by side + bottom bar
+    - 'grid': NxM grid of panels + bottom bar
+    - 'fullscreen': 1 large panel + bottom bar
+    """
     
     def __init__(self):
         """Initialize tiled display with standard dimensions."""
         self.width = DISPLAY_WIDTH
         self.height = DISPLAY_HEIGHT
         self.panels = {}
-        self.layout = []
         self._current_layout = 'default'
-        self._fullscreen_sensor = '3rd_person'
-        self._dropdown_open = False
+        self._layout_config = {}
         
         pygame.font.init()
-        self._setup_default_layout()
+        
+        # Setup default layout with generic slot names
+        self.setup_layout('default', {'main': 'main', 'side': ['side_0', 'side_1', 'side_2']})
     
-    @staticmethod
-    def get_recommended_size():
-        """Get display size from config."""
-        return (DISPLAY_WIDTH, DISPLAY_HEIGHT)
+    def setup_layout(self, layout_type, config=None):
+        """
+        Setup panel layout.
+        
+        Args:
+            layout_type: 'default', 'dual', 'grid', or 'fullscreen'
+            config: Layout-specific configuration dict:
+                - 'default': {'main': 'slot_name', 'side': ['slot1', 'slot2', ...]}
+                - 'dual': {'left': 'slot_name', 'right': 'slot_name'}
+                - 'grid': {'slots': ['slot1', 'slot2', ...], 'cols': 2}
+                - 'fullscreen': {'main': 'slot_name'}
+        """
+        self.panels.clear()
+        self._current_layout = layout_type
+        self._layout_config = config or {}
+        
+        if layout_type == 'default':
+            self._setup_default_layout()
+        elif layout_type == 'dual':
+            self._setup_dual_layout()
+        elif layout_type == 'grid':
+            self._setup_grid_layout()
+        elif layout_type == 'fullscreen':
+            self._setup_fullscreen_layout()
+        else:
+            self._setup_default_layout()
     
     def _setup_default_layout(self):
-        """Setup default panel layout dynamically based on available sensors."""
-        layout = get_layout_config('default')
+        """Setup default layout: main panel + side panels + bottom bar."""
+        config = self._layout_config
+        main_slot = config.get('main', 'main')
+        side_slots = config.get('side', [])
         
         bottom_h = BOTTOM_BAR_HEIGHT
         main_h = self.height - bottom_h
         
-        side_sensors = layout.get('side', [])
-        
-        if side_sensors:
+        if side_slots:
             main_w = int(self.width * 0.72)
             side_w = self.width - main_w
-            side_h = main_h // max(len(side_sensors), 1)
+            side_h = main_h // max(len(side_slots), 1)
         else:
             main_w = self.width
             side_w = 0
             side_h = 0
         
-        main_sensor = layout.get('main')
-        if main_sensor:
-            panel = self._create_panel_for_sensor(main_sensor, main_w, main_h)
-            self.add_panel(main_sensor, panel, 0, 0)
+        # Main panel
+        panel = ImagePanel(main_slot, main_w, main_h)
+        self.add_panel(main_slot, panel, 0, 0)
         
-        for i, sensor_name in enumerate(side_sensors):
-            panel = self._create_panel_for_sensor(sensor_name, side_w, side_h)
-            self.add_panel(sensor_name, panel, main_w, i * side_h)
+        # Side panels
+        for i, slot_name in enumerate(side_slots):
+            panel = ImagePanel(slot_name, side_w, side_h)
+            self.add_panel(slot_name, panel, main_w, i * side_h)
         
         self._add_bottom_bar(main_h)
     
-    def _get_sensor_type(self, sensor_name):
-        """Get sensor type by name from config."""
-        for sensor in SENSORS:
-            if sensor['name'] == sensor_name:
-                return sensor['type']
-        return 'rgb'  # default
-    
-    def _create_panel_for_sensor(self, sensor_name, width, height):
-        """Create appropriate panel type for a sensor."""
-        sensor_type = self._get_sensor_type(sensor_name)
+    def _setup_dual_layout(self):
+        """Setup dual layout: two equal panels side by side + bottom bar."""
+        config = self._layout_config
+        left_slot = config.get('left', 'left')
+        right_slot = config.get('right', 'right')
         
-        if sensor_type == 'semantic':
-            return SemanticPanel(sensor_name, width, height)
-        elif sensor_type == 'depth':
-            return DepthPanel(sensor_name, width, height)
-        elif sensor_type == 'lidar':
-            return LidarPanel(sensor_name, width, height)
-        else:  # rgb or unknown
-            return CameraPanel(sensor_name, width, height, sensor_name.replace('_', ' ').title())
+        bottom_h = BOTTOM_BAR_HEIGHT
+        main_h = self.height - bottom_h
+        panel_w = self.width // 2
+        
+        left_panel = ImagePanel(left_slot, panel_w, main_h)
+        self.add_panel(left_slot, left_panel, 0, 0)
+        
+        right_panel = ImagePanel(right_slot, self.width - panel_w, main_h)
+        self.add_panel(right_slot, right_panel, panel_w, 0)
+        
+        self._add_bottom_bar(main_h)
+    
+    def _setup_grid_layout(self):
+        """Setup grid layout: NxM grid of panels + bottom bar."""
+        config = self._layout_config
+        slots = config.get('slots', ['slot_0', 'slot_1', 'slot_2', 'slot_3'])
+        cols = config.get('cols', 2)
+        
+        num_slots = len(slots)
+        if num_slots == 0:
+            self._setup_default_layout()
+            return
+        
+        rows = (num_slots + cols - 1) // cols
+        
+        bottom_h = BOTTOM_BAR_HEIGHT
+        available_h = self.height - bottom_h
+        
+        cell_w = self.width // cols
+        cell_h = available_h // rows
+        
+        for i, slot_name in enumerate(slots):
+            row = i // cols
+            col = i % cols
+            x = col * cell_w
+            y = row * cell_h
+            
+            # Last column may be wider to fill space
+            w = cell_w if col < cols - 1 else self.width - x
+            
+            panel = ImagePanel(slot_name, w, cell_h)
+            self.add_panel(slot_name, panel, x, y)
+        
+        self._add_bottom_bar(rows * cell_h)
+    
+    def _setup_fullscreen_layout(self):
+        """Setup fullscreen layout: one large panel + bottom bar."""
+        config = self._layout_config
+        main_slot = config.get('main', 'main')
+        
+        bottom_h = BOTTOM_BAR_HEIGHT
+        content_h = self.height - bottom_h
+        
+        panel = ImagePanel(main_slot, self.width, content_h)
+        self.add_panel(main_slot, panel, 0, 0)
+        
+        self._add_bottom_bar(content_h)
     
     def _add_bottom_bar(self, y_position):
         """Add telemetry and obstacle panels at the bottom."""
@@ -563,97 +502,13 @@ class TiledDisplay:
             panel = self.panels[name]['panel']
             panel.visible = not panel.visible
     
-    def reconfigure_layout(self, layout_name='default'):
-        """
-        Reconfigure panel layout.
-        
-        Args:
-            layout_name: Name of layout preset ('default', 'surround', or 'fullscreen')
-        """
-        # Clear existing panels
-        self.panels.clear()
-        self._current_layout = layout_name
-        
-        if layout_name == 'default':
-            self._setup_default_layout()
-        elif layout_name == 'surround':
-            self._setup_surround_layout()
-        elif layout_name == 'fullscreen':
-            self._setup_fullscreen_layout()
-        elif layout_name == 'lidar':
-            self._setup_lidar_layout()
+    def get_slot_names(self):
+        """Get list of current slot names (excluding telemetry/obstacle)."""
+        return [name for name in self.panels.keys() if name not in ('telemetry', 'obstacle')]
     
-    def _setup_lidar_layout(self):
-        """Setup layout with LiDAR BEV view alongside main camera."""
-        bottom_h = BOTTOM_BAR_HEIGHT
-        main_h = self.height - bottom_h
-        
-        main_w = int(self.width * 0.6)
-        lidar_w = self.width - main_w
-        
-        main_panel = CameraPanel('3rd_person', main_w, main_h, '3rd Person')
-        self.add_panel('3rd_person', main_panel, 0, 0)
-        
-        lidar_panel = LidarPanel('lidar', lidar_w, main_h)
-        self.add_panel('lidar', lidar_panel, main_w, 0)
-        
-        self._add_bottom_bar(main_h)
-    
-    def _setup_surround_layout(self):
-        """Setup surround layout showing all sensors in a grid."""
-        layout = get_layout_config('surround')
-        grid_sensors = layout.get('grid', [])
-        
-        if not grid_sensors:
-            grid_sensors = [s['name'] for s in SENSORS]
-        
-        num_sensors = len(grid_sensors)
-        
-        if num_sensors == 0:
-            self._setup_default_layout()
-            return
-        
-        bottom_h = BOTTOM_BAR_HEIGHT
-        available_h = self.height - bottom_h
-        
-        if num_sensors <= 2:
-            cols, rows = num_sensors, 1
-        elif num_sensors <= 4:
-            cols, rows = 2, 2
-        elif num_sensors <= 6:
-            cols, rows = 3, 2
-        else:
-            cols, rows = 4, 2
-        
-        cell_w = self.width // cols
-        cell_h = available_h // rows
-        
-        for i, sensor_name in enumerate(grid_sensors):
-            row = i // cols
-            col = i % cols
-            x = col * cell_w
-            y = row * cell_h
-            
-            panel = self._create_panel_for_sensor(sensor_name, cell_w, cell_h)
-            self.add_panel(sensor_name, panel, x, y)
-        
-        self._add_bottom_bar(rows * cell_h)
-    
-    def _setup_fullscreen_layout(self):
-        """Setup fullscreen layout with dropdown sensor selector."""
-        if not hasattr(self, '_fullscreen_sensor'):
-            self._fullscreen_sensor = '3rd_person'
-        if not hasattr(self, '_dropdown_open'):
-            self._dropdown_open = False
-        
-        header_h = 40
-        bottom_h = BOTTOM_BAR_HEIGHT
-        content_h = self.height - header_h - bottom_h
-        
-        panel = self._create_panel_for_sensor(self._fullscreen_sensor, self.width, content_h)
-        self.add_panel('fullscreen_view', panel, 0, header_h)
-        
-        self._add_bottom_bar(header_h + content_h)
+    def get_current_layout(self):
+        """Get current layout type."""
+        return self._current_layout
     
     def render(self, display, data=None):
         """
@@ -661,119 +516,16 @@ class TiledDisplay:
         
         Args:
             display: Pygame display surface
-            data: Dict with data for each panel, keyed by panel name
+            data: Dict with data for each panel slot, keyed by slot name.
+                  Each entry should be: {'image': np.ndarray, 'format': 'rgb', 'title': 'Optional Title'}
         """
-        # Clear display
         display.fill((0, 0, 0))
         
-        # Render each panel
         for name, panel_info in self.panels.items():
             panel = panel_info['panel']
             if not panel.visible:
                 continue
             
-            # Get panel-specific data
             panel_data = data.get(name, {}) if data else {}
-            
-            # For fullscreen layout, map fullscreen_view to selected sensor
-            if name == 'fullscreen_view' and hasattr(self, '_fullscreen_sensor'):
-                panel_data = data.get(self._fullscreen_sensor, {}) if data else {}
-            
-            # Render panel
             surface = panel.render(panel_data)
-            
-            # Blit to display
             display.blit(surface, (panel_info['x'], panel_info['y']))
-        
-        # Render dropdown if in fullscreen mode
-        if self._current_layout == 'fullscreen':
-            self._render_dropdown(display)
-    
-    def _render_dropdown(self, display):
-        """Render the sensor dropdown selector."""
-        sensors = get_all_sensor_names()
-        
-        # Dropdown button
-        btn_w, btn_h = 200, 30
-        btn_x, btn_y = 10, 5
-        
-        # Draw button background
-        btn_color = (60, 60, 60) if not self._dropdown_open else (80, 80, 80)
-        pygame.draw.rect(display, btn_color, (btn_x, btn_y, btn_w, btn_h))
-        pygame.draw.rect(display, (100, 100, 100), (btn_x, btn_y, btn_w, btn_h), 1)
-        
-        # Draw current selection text
-        font = pygame.font.Font(None, 24)
-        text = font.render(f"Sensor: {self._fullscreen_sensor}", True, (255, 255, 255))
-        display.blit(text, (btn_x + 10, btn_y + 7))
-        
-        # Draw arrow
-        arrow_x = btn_x + btn_w - 20
-        arrow_y = btn_y + btn_h // 2
-        if self._dropdown_open:
-            pygame.draw.polygon(display, (255, 255, 255), 
-                              [(arrow_x, arrow_y + 5), (arrow_x + 10, arrow_y + 5), (arrow_x + 5, arrow_y - 5)])
-        else:
-            pygame.draw.polygon(display, (255, 255, 255), 
-                              [(arrow_x, arrow_y - 5), (arrow_x + 10, arrow_y - 5), (arrow_x + 5, arrow_y + 5)])
-        
-        # Draw dropdown list if open
-        if self._dropdown_open:
-            list_y = btn_y + btn_h
-            for i, sensor in enumerate(sensors):
-                item_rect = pygame.Rect(btn_x, list_y + i * btn_h, btn_w, btn_h)
-                
-                # Highlight hovered item
-                mouse_pos = pygame.mouse.get_pos()
-                if item_rect.collidepoint(mouse_pos):
-                    pygame.draw.rect(display, (80, 100, 120), item_rect)
-                else:
-                    pygame.draw.rect(display, (50, 50, 50), item_rect)
-                
-                pygame.draw.rect(display, (100, 100, 100), item_rect, 1)
-                
-                # Draw sensor name
-                item_text = font.render(sensor, True, (255, 255, 255))
-                display.blit(item_text, (btn_x + 10, list_y + i * btn_h + 7))
-    
-    def handle_click(self, pos):
-        """
-        Handle mouse click for dropdown interaction.
-        Call this from main event loop when in fullscreen layout.
-        
-        Args:
-            pos: (x, y) mouse position
-            
-        Returns:
-            True if click was handled, False otherwise
-        """
-        if self._current_layout != 'fullscreen':
-            return False
-        
-        sensors = get_all_sensor_names()
-        btn_w, btn_h = 200, 30
-        btn_x, btn_y = 10, 5
-        
-        # Check if clicked on dropdown button
-        btn_rect = pygame.Rect(btn_x, btn_y, btn_w, btn_h)
-        if btn_rect.collidepoint(pos):
-            self._dropdown_open = not self._dropdown_open
-            return True
-        
-        # Check if clicked on dropdown item
-        if self._dropdown_open:
-            list_y = btn_y + btn_h
-            for i, sensor in enumerate(sensors):
-                item_rect = pygame.Rect(btn_x, list_y + i * btn_h, btn_w, btn_h)
-                if item_rect.collidepoint(pos):
-                    self._fullscreen_sensor = sensor
-                    self._dropdown_open = False
-                    # Rebuild the layout with new sensor
-                    self._setup_fullscreen_layout()
-                    return True
-            
-            # Clicked outside dropdown - close it
-            self._dropdown_open = False
-            return True
-        
-        return False
