@@ -17,9 +17,16 @@ The visualizer runs a timed loop at ~10Hz to keep the window responsive.
 
 import threading
 import time
+import warnings
 import numpy as np
+
+# Use Agg backend to avoid thread issues - must be set before importing pyplot
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+import cv2
 
 class Live2DVisualizer:
     def __init__(self, title="Auto-IQ Live 2D Visualizer", refresh_hz=10):
@@ -62,13 +69,16 @@ class Live2DVisualizer:
             self._thread.join(timeout=1.0)
 
     def _run(self):
-        # Initialize plot
-        self._fig, self._ax = plt.subplots(figsize=(7, 7))
-        self._fig.canvas.manager.set_window_title(self.title)
+        # Initialize plot with Agg backend (thread-safe)
+        self._fig = plt.figure(figsize=(7, 7))
+        self._ax = self._fig.add_subplot(111)
+        self._fig.canvas = FigureCanvasAgg(self._fig)
+        
         self._ax.set_aspect('equal', adjustable='datalim')
         self._ax.grid(True)
         self._ax.set_xlabel('X (m)')
         self._ax.set_ylabel('Y (m)')
+        self._ax.set_title(self.title)
 
         # Initialize empty lines/patches
         self._waypoints_line, = self._ax.plot([], [], 'o-', color='blue', label='Waypoints')
@@ -87,7 +97,10 @@ class Live2DVisualizer:
             # Use short sleep for responsiveness
             time.sleep(0.01)
 
+        # Cleanup within this thread
         plt.close(self._fig)
+        cv2.destroyWindow(self.title)
+        cv2.waitKey(1)  # Process the destroy event
 
     def _draw_once(self):
         with self._lock:
@@ -148,8 +161,15 @@ class Live2DVisualizer:
             self._ax.autoscale_view()
 
         try:
-            self._fig.canvas.draw_idle()
-            plt.pause(0.001)
+            # Render to buffer using Agg backend
+            self._fig.canvas.draw()
+            
+            # Get the RGBA buffer from the figure
+            buf = np.asarray(self._fig.canvas.buffer_rgba())
+            # Convert RGBA to BGR for OpenCV
+            img = cv2.cvtColor(buf, cv2.COLOR_RGBA2BGR)
+            cv2.imshow(self.title, img)
+            cv2.waitKey(1)
         except Exception:
             pass
 
