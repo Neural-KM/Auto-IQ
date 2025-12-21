@@ -119,7 +119,7 @@ class AutoIQ:
             world=self.world,
             sensor_suite=self.sensors,
             perception_mode=self.args.perception,
-            enable_lane_detection=not self.args.no_lane_detection,
+            enable_lane_detection= (self.args.lane_detection == 'on'),
             visualize_options=self.visualize_options,
         )
         print("[AutoIQ] Perception manager initialized")
@@ -227,6 +227,7 @@ class AutoIQ:
         telemetry = get_vehicle_telemetry(self.vehicle, self.world_map)
         telemetry['target_speed'] = self.target_speed
         telemetry['control'] = control
+        telemetry['fps'] = self.clock.get_fps()
         
         # Add navigation info
         nav_status = self.nav_manager.get_status()
@@ -414,18 +415,19 @@ def main():
     parser.add_argument('--host', default='127.0.0.1', help='CARLA host')
     parser.add_argument('--port', type=int, default=2000, help='CARLA port')
     parser.add_argument('--speed', type=float, default=30.0, help='Target speed km/h')
-    parser.add_argument('--sync', action='store_true', help='Synchronous mode')
-    parser.add_argument('--spawn', type=int, default=0, help='Spawn point index for vehicle (default: 0)')
-    parser.add_argument('--dest', type=int, default=None, help='Destination spawn point index')
-    parser.add_argument('--visualize', type=str, default='',
+    parser.add_argument('--sync', type=bool, default=True,
+                        help='Enable synchronous mode (True/False)')
+    parser.add_argument('--spawn', type=int, default=50, help='Spawn point index for vehicle (default: 0)')
+    parser.add_argument('--dest', type=int, default=250, help='Destination spawn point index')
+    parser.add_argument('--visualize', type=str, default='waypoints,sensors,route,live,bbox',
                         help='Comma-separated items to draw in simulator (e.g., "route,waypoints,bbox,all")')
-    parser.add_argument('--no-lane-detection', action='store_true',
-                        help='Disable lane detection pipeline (use map waypoints only)')
+    parser.add_argument('--lane-detection', type=str, default='off', choices=['off', 'on'],
+                        help='Lane detection mode: off or on')
     parser.add_argument('--perception', type=str, default='fake',
                         choices=['real', 'fake'], help='Perception mode: real (YOLO+Depth) or fake (ground truth)')
     parser.add_argument('--controller', type=str, default='mpc',
                         choices=['mpc', 'pid'], help='Type of vehicle controller to use (default: mpc)')
-    parser.add_argument('--trajectory-mode', type=int, default=0,
+    parser.add_argument('--trajectory-mode', type=int, default=1,
                         help='Trajectory generation mode: 0=Heuristic, 1=Trapezoidal (default: 0)')
     args = parser.parse_args()
 

@@ -340,13 +340,18 @@ class TelemetryPanel(Panel):
         title = self.font_big.render("AutoIQ Autonomous", True, (0, 200, 255))
         self.surface.blit(title, (10, y))
         
-        # MPC solve time on right side of title row (if available)
+        # FPS and MPC solve time on right side of title row
         if data:
+            fps = data.get('fps', 0.0)
             mpc_solve_time = data.get('mpc_solve_time_ms')
+            
+            right_text = f"FPS: {fps:.1f}"
             if mpc_solve_time is not None:
-                mpc_text = self.font.render(f"MPC: {mpc_solve_time:.1f} ms", True, (200, 200, 200))
-                mpc_x = self.width - mpc_text.get_width() - 10
-                self.surface.blit(mpc_text, (mpc_x, y + 4))
+                right_text += f" | MPC: {mpc_solve_time:.1f} ms"
+                
+            info_text = self.font.render(right_text, True, (200, 200, 200))
+            info_x = self.width - info_text.get_width() - 10
+            self.surface.blit(info_text, (info_x, y + 4))
         y += 28
         
         if data:
