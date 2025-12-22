@@ -9,7 +9,9 @@ import math
 import numpy as np
 import carla
 from collections import deque
+from typing import Optional
 from config.config import CONTROL
+from state.lane import LaneDetection
 
 
 class LocalPlanner:
@@ -81,23 +83,23 @@ class LocalPlanner:
         
         return waypoints[-1] if waypoints else current_wp
     
-    def generate_waypoints_from_lane_fits(self, lane_detection_result):
+    def generate_waypoints_from_lane_fits(self, lane_detection: Optional[LaneDetection]):
         """
         Generate waypoints from lane detection polynomial fits.
         
         Args:
-            lane_detection_result: Result dict from LaneDetector
+            lane_detection: LaneDetection dataclass from state module
             
         Returns:
             List of carla.Waypoint-like objects representing the lane center path
         """
-        if not lane_detection_result or not lane_detection_result['valid']:
+        if not lane_detection or not lane_detection.valid:
             return []
             
-        left_fit = lane_detection_result['left_fit']
-        right_fit = lane_detection_result['right_fit']
-        bev_params = lane_detection_result.get('bev_params')
-        lane_width_bev = lane_detection_result.get('lane_width_bev')
+        left_fit = lane_detection.left_fit
+        right_fit = lane_detection.right_fit
+        bev_params = lane_detection.bev_params
+        lane_width_bev = lane_detection.lane_width_bev
         
         if not bev_params:
             return []

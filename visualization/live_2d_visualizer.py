@@ -19,6 +19,9 @@ import threading
 import time
 import warnings
 import numpy as np
+from typing import Optional
+
+from state.world_state import WorldState
 
 # Use Agg backend to avoid thread issues - must be set before importing pyplot
 import matplotlib
@@ -41,6 +44,7 @@ class Live2DVisualizer:
         self._waypoints = None  # list of (x,y)
         self._reference = None  # Nx4 array
         self._predicted = None  # Nx4 array
+        self._obstacles = []  # list of obstacle dicts {x, y, length, width, obstacle_type}
 
         # Plot handles
         self._fig = None
@@ -49,6 +53,7 @@ class Live2DVisualizer:
         self._waypoints_line = None
         self._reference_line = None
         self._predicted_line = None
+        self._obstacle_patches = []  # list of Polygon patches for obstacles
 
     def start(self):
         if plt is None:
@@ -86,6 +91,8 @@ class Live2DVisualizer:
         self._predicted_line, = self._ax.plot([], [], '-', color='green', label='MPC Predicted')
         self._vehicle_patch = Polygon([[0,0],[0,0],[0,0]], color='red')
         self._ax.add_patch(self._vehicle_patch)
+        # Obstacle patches will be created dynamically
+        self._obstacle_patches = []
         self._ax.legend()
 
         last_update = 0
@@ -108,6 +115,7 @@ class Live2DVisualizer:
             waypoints = self._waypoints
             reference = self._reference
             predicted = self._predicted
+            obstacles = list(self._obstacles)
 
         # Update bounds
         xs = []
@@ -135,6 +143,58 @@ class Live2DVisualizer:
             self._predicted_line.set_data(pred[:, 0], pred[:, 1])
         else:
             self._predicted_line.set_data([], [])
+
+        # Draw obstacles
+        # Remove old obstacle patches
+        for patch in self._obstacle_patches:
+            patch.remove()
+        self._obstacle_patches = []
+
+        for obs in obstacles:
+            # Obstacle coordinates are ego-relative (x=forward, y=left)
+            # Transform to world coordinates using vehicle pose
+            ox_ego, oy_ego = obs['x'], obs['y']
+            ol, ow = obs.get('length', 2.0), obs.get('width', 1.0)
+            obs_type = obs.get('obstacle_type', 'vehicle')
+            source = obs.get('source', 'ground_truth')
+            
+            # Choose color based on source (ground truth vs perceived) and type
+            if source == 'perceived':
+                # Perceived obstacles: red tones
+                color = 'red' if obs_type == 'vehicle' else 'coral'
+            else:
+                # Ground truth obstacles: green tones
+                color = 'green' if obs_type == 'vehicle' else 'lime'
+            
+            # Transform ego-relative position to world coordinates
+            if vehicle is not None:
+                vx, vy, vpsi = vehicle[0], vehicle[1], vehicle[2]
+                c, s = np.cos(vpsi), np.sin(vpsi)
+                # Rotate and translate from ego frame to world frame
+                ox_world = vx + ox_ego * c - oy_ego * s
+                oy_world = vy + ox_ego * s + oy_ego * c
+            else:
+                # No vehicle pose available, skip drawing obstacles
+                continue
+            
+            # Create rectangle for obstacle in world coordinates
+            half_l, half_w = ol / 2, ow / 2
+            # Build rectangle in local frame then rotate to world
+            local_pts = np.array([
+                [half_l, half_w],
+                [half_l, -half_w],
+                [-half_l, -half_w],
+                [-half_l, half_w],
+            ])
+            # Rotate by vehicle heading and translate to world obstacle position
+            R = np.array([[c, -s], [s, c]])
+            pts = local_pts.dot(R.T) + np.array([ox_world, oy_world])
+            
+            obs_patch = Polygon(pts, color=color, alpha=0.7)
+            self._ax.add_patch(obs_patch)
+            self._obstacle_patches.append(obs_patch)
+            xs.extend(pts[:, 0].tolist())
+            ys.extend(pts[:, 1].tolist())
 
         if vehicle is not None:
             vx, vy, vpsi = vehicle[0], vehicle[1], vehicle[2]
@@ -173,7 +233,7 @@ class Live2DVisualizer:
         except Exception:
             pass
 
-    def update(self, vehicle_state=None, waypoints=None, reference=None, predicted=None):
+    def update(self, vehicle_state=None, waypoints=None, reference=None, predicted=None, world_state: Optional[WorldState] = None):
         with self._lock:
             if vehicle_state is not None:
                 # We're only using x,y,psi
@@ -184,6 +244,30 @@ class Live2DVisualizer:
                 self._reference = [[float(r[0]), float(r[1]), float(r[2]), float(r[3])] for r in reference]
             if predicted is not None:
                 self._predicted = [[float(r[0]), float(r[1]), float(r[2]), float(r[3])] for r in predicted]
+            if world_state is not None:
+                # Convert WorldState obstacles to list of dicts for drawing
+                # Combine both ground truth and perceived obstacles
+                self._obstacles = []
+                # Add ground truth obstacles (green)
+                for obs in world_state.ground_truth_obstacles:
+                    self._obstacles.append({
+                        'x': float(obs.x),
+                        'y': float(obs.y),
+                        'length': float(obs.length),
+                        'width': float(obs.width),
+                        'obstacle_type': obs.obstacle_type,
+                        'source': 'ground_truth',
+                    })
+                # Add perceived obstacles (red)
+                for obs in world_state.perceived_obstacles:
+                    self._obstacles.append({
+                        'x': float(obs.x),
+                        'y': float(obs.y),
+                        'length': float(obs.length),
+                        'width': float(obs.width),
+                        'obstacle_type': obs.obstacle_type,
+                        'source': 'perceived',
+                    })
 
 
 # Module-level convenience instance

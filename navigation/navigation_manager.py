@@ -16,8 +16,7 @@ from planning.behavior_planner import BehaviorPlanner, BehaviorState
 from control.vehicle_controller import VehicleController
 from config.config import CONTROL
 from visualization.live_2d_visualizer import visualizer as live_visualizer
-from navigation.obstacle_state import ObstacleState
-from navigation.lane_state import LaneState
+from state.world_state import WorldState
 
 
 class NavigationManager:
@@ -32,7 +31,7 @@ class NavigationManager:
     - Vehicle Controller: Low-level vehicle control (MPC or PID)
     """
     
-    def __init__(self, vehicle, world, obstacle_state: ObstacleState, lane_state: LaneState,
+    def __init__(self, vehicle, world, world_state: WorldState,
                  controller_type='mpc', visualize_options=set(), trajectory_mode=0):
         """
         Initialize navigation manager.
@@ -40,8 +39,7 @@ class NavigationManager:
         Args:
             vehicle: CARLA vehicle actor
             world: CARLA world instance
-            obstacle_state: Shared obstacle state container
-            lane_state: Shared lane state container
+            world_state: Shared WorldState container (Blackboard)
             controller_type: 'mpc' for Model Predictive Control, 'pid' for PID control
             visualize_options: Set of visualization tags to draw in simulator
             trajectory_mode: 0 for heuristic, 1 for trapezoidal (MPC only)
@@ -49,8 +47,7 @@ class NavigationManager:
         self.vehicle = vehicle
         self.world = world
         self.map = world.get_map()
-        self.obstacle_state = obstacle_state
-        self.lane_state = lane_state
+        self.world_state = world_state
         self.visualize_options = visualize_options
         self.controller_type = controller_type
         
@@ -235,9 +232,9 @@ class NavigationManager:
             self._clear_debug_drawings()
             return self.controller.emergency_stop()
         
-        # Read latest obstacles from shared state
-        obstacles = self.obstacle_state.get_all() if self.obstacle_state else []
-        self._obstacle_detection = self.obstacle_state.get_closest() if self.obstacle_state else None
+        # Read latest obstacles from WorldState (prefer perceived, fallback to ground truth)
+        obstacles = self.world_state.perceived_obstacles or self.world_state.ground_truth_obstacles
+        self._obstacle_detection = obstacles[0] if obstacles else None
         
         # Update behavior planner with obstacle detection
         self._previous_behavior = self._current_behavior
@@ -297,10 +294,12 @@ class NavigationManager:
         use_perception = self._should_use_perception(vehicle_location)
         
         if use_perception:
-            # Generate waypoints from lane detection (use dict format for local_planner)
-            waypoints = self.local_planner.generate_waypoints_from_lane_fits(self.lane_state.to_dict())
-            if waypoints:
-                return waypoints
+            # Generate waypoints from lane detection
+            lane_detection = self.world_state.lane_detection
+            if lane_detection:
+                waypoints = self.local_planner.generate_waypoints_from_lane_fits(lane_detection)
+                if waypoints:
+                    return waypoints
             # Fall through to map-based if perception fails
         
         # Map-based waypoints
@@ -320,8 +319,12 @@ class NavigationManager:
         3. Not changing lanes
         4. Controller supports it (PID)
         """
-        if not (self.lane_state.valid and 
-                self.lane_state.confidence > 0.5 and
+        lane_detection = self.world_state.lane_detection
+        lane_valid = lane_detection is not None and lane_detection.valid
+        lane_confidence = lane_detection.confidence if lane_detection else 0.0
+        
+        if not (lane_valid and 
+                lane_confidence > 0.5 and
                 self._current_behavior == BehaviorState.LANE_FOLLOWING and
                 self.controller_type == 'pid'):
             return False
@@ -381,7 +384,7 @@ class NavigationManager:
                     for w in waypoints:
                         if hasattr(w, 'transform') and w.transform is not None:
                             wp_pairs.append((w.transform.location.x, w.transform.location.y))
-                live_visualizer.update(vehicle_state, wp_pairs, ref, pred)
+                live_visualizer.update(vehicle_state, wp_pairs, ref, pred, self.world_state)
             except Exception as e:
                 print(f"[Navigation] Live visualizer update failed: {e}")
     

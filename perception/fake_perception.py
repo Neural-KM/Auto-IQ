@@ -3,7 +3,7 @@
 import math
 from typing import List
 
-from navigation.obstacle_state import Obstacle
+from state.obstacle import Obstacle
 
 
 class FakePerception:

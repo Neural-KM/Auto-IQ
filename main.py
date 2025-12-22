@@ -33,8 +33,7 @@ from visualization.tiled_display import TiledDisplay
 from navigation.navigation_manager import NavigationManager
 from perception.perception_manager import PerceptionManager
 from utils.helpers import spawn_vehicle, get_vehicle_telemetry
-from navigation.obstacle_state import ObstacleState
-from navigation.lane_state import LaneState
+from state.world_state import WorldState
 
 class AutoIQ:
     """Main demo application."""
@@ -59,9 +58,8 @@ class AutoIQ:
         # Perception manager (handles obstacle & lane detection)
         self.perception_manager = None
         
-        # Shared perception state
-        self.obstacle_state = None
-        self.lane_state = None
+        # Shared world state (Blackboard pattern)
+        self.world_state = None
     
     def _setup_carla(self):
         """Setup CARLA client, world, and vehicle."""
@@ -110,14 +108,15 @@ class AutoIQ:
 
         self._setup_carla()
 
-        # Initialize shared perception state
-        self.obstacle_state = ObstacleState()
-        self.lane_state = LaneState()
+        # Initialize shared world state (Blackboard pattern)
+        self.world_state = WorldState()
+        
         # Initialize perception manager
         self.perception_manager = PerceptionManager(
             vehicle=self.vehicle,
             world=self.world,
             sensor_suite=self.sensors,
+            world_state=self.world_state,
             perception_mode=self.args.perception,
             enable_lane_detection= (self.args.lane_detection == 'on'),
             visualize_options=self.visualize_options,
@@ -127,8 +126,7 @@ class AutoIQ:
         # Setup navigation manager with shared state
         self.nav_manager = NavigationManager(
             self.vehicle, self.world,
-            obstacle_state=self.obstacle_state,
-            lane_state=self.lane_state,
+            world_state=self.world_state,
             controller_type=self.args.controller,
             visualize_options=self.args.visualize,
             trajectory_mode=self.args.trajectory_mode
@@ -236,9 +234,8 @@ class AutoIQ:
     
     def run_step(self):
         """Execute one simulation step."""
-        obstacles, lanes_result = self.perception_manager.run_step()
-        self.obstacle_state.update(obstacles)
-        self.lane_state.update(lanes_result)
+        # Perception updates WorldState internally
+        self.perception_manager.run_step()
 
         control = self.nav_manager.run_step()
 

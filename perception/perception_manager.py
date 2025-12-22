@@ -4,7 +4,8 @@ import carla
 from typing import Optional, List
 
 from config.config import PERCEPTION
-from navigation.obstacle_state import Obstacle
+from state.obstacle import Obstacle
+from state.world_state import WorldState
 from perception.fake_perception import FakePerception
 from perception.perception import Perception
 from perception.lane_detector import LaneDetector, LaneDetectorDebugWindow
@@ -12,13 +13,14 @@ from visualization.bounding_box_visualizer import BoundingBoxVisualizer
 
 
 class PerceptionManager:
-    """Orchestrates obstacle detection and lane detection, updates shared state."""
+    """Orchestrates obstacle detection and lane detection, updates WorldState."""
     
     def __init__(
         self,
         vehicle,
         world,
         sensor_suite,
+        world_state: WorldState,
         perception_mode: str = 'fake',
         enable_lane_detection: bool = True,
         visualize_options: Optional[set] = None,
@@ -27,6 +29,7 @@ class PerceptionManager:
         self.vehicle = vehicle
         self.world = world
         self.sensor_suite = sensor_suite
+        self.world_state = world_state
         self.visualize_options = visualize_options or set()
         self.perception_mode = perception_mode
         
@@ -86,14 +89,23 @@ class PerceptionManager:
         
         print(f"[Perception] Lane detector initialized (FOV={camera_fov}°, pitch={camera_pitch}°, height={camera_height}m)")
     
-    def run_step(self) -> tuple:
+    def run_step(self) -> None:
         """
-        Execute one perception cycle.
+        Execute one perception cycle and update WorldState.
         
-        Returns:
-            (obstacles, lanes) - tuple of detection results for caller to update shared state
+        Updates world_state with:
+            - ground_truth_obstacles (if perception_mode == 'fake')
+            - perceived_obstacles (if perception_mode == 'real')
+            - lane_detection
         """
         obstacles = self._obstacle_detector.detect_obstacles(radius=PERCEPTION['obstacle_radius'])
+        
+        # Update WorldState based on perception mode
+        if self.perception_mode == 'fake':
+            self.world_state.update_ground_truth(obstacles or [])
+        else:
+            self.world_state.update_perception(obstacles or [])
+        
         if self._bbox_visualizer and obstacles:
             self._visualize_obstacles(obstacles)
         
@@ -109,7 +121,10 @@ class PerceptionManager:
                     lanes_result = self._lane_detector.detect(semantic_image)
                     if 'lane' in self.visualize_options or 'all' in self.visualize_options:
                         self.show_lane_debug(lanes_result)
-        return obstacles, lanes_result
+        
+        # Update lane detection in WorldState
+        if lanes_result is not None:
+            self.world_state.update_lane_detection(lanes_result)
     
     def _visualize_obstacles(self, obstacles: List[Obstacle]) -> None:
         """Draw bounding boxes for detected obstacles."""

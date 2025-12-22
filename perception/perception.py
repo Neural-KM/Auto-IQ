@@ -12,7 +12,7 @@ import numpy as np
 import cv2
 from typing import List, Optional
 
-from navigation.obstacle_state import Obstacle
+from state.obstacle import Obstacle
 from perception.object_detector import ObjectDetector
 
 
