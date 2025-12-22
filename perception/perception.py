@@ -20,16 +20,31 @@ class Perception:
     """
     Real perception using camera sensor data.
     
+    Methods:
+    Method 0: Dense Depth Map Sampling
+        - Data Source: Dense 2D depth image (structured point cloud).
+        - Processing: Projects the 2D bounding box onto the depth map.
+          Samples the center region of the box and computes the median depth value.
+          Assumes the object is a flat plane at that depth.
+        
+    Method 1: Sparse Point Cloud Frustum Filtering
+        - Data Source: Sparse 3D point cloud (unstructured points).
+        - Processing: Projects 3D points onto the 2D image plane.
+          Selects points that fall inside the 2D bounding box (Frustum Filtering).
+          Clusters these points to estimate the 3D centroid and dimensions, handling occlusion.
+    
     Pipeline:
     1. Get RGB image from sensor suite
     2. Run YOLO object detection -> 2D bounding boxes
-    3. Get depth at each detection center
-    4. Project 2D+depth to 3D coordinates (camera frame)
+    3. Get 3D data (Depth Map or Point Cloud)
+    4. Process data using selected Method (0 or 1)
     5. Transform to vehicle frame
     6. Return list of Obstacle instances
     """
-    
-    def __init__(self, vehicle, world, sensor_suite, model_path='yolov8n.pt', conf_threshold=0.5):
+    METHOD_FRUSTUM_FILTERING = 1
+    METHOD_DEPTH_MAP = 0
+
+    def __init__(self, vehicle, world, sensor_suite, model_path='yolov8n.pt', conf_threshold=0.5, method=1):
         """
         Initialize perception.
         
@@ -39,10 +54,12 @@ class Perception:
             sensor_suite: SensorSuite instance with rgb and depth cameras
             model_path: Path to YOLO model
             conf_threshold: Detection confidence threshold
+            method: Detection method (0=Depth Map, 1=Frustum Filtering)
         """
         self.vehicle = vehicle
         self.world = world
         self.sensor_suite = sensor_suite
+        self.method = method
         
         # Initialize object detector
         self.detector = ObjectDetector(model_path=model_path, conf_threshold=conf_threshold)
@@ -172,6 +189,22 @@ class Perception:
     def detect_obstacles(self, radius: float = 50.0) -> List[Obstacle]:
         """
         Detect obstacles from sensor data.
+        Dispatches to the selected method.
+        
+        Args:
+            radius: Maximum detection radius in meters
+            
+        Returns:
+            List of Obstacle instances, sorted by distance
+        """
+        if self.method == self.METHOD_FRUSTUM_FILTERING:
+            return self.detect_obstacles_lidar_frustum_cluster(radius)
+        else:
+            return self.detect_obstacles_depth(radius)
+
+    def detect_obstacles_depth(self, radius: float = 50.0) -> List[Obstacle]:
+        """
+        Detect obstacles using RGB + Depth Camera (Old Method).
         
         Args:
             radius: Maximum detection radius in meters
@@ -206,7 +239,7 @@ class Perception:
         if not self._intrinsics_computed:
             self._compute_intrinsics(rgb_sensor.width, rgb_sensor.height, rgb_sensor.fov)
         
-        # Run 2D detection with timing
+        # Run 2D detection
         start_time = time.time()
         detections = self.detector.detect(rgb_image)
         inference_time = time.time() - start_time
@@ -220,12 +253,11 @@ class Perception:
             return []
         
         obstacles = []
-        obstacle_id = 1000  # Start IDs at 1000 to distinguish from CARLA actor IDs
+        obstacle_id = 1000
         
         for det in detections:
             bbox = det['bbox']  # [x1, y1, x2, y2]
             class_name = det['class']
-            score = det['score']
             
             # Get center of bounding box
             cx = (bbox[0] + bbox[2]) / 2.0
@@ -272,12 +304,196 @@ class Perception:
                 x=x_veh,
                 y=y_veh,
                 z=z_veh,
-                vx=0.0,  # Velocity estimation requires tracking (future work)
+                vx=0.0,
                 vy=0.0,
                 vz=0.0,
                 length=length,
                 width=width,
                 height=height,
+            )
+            obstacles.append(obstacle)
+            obstacle_id += 1
+        
+        # Sort by distance
+        obstacles.sort(key=lambda o: (o.x**2 + o.y**2 + o.z**2)**0.5)
+        
+        return obstacles
+
+    def detect_obstacles_lidar_frustum_cluster(self, radius: float = 50.0) -> List[Obstacle]:
+        """
+        Detect obstacles from sensor data using Frustum Filtering with LiDAR.
+        
+        Algorithm:
+        1. Frustum Filtering: Project LiDAR points to image and select those inside YOLO boxes.
+        2. Coordinate Transform: Convert points to Vehicle Frame.
+        3. Clustering: Remove outliers using statistical filtering (Z-score/Median).
+        4. AABB Fitting (Observed Extents):
+           - Compute the Axis-Aligned Bounding Box (AABB) of the clustered points.
+           - Use min/max coordinates in X, Y, Z to determine dimensions and center.
+           - No assumptions about object size; relies entirely on visible point cloud.
+        
+        Args:
+            radius: Maximum detection radius in meters
+            
+        Returns:
+            List of Obstacle instances, sorted by distance
+        """
+        if not self.vehicle or not self.vehicle.is_alive:
+            return []
+        
+        # Get RGB camera
+        rgb_sensor = self.sensor_suite.get_sensor('front_rgb')
+        if rgb_sensor is None:
+            print("[Perception] Warning: No RGB sensor found")
+            return []
+        
+        rgb_image = rgb_sensor.get_data()
+        if rgb_image is None:
+            return []
+        
+        # Get LiDAR sensor
+        lidar_sensor = self.sensor_suite.get_sensor('lidar')
+        if lidar_sensor is None:
+            print("[Perception] Warning: No LiDAR sensor found")
+            return []
+            
+        lidar_data = lidar_sensor.get_data() # Expecting Nx4 numpy array (x, y, z, intensity)
+        if lidar_data is None or len(lidar_data) == 0:
+            return []
+            
+        # Take only x, y, z
+        lidar_points = lidar_data[:, :3]
+        
+        # Compute intrinsics if not done yet
+        if not self._intrinsics_computed:
+            self._compute_intrinsics(rgb_sensor.width, rgb_sensor.height, rgb_sensor.fov)
+        
+        # Run 2D detection
+        start_time = time.time()
+        detections = self.detector.detect(rgb_image)
+        inference_time = time.time() - start_time
+        print(f"[Perception] YOLO inference time: {inference_time:.3f}s, detections: {len(detections)}")
+        
+        # Store for visualization
+        self._last_rgb_image = rgb_image.copy()
+        self._last_detections = detections
+        
+        if not detections:
+            return []
+        
+        obstacles = []
+        obstacle_id = 1000
+        
+        # 1. Transform LiDAR points to Vehicle Frame
+        # LiDAR sensor usually outputs in its own frame (x-forward, y-right, z-up)
+        lidar_pos = lidar_sensor.position
+        lidar_points_veh = lidar_points + np.array([lidar_pos['x'], lidar_pos['y'], lidar_pos['z']])
+        
+        # 2. Transform Vehicle Frame points to Camera Frame for projection
+        camera_pos = rgb_sensor.position
+        
+        # Translate to camera position
+        pts_rel = lidar_points_veh - np.array([camera_pos['x'], camera_pos['y'], camera_pos['z']])
+        
+        # Rotate to camera frame
+        # Cam X (right) = Veh Y
+        # Cam Y (down) = -Veh Z
+        # Cam Z (forward) = Veh X
+        lidar_points_cam = np.zeros_like(pts_rel)
+        lidar_points_cam[:, 0] = pts_rel[:, 1]   # x = y_veh
+        lidar_points_cam[:, 1] = -pts_rel[:, 2]  # y = -z_veh
+        lidar_points_cam[:, 2] = pts_rel[:, 0]   # z = x_veh
+        
+        # Filter points behind camera (create mask before filtering)
+        front_mask = lidar_points_cam[:, 2] > 0
+        lidar_points_cam = lidar_points_cam[front_mask]
+        lidar_points_veh = lidar_points_veh[front_mask]
+        
+        # Project to Image Plane
+        u = (lidar_points_cam[:, 0] * self._fx / lidar_points_cam[:, 2]) + self._cx
+        v = (lidar_points_cam[:, 1] * self._fy / lidar_points_cam[:, 2]) + self._cy
+        
+        # Stack u, v with vehicle frame points (for final box fitting)
+        # projected_points: [u, v, x_veh, y_veh, z_veh]
+        projected_points = np.column_stack((u, v, lidar_points_veh))
+        
+        for det in detections:
+            bbox = det['bbox']  # [x1, y1, x2, y2]
+            class_name = det['class']
+            
+            x1, y1, x2, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
+            
+            # Frustum Filtering: Select points inside the 2D bounding box
+            mask = (projected_points[:, 0] >= x1) & (projected_points[:, 0] <= x2) & \
+                   (projected_points[:, 1] >= y1) & (projected_points[:, 1] <= y2)
+            
+            frustum_points = projected_points[mask]
+            
+            if len(frustum_points) < 5:
+                continue
+                
+            # Extract 3D points (in Vehicle Frame)
+            points_veh = frustum_points[:, 2:5]
+            
+            # --- Clustering / Outlier Removal ---
+            # Simple statistical filtering to remove background/foreground noise
+            # Calculate median center of the cluster
+            center_median = np.median(points_veh, axis=0)
+            
+            # Calculate distance of each point to the median center
+            dists = np.linalg.norm(points_veh - center_median, axis=1)
+            
+            # Keep points within a reasonable radius (e.g., 3.0m covers a large car)
+            # This removes points that might be far background captured in the frustum
+            cluster_mask = dists < 3.0
+            points_veh = points_veh[cluster_mask]
+            
+            if len(points_veh) < 3:
+                continue
+            
+            # --- AABB Fitting (Observed Extents) ---
+            # Fit an Axis-Aligned Bounding Box to the visible point cloud.
+            # Since we are in Vehicle Frame:
+            # X is Forward (Distance)
+            # Y is Right (Lateral)
+            # Z is Up (Height)
+            
+            # 1. Find Longitudinal Extent (Length)
+            min_x = np.min(points_veh[:, 0])
+            max_x = np.max(points_veh[:, 0])
+            
+            # 2. Find Lateral Extent (Width)
+            min_y = np.min(points_veh[:, 1])
+            max_y = np.max(points_veh[:, 1])
+            
+            # 3. Find Vertical Extent (Height)
+            min_z = np.min(points_veh[:, 2])
+            max_z = np.max(points_veh[:, 2])
+            
+            # 4. Estimate Dimensions
+            # Use observed dimensions directly (no assumptions about vehicle size)
+            est_length = max_x - min_x
+            est_width = max_y - min_y
+            est_height = max_z - min_z
+            
+            # 5. Construct Bounding Box Center
+            center_x = (min_x + max_x) / 2.0
+            center_y = (min_y + max_y) / 2.0
+            center_z = (min_z + max_z) / 2.0
+            
+            # Create obstacle
+            obstacle = Obstacle(
+                id=obstacle_id,
+                obstacle_type=class_name,
+                x=center_x,
+                y=center_y,
+                z=center_z,
+                vx=0.0,
+                vy=0.0,
+                vz=0.0,
+                length=est_length,
+                width=est_width,
+                height=est_height,
             )
             obstacles.append(obstacle)
             obstacle_id += 1
