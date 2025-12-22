@@ -41,7 +41,8 @@
 ## Tasks
 - [*] Implement rgb+depth camera based object detection
     * Basic functionality works
-    * But bounding box accuracy is very less
+    * But bounding box accuracy is very less because precomputed vehicle dimensions are not valid for all vehicles
+    * Use grouping of point cloud data from depth camera within the 2D bounding box to estimate 3D bounding box more accurately.
     * Need to test robustness in different lighting/weather conditions.
 - [*] Lane segmentation and lane line detection
     * Works if only one lane present in the camera view
