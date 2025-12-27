@@ -41,14 +41,16 @@
 ## Tasks
 - [*] Implement rgb+depth camera based object detection
     * Basic functionality works
-    * But bounding box accuracy is very less because precomputed vehicle dimensions are not valid for all vehicles
+    * But bounding box accuracy is very less because precomputed vehicle dimensions are not valid for all vehicles. Using median depth from point cloud within 2D bounding box is a bad approximation.
     * Use grouping of point cloud data from depth camera within the 2D bounding box to estimate 3D bounding box more accurately.
     * Need to test robustness in different lighting/weather conditions.
 - [*] Lane segmentation and lane line detection
     * Works if only one lane present in the camera view
     * Need to modify for multiple lanes and curved roads
     * Is lane detection necessary if HD map + localization is available?
-- [ ] Use Lidar point cloud instead of depth camera for depth estimation in YOLO-based detection.
+- [*] Use Lidar point cloud instead of depth camera for depth estimation in YOLO-based detection.
+    * AABB based obstacle dimension estimation implemented.
+    * Orientated bounding box estimation pending.
 - [ ] Use all cameras for multi-view object detection
 - [ ] Traffic light detection
 - [ ] Lidar only 3D object detection
