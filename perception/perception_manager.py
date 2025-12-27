@@ -2,7 +2,7 @@
 
 import carla
 from typing import Optional, List
-
+import math
 from config.config import PERCEPTION
 from state.obstacle import Obstacle
 from state.world_state import WorldState
@@ -134,17 +134,10 @@ class PerceptionManager:
     
     def _visualize_obstacles(self, obstacles: List[Obstacle]) -> None:
         """Draw bounding boxes for detected obstacles."""
-        ego_transform = self.vehicle.get_transform()
-        
         for obs in obstacles:
-            # For ground truth, we have actor IDs, so we can get the actual yaw
-            actor = self.world.get_actor(obs.id) if obs.id < 1000 else None
-            if actor:
-                actor_yaw = actor.get_transform().rotation.yaw
-                relative_yaw = actor_yaw - ego_transform.rotation.yaw
-            else:
-                # Real perception: assume obstacle is facing same direction as ego
-                relative_yaw = 0.0
+            # Use the yaw stored in the obstacle (relative to ego, in radians)
+            # Convert to degrees for CARLA visualizer
+            relative_yaw_deg = math.degrees(obs.yaw)
             
             color = carla.Color(255, 0, 0) if obs.obstacle_type == 'vehicle' else carla.Color(0, 255, 0)
             dimensions = carla.Vector3D(x=obs.length, y=obs.width, z=obs.height)
@@ -152,7 +145,7 @@ class PerceptionManager:
             self._bbox_visualizer.draw_bounding_box(
                 relative_location={'x': obs.x, 'y': obs.y, 'z': obs.z},
                 dimensions=dimensions,
-                yaw=relative_yaw,
+                yaw=relative_yaw_deg,
                 color=color,
                 life_time=0.5,
                 thickness=0.1

@@ -76,6 +76,11 @@ class FakePerception:
                 dims_y = bbox.extent.y * 2
                 dims_z = bbox.extent.z * 2
                 
+                # Compute relative yaw (obstacle heading relative to ego heading)
+                obstacle_yaw = math.radians(actor_transform.rotation.yaw)
+                ego_yaw = math.radians(ego_transform.rotation.yaw)
+                relative_yaw = obstacle_yaw - ego_yaw
+                
                 obstacle = Obstacle(
                     id=actor.id,
                     obstacle_type=obstacle_type,
@@ -88,6 +93,7 @@ class FakePerception:
                     length=dims_x,
                     width=dims_y,
                     height=dims_z,
+                    yaw=relative_yaw,
                 )
                 obstacles.append(obstacle)
                 

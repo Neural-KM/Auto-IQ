@@ -221,10 +221,10 @@ class Live2DVisualizer:
         Draw a single obstacle and return its world-frame corner points.
         
         Args:
-            obs: Obstacle object with x, y, length, width attributes
+            obs: Obstacle object with x, y, length, width, yaw attributes
             vx, vy: Vehicle world position
-            c, s: cos and sin of vehicle heading
-            R: Rotation matrix
+            c, s: cos and sin of vehicle heading (for position transform)
+            R: Rotation matrix (unused, kept for API compatibility)
             color: Color for the obstacle patch
             
         Returns:
@@ -238,6 +238,14 @@ class Live2DVisualizer:
         ox_world = vx + ox_ego * c - oy_ego * s
         oy_world = vy + ox_ego * s + oy_ego * c
         
+        # Compute obstacle's world yaw (ego yaw + relative yaw)
+        ego_yaw = np.arctan2(s, c)
+        obs_world_yaw = ego_yaw + obs.yaw
+        
+        # Create rotation matrix for obstacle's own orientation
+        c_obs, s_obs = np.cos(obs_world_yaw), np.sin(obs_world_yaw)
+        R_obs = np.array([[c_obs, -s_obs], [s_obs, c_obs]])
+        
         # Create rectangle for obstacle in world coordinates
         half_l, half_w = ol / 2, ow / 2
         local_pts = np.array([
@@ -246,7 +254,7 @@ class Live2DVisualizer:
             [-half_l, -half_w],
             [-half_l, half_w],
         ])
-        pts = local_pts.dot(R.T) + np.array([ox_world, oy_world])
+        pts = local_pts.dot(R_obs.T) + np.array([ox_world, oy_world])
         
         obs_patch = Polygon(pts, color=color, alpha=0.7)
         self._ax.add_patch(obs_patch)

@@ -19,3 +19,5 @@ class Obstacle:
     length: float               # extent in x
     width: float                # extent in y
     height: float               # extent in z
+    # Orientation (radians, relative to ego vehicle heading)
+    yaw: float = 0.0            # heading relative to ego
