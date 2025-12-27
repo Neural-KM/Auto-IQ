@@ -1,16 +1,18 @@
 """
 Live 2D visualizer using Matplotlib.
 
-This visualizer opens a window in a separate thread and accepts updates via the
-`update(vehicle, waypoints, reference)` function. It draws:
+This visualizer opens a window in a separate thread and draws:
 - Current vehicle pose (triangle with heading)
 - Waypoints (blue)
 - Reference trajectory (cyan)
 - Predicted MPC trajectory (green) if provided
+- Ground truth obstacles (green)
+- Perceived obstacles (red)
 
 Usage: 
-- Create a global visualizer and call `visualizer.start()` once. 
-- Call `visualizer.update(vehicle_state, waypoints, reference, predicted)` each tick.
+- Create a visualizer with a WorldState reference.
+- Call `visualizer.start()` once. 
+- Call `visualizer.update(waypoints, reference, predicted)` each tick.
 
 The visualizer runs a timed loop at ~10Hz to keep the window responsive.
 """
@@ -32,19 +34,18 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 import cv2
 
 class Live2DVisualizer:
-    def __init__(self, title="Auto-IQ Live 2D Visualizer", refresh_hz=10):
+    def __init__(self, world_state: WorldState = None, title="Auto-IQ Live 2D Visualizer", refresh_hz=10):
         self.title = title
         self.refresh_hz = refresh_hz
+        self.world_state = world_state
         self._running = False
         self._thread = None
         self._lock = threading.Lock()
 
-        # Data stores for drawing
-        self._vehicle = None  # [x, y, psi]
+        # Data stores for drawing (waypoints, reference, predicted still passed via update)
         self._waypoints = None  # list of (x,y)
         self._reference = None  # Nx4 array
         self._predicted = None  # Nx4 array
-        self._obstacles = []  # list of obstacle dicts {x, y, length, width, obstacle_type}
 
         # Plot handles
         self._fig = None
@@ -54,6 +55,10 @@ class Live2DVisualizer:
         self._reference_line = None
         self._predicted_line = None
         self._obstacle_patches = []  # list of Polygon patches for obstacles
+    
+    def set_world_state(self, world_state: WorldState):
+        """Set or update the world state reference."""
+        self.world_state = world_state
 
     def start(self):
         if plt is None:
@@ -111,11 +116,15 @@ class Live2DVisualizer:
 
     def _draw_once(self):
         with self._lock:
-            vehicle = self._vehicle
             waypoints = self._waypoints
             reference = self._reference
             predicted = self._predicted
-            obstacles = list(self._obstacles)
+        
+        # Get vehicle state from world_state
+        vehicle = None
+        if self.world_state and self.world_state.vehicle_state:
+            vs = self.world_state.vehicle_state
+            vehicle = (vs.x, vs.y, vs.yaw)
 
         # Update bounds
         xs = []
@@ -150,51 +159,25 @@ class Live2DVisualizer:
             patch.remove()
         self._obstacle_patches = []
 
-        for obs in obstacles:
-            # Obstacle coordinates are ego-relative (x=forward, y=left)
-            # Transform to world coordinates using vehicle pose
-            ox_ego, oy_ego = obs['x'], obs['y']
-            ol, ow = obs.get('length', 2.0), obs.get('width', 1.0)
-            obs_type = obs.get('obstacle_type', 'vehicle')
-            source = obs.get('source', 'ground_truth')
-            
-            # Choose color based on source (ground truth vs perceived) and type
-            if source == 'perceived':
-                # Perceived obstacles: red tones
-                color = 'red' if obs_type == 'vehicle' else 'coral'
-            else:
-                # Ground truth obstacles: green tones
-                color = 'green' if obs_type == 'vehicle' else 'lime'
-            
-            # Transform ego-relative position to world coordinates
-            if vehicle is not None:
-                vx, vy, vpsi = vehicle[0], vehicle[1], vehicle[2]
-                c, s = np.cos(vpsi), np.sin(vpsi)
-                # Rotate and translate from ego frame to world frame
-                ox_world = vx + ox_ego * c - oy_ego * s
-                oy_world = vy + ox_ego * s + oy_ego * c
-            else:
-                # No vehicle pose available, skip drawing obstacles
-                continue
-            
-            # Create rectangle for obstacle in world coordinates
-            half_l, half_w = ol / 2, ow / 2
-            # Build rectangle in local frame then rotate to world
-            local_pts = np.array([
-                [half_l, half_w],
-                [half_l, -half_w],
-                [-half_l, -half_w],
-                [-half_l, half_w],
-            ])
-            # Rotate by vehicle heading and translate to world obstacle position
+        # Draw obstacles directly from world_state
+        if self.world_state and vehicle is not None:
+            vx, vy, vpsi = vehicle[0], vehicle[1], vehicle[2]
+            c, s = np.cos(vpsi), np.sin(vpsi)
             R = np.array([[c, -s], [s, c]])
-            pts = local_pts.dot(R.T) + np.array([ox_world, oy_world])
             
-            obs_patch = Polygon(pts, color=color, alpha=0.7)
-            self._ax.add_patch(obs_patch)
-            self._obstacle_patches.append(obs_patch)
-            xs.extend(pts[:, 0].tolist())
-            ys.extend(pts[:, 1].tolist())
+            # Draw ground truth obstacles (green)
+            for obs in self.world_state.ground_truth_obstacles:
+                pts = self._draw_obstacle(obs, vx, vy, c, s, R, 'green' if obs.obstacle_type == 'vehicle' else 'lime')
+                if pts is not None:
+                    xs.extend(pts[:, 0].tolist())
+                    ys.extend(pts[:, 1].tolist())
+            
+            # Draw perceived obstacles (red)
+            for obs in self.world_state.perceived_obstacles:
+                pts = self._draw_obstacle(obs, vx, vy, c, s, R, 'red' if obs.obstacle_type == 'vehicle' else 'coral')
+                if pts is not None:
+                    xs.extend(pts[:, 0].tolist())
+                    ys.extend(pts[:, 1].tolist())
 
         if vehicle is not None:
             vx, vy, vpsi = vehicle[0], vehicle[1], vehicle[2]
@@ -233,41 +216,56 @@ class Live2DVisualizer:
         except Exception:
             pass
 
-    def update(self, vehicle_state=None, waypoints=None, reference=None, predicted=None, world_state: Optional[WorldState] = None):
+    def _draw_obstacle(self, obs, vx, vy, c, s, R, color):
+        """
+        Draw a single obstacle and return its world-frame corner points.
+        
+        Args:
+            obs: Obstacle object with x, y, length, width attributes
+            vx, vy: Vehicle world position
+            c, s: cos and sin of vehicle heading
+            R: Rotation matrix
+            color: Color for the obstacle patch
+            
+        Returns:
+            Corner points in world frame, or None if obstacle is invalid
+        """
+        # Obstacle coordinates are ego-relative (x=forward, y=left)
+        ox_ego, oy_ego = obs.x, obs.y
+        ol, ow = obs.length, obs.width
+        
+        # Transform ego-relative position to world coordinates
+        ox_world = vx + ox_ego * c - oy_ego * s
+        oy_world = vy + ox_ego * s + oy_ego * c
+        
+        # Create rectangle for obstacle in world coordinates
+        half_l, half_w = ol / 2, ow / 2
+        local_pts = np.array([
+            [half_l, half_w],
+            [half_l, -half_w],
+            [-half_l, -half_w],
+            [-half_l, half_w],
+        ])
+        pts = local_pts.dot(R.T) + np.array([ox_world, oy_world])
+        
+        obs_patch = Polygon(pts, color=color, alpha=0.7)
+        self._ax.add_patch(obs_patch)
+        self._obstacle_patches.append(obs_patch)
+        return pts
+
+    def update(self, waypoints=None, reference=None, predicted=None):
+        """
+        Update visualization data.
+        
+        Vehicle state and obstacles are read directly from world_state.
+        """
         with self._lock:
-            if vehicle_state is not None:
-                # We're only using x,y,psi
-                self._vehicle = (float(vehicle_state[0]), float(vehicle_state[1]), float(vehicle_state[2]))
             if waypoints is not None:
                 self._waypoints = [(float(w[0]), float(w[1])) for w in waypoints]
             if reference is not None:
                 self._reference = [[float(r[0]), float(r[1]), float(r[2]), float(r[3])] for r in reference]
             if predicted is not None:
                 self._predicted = [[float(r[0]), float(r[1]), float(r[2]), float(r[3])] for r in predicted]
-            if world_state is not None:
-                # Convert WorldState obstacles to list of dicts for drawing
-                # Combine both ground truth and perceived obstacles
-                self._obstacles = []
-                # Add ground truth obstacles (green)
-                for obs in world_state.ground_truth_obstacles:
-                    self._obstacles.append({
-                        'x': float(obs.x),
-                        'y': float(obs.y),
-                        'length': float(obs.length),
-                        'width': float(obs.width),
-                        'obstacle_type': obs.obstacle_type,
-                        'source': 'ground_truth',
-                    })
-                # Add perceived obstacles (red)
-                for obs in world_state.perceived_obstacles:
-                    self._obstacles.append({
-                        'x': float(obs.x),
-                        'y': float(obs.y),
-                        'length': float(obs.length),
-                        'width': float(obs.width),
-                        'obstacle_type': obs.obstacle_type,
-                        'source': 'perceived',
-                    })
 
 
 # Module-level convenience instance
@@ -282,5 +280,5 @@ def stop():
     visualizer.stop()
 
 
-def update(vehicle_state=None, waypoints=None, reference=None, predicted=None):
-    visualizer.update(vehicle_state, waypoints, reference, predicted)
+def update(waypoints=None, reference=None, predicted=None):
+    visualizer.update(waypoints, reference, predicted)

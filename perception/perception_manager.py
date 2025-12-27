@@ -21,7 +21,7 @@ class PerceptionManager:
         world,
         sensor_suite,
         world_state: WorldState,
-        perception_mode: str = 'fake',
+        use_ground_truth: bool = True,
         enable_lane_detection: bool = True,
         visualize_options: Optional[set] = None,
         debug: bool = False,
@@ -31,23 +31,26 @@ class PerceptionManager:
         self.sensor_suite = sensor_suite
         self.world_state = world_state
         self.visualize_options = visualize_options or set()
-        self.perception_mode = perception_mode
+        self.use_ground_truth = use_ground_truth
         
         # Read perception config
         model_path = PERCEPTION['object_detector']['model_path']
         conf_threshold = PERCEPTION['object_detector']['conf_threshold']
         
-        # Obstacle detection
-        if self.perception_mode == 'fake':
-            self._obstacle_detector = FakePerception(vehicle, world)
-            print("[Perception] Using FakePerception (ground truth)")
-        else:
-            self._obstacle_detector = Perception(
+        # Ground Truth detector (FakePerception) - always available
+        self._ground_truth_detector = FakePerception(vehicle, world)
+        
+        # Real Perception detector (YOLO + LiDAR) - only initialized if not using ground truth
+        self._real_detector = None
+        if not use_ground_truth:
+            self._real_detector = Perception(
                 vehicle=vehicle, world=world, sensor_suite=sensor_suite,
                 model_path=model_path,
                 conf_threshold=conf_threshold
             )
-            print("[Perception] Using real perception (YOLO + Depth)")
+            print("[Perception] Real perception enabled (YOLO + LiDAR)")
+        
+        print(f"[Perception] Initialized with use_ground_truth={use_ground_truth}")
         
         # Bounding box visualization (handled here, not in detector)
         self._bbox_visualizer = None
@@ -93,24 +96,27 @@ class PerceptionManager:
         """
         Execute one perception cycle and update WorldState.
         
-        Updates world_state with:
-            - ground_truth_obstacles (if perception_mode == 'fake')
-            - perceived_obstacles (if perception_mode == 'real')
-            - lane_detection
+        Updates ground_truth_obstacles always.
+        Updates perceived_obstacles only if real perception is enabled.
         """
-        obstacles = self._obstacle_detector.detect_obstacles(radius=PERCEPTION['obstacle_radius'])
+        # Always run ground truth detector
+        ground_truth_obstacles = self._ground_truth_detector.detect_obstacles(radius=PERCEPTION['obstacle_radius'])
+        self.world_state.update_ground_truth(ground_truth_obstacles or [])
         
-        # Update WorldState based on perception mode
-        if self.perception_mode == 'fake':
-            self.world_state.update_ground_truth(obstacles or [])
-        else:
-            self.world_state.update_perception(obstacles or [])
+        # Run real detector only if initialized
+        perceived_obstacles = []
+        if self._real_detector:
+            perceived_obstacles = self._real_detector.detect_obstacles(radius=PERCEPTION['obstacle_radius'])
+            self.world_state.update_perception(perceived_obstacles or [])
         
-        if self._bbox_visualizer and obstacles:
-            self._visualize_obstacles(obstacles)
+        # Visualize the active obstacles (based on use_ground_truth flag)
+        active_obstacles = ground_truth_obstacles if self.use_ground_truth else perceived_obstacles
         
-        if obstacles:
-            self._print_obstacles(obstacles)
+        if self._bbox_visualizer and active_obstacles:
+            self._visualize_obstacles(active_obstacles)
+        
+        if active_obstacles:
+            self._print_obstacles(active_obstacles)
         
         lanes_result = None
         if self._lane_detector:
@@ -131,14 +137,11 @@ class PerceptionManager:
         ego_transform = self.vehicle.get_transform()
         
         for obs in obstacles:
-            # For real perception, we don't have actor IDs, so yaw is estimated as 0
-            if self.perception_mode == 'fake':
-                actor = self.world.get_actor(obs.id)
-                if actor:
-                    actor_yaw = actor.get_transform().rotation.yaw
-                    relative_yaw = actor_yaw - ego_transform.rotation.yaw
-                else:
-                    relative_yaw = 0.0
+            # For ground truth, we have actor IDs, so we can get the actual yaw
+            actor = self.world.get_actor(obs.id) if obs.id < 1000 else None
+            if actor:
+                actor_yaw = actor.get_transform().rotation.yaw
+                relative_yaw = actor_yaw - ego_transform.rotation.yaw
             else:
                 # Real perception: assume obstacle is facing same direction as ego
                 relative_yaw = 0.0
@@ -185,13 +188,13 @@ class PerceptionManager:
         """
         images = {}
         
-        if self.perception_mode == 'real':
-            # Real perception: get YOLO annotated image and masked image
-            annotated = self._obstacle_detector.get_annotated_image()
+        # Get YOLO annotated image and masked image from real detector (if enabled)
+        if self._real_detector:
+            annotated = self._real_detector.get_annotated_image()
             if annotated is not None:
                 images['yolo_detections'] = annotated
             
-            masked = self._obstacle_detector.get_masked_image()
+            masked = self._real_detector.get_masked_image()
             if masked is not None:
                 images['yolo_input'] = masked
         

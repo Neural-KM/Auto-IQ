@@ -34,6 +34,8 @@ from navigation.navigation_manager import NavigationManager
 from perception.perception_manager import PerceptionManager
 from utils.helpers import spawn_vehicle, get_vehicle_telemetry
 from state.world_state import WorldState
+from state.vehicle import VehicleState
+import math
 
 class AutoIQ:
     """Main demo application."""
@@ -117,8 +119,8 @@ class AutoIQ:
             world=self.world,
             sensor_suite=self.sensors,
             world_state=self.world_state,
-            perception_mode=self.args.perception,
-            enable_lane_detection= (self.args.lane_detection == 'on'),
+            use_ground_truth=(self.args.perception == 'fake'),
+            enable_lane_detection=(self.args.lane_detection == 'on'),
             visualize_options=self.visualize_options,
         )
         print("[AutoIQ] Perception manager initialized")
@@ -232,8 +234,30 @@ class AutoIQ:
         self.tiled_display.setup_layout(layout_type)
         self._slot_mapping = slot_mapping
     
+    def _update_vehicle_state(self):
+        """Update WorldState with current vehicle pose and velocity (placeholder for SLAM)."""
+        transform = self.vehicle.get_transform()
+        velocity = self.vehicle.get_velocity()
+        
+        state = VehicleState(
+            x=transform.location.x,
+            y=transform.location.y,
+            z=transform.location.z,
+            pitch=math.radians(transform.rotation.pitch),
+            yaw=math.radians(transform.rotation.yaw),
+            roll=math.radians(transform.rotation.roll),
+            vx=velocity.x,
+            vy=velocity.y,
+            vz=velocity.z,
+            speed=math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2),
+        )
+        self.world_state.update_vehicle_state(state)
+    
     def run_step(self):
         """Execute one simulation step."""
+        # Update vehicle state (placeholder for future SLAM module)
+        self._update_vehicle_state()
+        
         # Perception updates WorldState internally
         self.perception_manager.run_step()
 

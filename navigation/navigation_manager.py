@@ -80,6 +80,7 @@ class NavigationManager:
         # Start live visualizer if requested
         if 'live' in self.visualize_options or 'all' in self.visualize_options:
             try:
+                live_visualizer.set_world_state(self.world_state)
                 live_visualizer.start()
                 print("[Navigation] Live 2D visualizer started")
             except Exception as e:
@@ -363,13 +364,12 @@ class NavigationManager:
             # self._draw_coordinate_axes()
             
         # Draw Pure Pursuit lookahead point if using PID
-        if self.controller_type == 'pid':
+        if self.controller_type == 'pid' and self._should_draw('pplookahead'):
             self._draw_pure_pursuit_target()
 
         # Live 2D visualizer update
         if 'live' in self.visualize_options or 'all' in self.visualize_options:
             try:
-                vehicle_state = self.controller.get_current_state()
                 ref = None
                 pred = None
                 if self.controller.is_using_mpc():
@@ -384,7 +384,7 @@ class NavigationManager:
                     for w in waypoints:
                         if hasattr(w, 'transform') and w.transform is not None:
                             wp_pairs.append((w.transform.location.x, w.transform.location.y))
-                live_visualizer.update(vehicle_state, wp_pairs, ref, pred, self.world_state)
+                live_visualizer.update(wp_pairs, ref, pred)
             except Exception as e:
                 print(f"[Navigation] Live visualizer update failed: {e}")
     
@@ -475,35 +475,6 @@ class NavigationManager:
                 break
         
         return waypoints
-    
-    def _convert_obstacles_to_world(self):
-        """
-        Convert detected obstacles from ego-relative to world coordinates.
-        
-        Returns:
-            List of [x, y] world coordinates for obstacles
-        """
-        obstacles = []
-        
-        if not self._obstacle_detection:
-            return obstacles
-        
-        # Transform ego-relative position to world coordinates
-        vehicle_transform = self.vehicle.get_transform()
-        
-        # Ego-relative to world: rotate by vehicle yaw and translate
-        import math
-        yaw = math.radians(vehicle_transform.rotation.yaw)
-        cos_yaw = math.cos(yaw)
-        sin_yaw = math.sin(yaw)
-        
-        # Rotate ego-relative (x forward, y left) to world frame
-        world_x = vehicle_transform.location.x + (self._obstacle_detection.x * cos_yaw - self._obstacle_detection.y * sin_yaw)
-        world_y = vehicle_transform.location.y + (self._obstacle_detection.x * sin_yaw + self._obstacle_detection.y * cos_yaw)
-        
-        obstacles.append([world_x, world_y])
-        
-        return obstacles
     
     def _draw_mpc_trajectory(self):
         """Draw MPC predicted trajectory for visualization."""
