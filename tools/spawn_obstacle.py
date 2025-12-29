@@ -13,6 +13,8 @@ Usage:
     python tools/spawn_obstacle.py --type cone       # Spawn traffic cone
     python tools/spawn_obstacle.py --lane left       # Spawn in left lane
     python tools/spawn_obstacle.py --persist         # Keep obstacle after script exits
+    python tools/spawn_obstacle.py --distance 20 --type car --yaw 45    # Spawn a car slanted 45 degrees
+    python tools/spawn_obstacle.py --distance 20 --type car --yaw -30 0 30  # Spawn three cars at -30°, 0°, +30°
 """
 
 import argparse
@@ -317,6 +319,8 @@ def main():
                        help='Keep obstacle after script exits (default: auto-remove)')
     parser.add_argument('--duration', type=float, default=30.0,
                        help='How long to keep obstacle (seconds, default: 30)')
+    parser.add_argument('--yaw', type=float, nargs='+', default=[0.0],
+                       help='Yaw offset(s) in degrees to apply to spawn heading (default: 0 = straight)')
     
     args = parser.parse_args()
     
@@ -351,41 +355,58 @@ def main():
             actual_dist = ego_loc.distance(transform.location)
             print(f"Actual distance from ego: {actual_dist:.1f}m")
             
-            # Spawn based on type
             actor = None
-            if args.type == 'vehicle' or args.type == 'car':
-                actor = spawner.spawn_vehicle(transform, 'car')
+            # For each requested yaw offset, spawn an actor (allows multiple slanted spawns)
+            for yaw_offset in args.yaw:
+                # Build spawn transform with yaw offset applied
+                spawn_yaw = transform.rotation.yaw + float(yaw_offset)
+                spawn_t = carla.Transform(
+                    carla.Location(x=transform.location.x, y=transform.location.y, z=transform.location.z),
+                    carla.Rotation(pitch=transform.rotation.pitch, yaw=spawn_yaw, roll=transform.rotation.roll)
+                )
+
+                if args.type == 'vehicle' or args.type == 'car':
+                    actor = spawner.spawn_vehicle(spawn_t, 'car')
+                    if actor:
+                        try:
+                            actor.apply_control(carla.VehicleControl(hand_brake=True))
+                        except Exception:
+                            pass
+                        print(f"Vehicle set to stationary (handbrake on) at yaw offset {yaw_offset}°")
+
+                elif args.type == 'truck':
+                    actor = spawner.spawn_vehicle(spawn_t, 'truck')
+                    if actor:
+                        try:
+                            actor.apply_control(carla.VehicleControl(hand_brake=True))
+                        except Exception:
+                            pass
+
+                elif args.type == 'motorcycle':
+                    actor = spawner.spawn_vehicle(spawn_t, 'motorcycle')
+                    if actor:
+                        try:
+                            actor.apply_control(carla.VehicleControl(hand_brake=True))
+                        except Exception:
+                            pass
+
+                elif args.type == 'pedestrian':
+                    actor = spawner.spawn_pedestrian(spawn_t)
+
+                elif args.type == 'cone':
+                    actor = spawner.spawn_static_prop(spawn_t, 'cone')
+
+                elif args.type == 'barrier':
+                    actor = spawner.spawn_static_prop(spawn_t, 'barrier')
+
+                elif args.type == 'cones':
+                    spawner.spawn_multiple_cones(ego, dist, count=5)
+                    actor = True
+
                 if actor:
-                    actor.apply_control(carla.VehicleControl(hand_brake=True))
-                    print("Vehicle set to stationary (handbrake on)")
-                    
-            elif args.type == 'truck':
-                actor = spawner.spawn_vehicle(transform, 'truck')
-                if actor:
-                    actor.apply_control(carla.VehicleControl(hand_brake=True))
-                    
-            elif args.type == 'motorcycle':
-                actor = spawner.spawn_vehicle(transform, 'motorcycle')
-                if actor:
-                    actor.apply_control(carla.VehicleControl(hand_brake=True))
-                    
-            elif args.type == 'pedestrian':
-                actor = spawner.spawn_pedestrian(transform)
-                
-            elif args.type == 'cone':
-                actor = spawner.spawn_static_prop(transform, 'cone')
-                
-            elif args.type == 'barrier':
-                actor = spawner.spawn_static_prop(transform, 'barrier')
-                
-            elif args.type == 'cones':
-                spawner.spawn_multiple_cones(ego, dist, count=5)
-                actor = True
-            
-            if actor:
-                spawned_count += 1
-            else:
-                print(f"Failed to spawn obstacle at {dist}m in {lane} lane.")
+                    spawned_count += 1
+                else:
+                    print(f"Failed to spawn obstacle at {dist}m in {lane} lane with yaw {yaw_offset}°.")
     
     if spawned_count == 0:
         print("\nFailed to spawn any obstacles.")
