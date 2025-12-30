@@ -10,6 +10,7 @@ Outputs polynomial fits and lane geometry for path planning.
 import numpy as np
 import cv2
 from sensors.camera_semantic import SemanticLabels
+from state.lane import LaneDetection
 
 
 class LaneDetector:
@@ -390,36 +391,36 @@ class LaneDetector:
         if lane_width_bev is not None:
             self.lane_width_pixels = int(lane_width_bev * (orig_width / self.bev_width))
         
-        return {
-            'valid': confidence > 0.2,
-            'lane_center': self.lane_center,
-            'left_lane': self.left_lane_x,
-            'right_lane': self.right_lane_x,
-            'lane_width': self.lane_width_pixels,
-            'confidence': min(confidence, 1.0),
-            'left_fit': left_fit,
-            'right_fit': right_fit,
-            'lane_width_bev': lane_width_bev,
-            'bev_params': {
+        return LaneDetection(
+            valid=confidence > 0.2,
+            confidence=min(confidence, 1.0),
+            lane_center=self.lane_center,
+            left_lane=self.left_lane_x,
+            right_lane=self.right_lane_x,
+            lane_width=self.lane_width_pixels,
+            left_fit=left_fit,
+            right_fit=right_fit,
+            lane_width_bev=lane_width_bev,
+            bev_params={
                 'width': self.bev_width,
                 'height': self.bev_height,
                 'x_range': self.bev_x_range,
                 'y_range': self.bev_y_range
             }
-        }
+        )
     
     def _invalid_result(self):
         """Return result when detection fails."""
-        return {
-            'valid': False,
-            'lane_center': self.width // 2,
-            'left_lane': None,
-            'right_lane': None,
-            'lane_width': None,
-            'confidence': 0.0,
-            'left_fit': None,
-            'right_fit': None
-        }
+        return LaneDetection(
+            valid=False,
+            confidence=0.0,
+            lane_center=self.width // 2,
+            left_lane=None,
+            right_lane=None,
+            lane_width=None,
+            left_fit=None,
+            right_fit=None
+        )
     
     def reset(self):
         """Reset detector state."""
@@ -568,8 +569,8 @@ class LaneDetectorDebugWindow:
         """Add detection metrics to panel."""
         y = 50
         info_lines = [
-            f"Confidence: {result['confidence']:.2f}",
-            f"Valid: {result['valid']}"
+            f"Confidence: {result.confidence:.2f}",
+            f"Valid: {result.valid}"
         ]
         
         for line in info_lines:

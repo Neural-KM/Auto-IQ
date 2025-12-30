@@ -51,29 +51,19 @@ class BoundingBoxVisualizer:
         if color is None:
             color = carla.Color(255, 0, 0)  # Red
         
-        # Convert relative_location to carla.Location if needed
-        if isinstance(relative_location, dict):
-            rel_loc = carla.Location(
-                x=relative_location.get('x', 0),
-                y=relative_location.get('y', 0),
-                z=relative_location.get('z', 0)
-            )
-        else:
-            rel_loc = relative_location
+        # Convert relative_location to carla.Location
+        rel_loc = carla.Location(
+            x=float(relative_location['x']),
+            y=float(relative_location['y']),
+            z=float(relative_location['z'])
+        )
         
         # Convert dimensions to extent (half-size)
-        if isinstance(dimensions, dict):
-            extent = carla.Vector3D(
-                x=dimensions.get('x', 1) / 2,
-                y=dimensions.get('y', 1) / 2,
-                z=dimensions.get('z', 1) / 2
-            )
-        else:
-            extent = carla.Vector3D(
-                x=dimensions.x / 2,
-                y=dimensions.y / 2,
-                z=dimensions.z / 2
-            )
+        extent = carla.Vector3D(
+            x=dimensions.x / 2,
+            y=dimensions.y / 2,
+            z=dimensions.z / 2
+        )
         
         # Transform relative location to world coordinates
         ego_transform = self.ego_vehicle.get_transform()

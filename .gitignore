@@ -1,3 +1,8 @@
+# Model Weights
+*.pt
+
+# Ignore dataset folders
+data/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

@@ -25,7 +25,7 @@ import numpy as np
 import cv2
 
 # AutoIQ modules
-from config.config import CARLA, CONTROL, SENSORS
+from config.config import CARLA, CONTROL, SENSORS, DISPLAY
 from config.visualization import DISPLAY_WIDTH, DISPLAY_HEIGHT
 
 from sensors.sensor_suite import SensorSuite
@@ -33,8 +33,9 @@ from visualization.tiled_display import TiledDisplay
 from navigation.navigation_manager import NavigationManager
 from perception.perception_manager import PerceptionManager
 from utils.helpers import spawn_vehicle, get_vehicle_telemetry
-from navigation.obstacle_state import ObstacleState
-from navigation.lane_state import LaneState
+from state.world_state import WorldState
+from state.vehicle import VehicleState
+import math
 
 class AutoIQ:
     """Main demo application."""
@@ -57,14 +58,14 @@ class AutoIQ:
         self.visualize_options = args.visualize
         
         # Perception manager (handles obstacle & lane detection)
-        self.perception = None
+        self.perception_manager = None
         
-        # Shared perception state
-        self.obstacle_state = None
-        self.lane_state = None
+        # Shared world state (Blackboard pattern)
+        self.world_state = None
     
-    def setup(self):
-        """Initialize everything."""
+    def _setup_carla(self):
+        """Setup CARLA client, world, and vehicle."""
+
         # Connect to CARLA
         print(f"[AutoIQ] Connecting to CARLA at {self.args.host}:{self.args.port}...")
         self.client = carla.Client(self.args.host, self.args.port)
@@ -92,30 +93,42 @@ class AutoIQ:
         speed_ms = (velocity.x**2 + velocity.y**2 + velocity.z**2)**0.5
         print(f"[AutoIQ] Initial vehicle pose: x={transform.location.x:.2f}, y={transform.location.y:.2f}, yaw={transform.rotation.yaw:.2f}°, v={speed_ms:.2f} m/s")
 
-        # Initialize shared perception state
-        self.obstacle_state = ObstacleState()
-        self.lane_state = LaneState()
-        
         # Setup sensors from config
         self.sensors = SensorSuite(self.vehicle, self.world)
         self.sensors.add_sensors_from_config()
         print("[AutoIQ] Sensors attached")
+
+        # Wait for sensors
+        print("[AutoIQ] Waiting for sensors...")
+        if self.args.sync:
+            for _ in range(20):
+                self.world.tick()
+        else:
+            time.sleep(1.0)
+
+    def setup(self):
+
+        self._setup_carla()
+
+        # Initialize shared world state (Blackboard pattern)
+        self.world_state = WorldState()
         
         # Initialize perception manager
-        self.perception = PerceptionManager(
+        self.perception_manager = PerceptionManager(
             vehicle=self.vehicle,
             world=self.world,
             sensor_suite=self.sensors,
-            enable_lane_detection=not self.args.no_lane_detection,
-            visualize_options=self.visualize_options
+            world_state=self.world_state,
+            use_ground_truth=(self.args.perception == 'fake'),
+            enable_lane_detection=(self.args.lane_detection == 'on'),
+            visualize_options=self.visualize_options,
         )
         print("[AutoIQ] Perception manager initialized")
         
         # Setup navigation manager with shared state
         self.nav_manager = NavigationManager(
             self.vehicle, self.world,
-            obstacle_state=self.obstacle_state,
-            lane_state=self.lane_state,
+            world_state=self.world_state,
             controller_type=self.args.controller,
             visualize_options=self.args.visualize,
             trajectory_mode=self.args.trajectory_mode
@@ -134,13 +147,11 @@ class AutoIQ:
         self.clock = pygame.time.Clock()
         self.tiled_display = TiledDisplay()
         
-        # Wait for sensors
-        print("[AutoIQ] Waiting for sensors...")
-        if self.args.sync:
-            for _ in range(20):
-                self.world.tick()
+        # Apply initial layout based on perception mode
+        if self.args.perception == 'fake':
+            self._apply_display_layout('default', 'fake_perception')
         else:
-            time.sleep(1.0)
+            self._apply_display_layout('default', 'real_perception')
         
         print("[AutoIQ] Ready!")
     
@@ -179,30 +190,76 @@ class AutoIQ:
                     else:
                         print("[AutoIQ] No route planned. Press G first to plan a route.")
                 elif event.key == pygame.K_1:
-                    # Default layout
-                    self.tiled_display.reconfigure_layout('default')
-                    print("[AutoIQ] Layout: Default")
+                    # Default layout (choose based on perception mode)
+                    if self.args.perception == 'fake':
+                        self._apply_display_layout('default', 'fake_perception')
+                        print("[AutoIQ] Layout: Default")
+                    else:
+                        self._apply_display_layout('default', 'real_perception')
+                        print("[AutoIQ] Layout: YOLO Detection")
                 elif event.key == pygame.K_2:
-                    # Surround layout (all sensors)
-                    self.tiled_display.reconfigure_layout('surround')
-                    print("[AutoIQ] Layout: Surround")
+                    # Grid layout (all sensors)
+                    self._apply_display_layout('grid', 'all_sensors')
+                    print("[AutoIQ] Layout: Grid")
                 elif event.key == pygame.K_3:
-                    # Fullscreen layout with dropdown
-                    self.tiled_display.reconfigure_layout('fullscreen')
-                    print("[AutoIQ] Layout: Fullscreen (click dropdown to select sensor)")
+                    # Fullscreen layout
+                    self._apply_display_layout('fullscreen', 'third_person')
+                    print("[AutoIQ] Layout: Fullscreen")
                 elif event.key == pygame.K_4:
-                    # LiDAR layout
-                    self.tiled_display.reconfigure_layout('lidar')
-                    print("[AutoIQ] Layout: LiDAR BEV")
-            elif event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button == 1:  # Left click
-                    self.tiled_display.handle_click(event.pos)
+                    # Dual layout (main + lidar)
+                    self._apply_display_layout('dual', 'lidar')
+                    print("[AutoIQ] Layout: Dual (Camera + LiDAR)")
+    
+    def _apply_display_layout(self, layout_type, option):
+        """
+        Apply a display layout from config.
+        
+        Args:
+            layout_type: Layout type ('default', 'dual', 'grid', 'fullscreen')
+            option: Option name within that layout type
+        """
+        if layout_type not in DISPLAY:
+            print(f"[AutoIQ] Warning: Layout type '{layout_type}' not found, using 'default'")
+            layout_type = 'default'
+        
+        layout = DISPLAY[layout_type]
+        options = layout['options']
+        
+        if option not in options:
+            print(f"[AutoIQ] Warning: Option '{option}' not found in '{layout_type}', using first available")
+            option = list(options.keys())[0]
+        
+        slot_mapping = options[option]['slot_mapping']
+        
+        self.tiled_display.setup_layout(layout_type)
+        self._slot_mapping = slot_mapping
+    
+    def _update_vehicle_state(self):
+        """Update WorldState with current vehicle pose and velocity (placeholder for SLAM)."""
+        transform = self.vehicle.get_transform()
+        velocity = self.vehicle.get_velocity()
+        
+        state = VehicleState(
+            x=transform.location.x,
+            y=transform.location.y,
+            z=transform.location.z,
+            pitch=math.radians(transform.rotation.pitch),
+            yaw=math.radians(transform.rotation.yaw),
+            roll=math.radians(transform.rotation.roll),
+            vx=velocity.x,
+            vy=velocity.y,
+            vz=velocity.z,
+            speed=math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2),
+        )
+        self.world_state.update_vehicle_state(state)
     
     def run_step(self):
         """Execute one simulation step."""
-        obstacles, lanes_result = self.perception.run_step(obstacle_radius=50.0)
-        self.obstacle_state.update(obstacles)
-        self.lane_state.update(lanes_result)
+        # Update vehicle state (placeholder for future SLAM module)
+        self._update_vehicle_state()
+        
+        # Perception updates WorldState internally
+        self.perception_manager.run_step()
 
         control = self.nav_manager.run_step()
 
@@ -222,6 +279,7 @@ class AutoIQ:
         telemetry = get_vehicle_telemetry(self.vehicle, self.world_map)
         telemetry['target_speed'] = self.target_speed
         telemetry['control'] = control
+        telemetry['fps'] = self.clock.get_fps()
         
         # Add navigation info
         nav_status = self.nav_manager.get_status()
@@ -238,43 +296,16 @@ class AutoIQ:
         obstacle_detection = {
             'obstacle_detected': nav_status.get('obstacle_detected', False),
             'distance': nav_status.get('obstacle_distance', float('inf')),
-            'position': nav_status.get('obstacle_position', None),
-            'center': nav_status.get('obstacle_center', None),
-            'pixel_count': nav_status.get('obstacle_pixels', 0),
-            'bbox': nav_status.get('obstacle_bbox', None),
             'obstacle_type': nav_status.get('obstacle_type', 'unknown')
         }
         
-        # Get debug images from perception
-        debug_images = self.perception.get_debug_images()
+        # Get all images from perception
+        perception_images = self.perception_manager.get_images()
         
-        # Build panel data dynamically from configured sensors
-        panel_data = {
-            'telemetry': telemetry,
-            'obstacle': {
-                'obstacle_detection': obstacle_detection
-            },
-            # Debug panels for perception layout
-            'roi_semantic': {
-                'image': debug_images.get('roi_semantic')
-            },
-            'vehicle_mask': {
-                'image': debug_images.get('vehicle_mask')
-            },
-            'raw_obstacles': {
-                'image': debug_images.get('raw_obstacles'),
-                'pixel_count': nav_status.get('obstacle_pixels', 0)
-            },
-            'filtered_obstacles': {
-                'image': debug_images.get('filtered_obstacles'),
-                'pixel_count': nav_status.get('obstacle_pixels', 0)
-            },
-            'combined_debug': {
-                'image': debug_images.get('combined')
-            }
-        }
+        # Build source data - collect all available images by source name
+        source_data = {}
         
-        # Dynamically add sensor data based on config
+        # Add sensor images
         for sensor_config in SENSORS:
             sensor_name = sensor_config['name']
             sensor_type = sensor_config['type']
@@ -283,34 +314,31 @@ class AutoIQ:
             if sensor is None:
                 continue
             
-            # Get appropriate data based on sensor type
             if sensor_type == 'rgb':
-                panel_data[sensor_name] = {
-                    'image': sensor.get_data()
-                }
+                source_data[sensor_name] = {'image': sensor.get_data(), 'title': sensor_name.replace('_', ' ').title()}
             elif sensor_type == 'semantic':
-                panel_data[sensor_name] = {
-                    'image': sensor.get_colored_image(),
-                    'obstacle_detection': obstacle_detection
-                }
+                source_data[sensor_name] = {'image': sensor.get_colored_image(), 'title': 'Semantic'}
             elif sensor_type == 'depth':
-                panel_data[sensor_name] = {
-                    'image': sensor.get_normalized_image(),
-                    'obstacle_detection': obstacle_detection
-                }
+                source_data[sensor_name] = {'image': sensor.get_normalized_image(), 'title': 'Depth'}
             elif sensor_type == 'lidar':
-                panel_data[sensor_name] = {
-                    'image': sensor.get_bev_image()
-                }
+                source_data[sensor_name] = {'image': sensor.get_bev_image(), 'title': 'LiDAR BEV'}
             else:
-                panel_data[sensor_name] = {
-                    'image': sensor.get_data()
-                }
+                source_data[sensor_name] = {'image': sensor.get_data(), 'title': sensor_name}
         
-        # Also add main_camera alias (for layouts that use main_camera panel name)
-        main_sensor = self.sensors.get_sensor('main')
-        if main_sensor:
-            panel_data['main_camera'] = {'image': main_sensor.get_data()}
+        # Add perception images
+        for name, image in perception_images.items():
+            source_data[name] = {'image': image, 'title': name.replace('_', ' ').title()}
+        
+        # Map slots to source data using slot mapping
+        panel_data = {
+            'telemetry': telemetry,
+            'obstacle': {'obstacle_detection': obstacle_detection},
+        }
+        
+        slot_mapping = getattr(self, '_slot_mapping', {})
+        for slot_name, source_name in slot_mapping.items():
+            if source_name in source_data:
+                panel_data[slot_name] = source_data[source_name]
         
         # Render tiled display
         self.tiled_display.render(self.display, panel_data)
@@ -388,8 +416,8 @@ class AutoIQ:
         
         # Close perception debug windows
         try:
-            if self.perception:
-                self.perception.close()
+            if self.perception_manager:
+                self.perception_manager.close()
             cv2.destroyAllWindows()
         except Exception as e:
             print(f"[AutoIQ] Warning: Error closing debug windows: {e}")
@@ -409,16 +437,19 @@ def main():
     parser.add_argument('--host', default='127.0.0.1', help='CARLA host')
     parser.add_argument('--port', type=int, default=2000, help='CARLA port')
     parser.add_argument('--speed', type=float, default=30.0, help='Target speed km/h')
-    parser.add_argument('--sync', action='store_true', help='Synchronous mode')
-    parser.add_argument('--spawn', type=int, default=0, help='Spawn point index for vehicle (default: 0)')
-    parser.add_argument('--dest', type=int, default=None, help='Destination spawn point index')
-    parser.add_argument('--visualize', type=str, default='',
+    parser.add_argument('--sync', type=bool, default=True,
+                        help='Enable synchronous mode (True/False)')
+    parser.add_argument('--spawn', type=int, default=50, help='Spawn point index for vehicle (default: 0)')
+    parser.add_argument('--dest', type=int, default=250, help='Destination spawn point index')
+    parser.add_argument('--visualize', type=str, default='waypoints,sensors,route,live,bbox',
                         help='Comma-separated items to draw in simulator (e.g., "route,waypoints,bbox,all")')
-    parser.add_argument('--no-lane-detection', action='store_true',
-                        help='Disable lane detection pipeline (use map waypoints only)')
+    parser.add_argument('--lane-detection', type=str, default='off', choices=['off', 'on'],
+                        help='Lane detection mode: off or on')
+    parser.add_argument('--perception', type=str, default='fake',
+                        choices=['real', 'fake'], help='Perception mode: real (YOLO+Depth) or fake (ground truth)')
     parser.add_argument('--controller', type=str, default='mpc',
                         choices=['mpc', 'pid'], help='Type of vehicle controller to use (default: mpc)')
-    parser.add_argument('--trajectory-mode', type=int, default=0,
+    parser.add_argument('--trajectory-mode', type=int, default=1,
                         help='Trajectory generation mode: 0=Heuristic, 1=Trapezoidal (default: 0)')
     args = parser.parse_args()
 

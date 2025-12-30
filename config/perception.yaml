@@ -1,0 +1,28 @@
+# Perception Configuration
+# ========================
+
+# Lane detection
+enable_lane_detection: true
+
+# Object detector settings (used when --fake-perception is NOT passed)
+object_detector:
+  model_path: 'yolov8n.pt'  # YOLO model: yolov8n.pt (fast), yolov8s.pt (balanced), yolov8m.pt (accurate)
+  conf_threshold: 0.5  # Detection confidence threshold (0.0 - 1.0)
+
+# Detection radius (meters)
+obstacle_radius: 50.0
+
+# Ego vehicle hood mask
+# A trapezoid region at the bottom of the image is blacked out to prevent detecting the ego vehicle's hood.
+# Adjust these values based on your camera placement (height, pitch, position).
+# All values are percentages of image dimensions (0.0 - 1.0)
+ego_hood_mask:
+  enabled: true
+  # Top edge of trapezoid (narrower)
+  top_y: 0.85           # Y position of top edge (0=top, 1=bottom)
+  top_left_x: 0.25      # Left X of top edge
+  top_right_x: 0.75     # Right X of top edge
+  # Bottom edge of trapezoid (wider) - typically full width at image bottom
+  bottom_y: 1.0         # Y position of bottom edge
+  bottom_left_x: 0.08    # Left X of bottom edge  
+  bottom_right_x: 0.92   # Right X of bottom edge

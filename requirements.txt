@@ -3,3 +3,6 @@ numpy
 scipy
 pyyaml
 casadi
+ultralytics
+torch
+torchvision
