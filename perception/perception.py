@@ -451,37 +451,73 @@ class Perception:
             if len(points_veh) < 3:
                 continue
             
-            # --- AABB Fitting (Observed Extents) ---
-            # Fit an Axis-Aligned Bounding Box to the visible point cloud.
-            # Since we are in Vehicle Frame:
-            # X is Forward (Distance)
-            # Y is Right (Lateral)
-            # Z is Up (Height)
-            
-            # 1. Find Longitudinal Extent (Length)
-            min_x = np.min(points_veh[:, 0])
-            max_x = np.max(points_veh[:, 0])
-            
-            # 2. Find Lateral Extent (Width)
-            min_y = np.min(points_veh[:, 1])
-            max_y = np.max(points_veh[:, 1])
-            
-            # 3. Find Vertical Extent (Height)
-            min_z = np.min(points_veh[:, 2])
-            max_z = np.max(points_veh[:, 2])
-            
-            # 4. Estimate Dimensions
-            # Use observed dimensions directly (no assumptions about vehicle size)
-            est_length = max_x - min_x
-            est_width = max_y - min_y
-            est_height = max_z - min_z
-            
-            # 5. Construct Bounding Box Center
-            center_x = (min_x + max_x) / 2.0
-            center_y = (min_y + max_y) / 2.0
-            center_z = (min_z + max_z) / 2.0
-            
-            # Create obstacle
+            # --- Oriented Bounding Box via PCA ---
+            # Compute an oriented bounding box (OBB) using PCA on the XY plane.
+            # Steps:
+            #  - perform PCA on the XY points to find principal axes
+            #  - project points to PCA frame to get length/width extents
+            #  - compute min/max Z for height
+            #  - reconstruct OBB center in vehicle frame and compute yaw
+
+            # Extract XY and Z
+            xy = points_veh[:, :2]
+            z_vals = points_veh[:, 2]
+
+            # Centroid in XY
+            centroid_xy = np.mean(xy, axis=0)
+            centered = xy - centroid_xy
+
+            # If we have enough points, do PCA
+            if centered.shape[0] >= 2:
+                cov = np.cov(centered, rowvar=False)
+                eigvals, eigvecs = np.linalg.eigh(cov)
+                # Order eigenvectors by descending eigenvalue
+                order = eigvals.argsort()[::-1]
+                eigvecs = eigvecs[:, order]
+
+                # Project into PCA axes
+                proj = centered.dot(eigvecs)
+                min_proj = np.min(proj, axis=0)
+                max_proj = np.max(proj, axis=0)
+                extents = max_proj - min_proj
+
+                est_length = float(extents[0]) if extents[0] > 0 else 0.0
+                est_width = float(extents[1]) if extents[1] > 0 else 0.0
+
+                # center in PCA frame -> back to vehicle XY
+                center_pca = (min_proj + max_proj) / 2.0
+                center_xy = centroid_xy + eigvecs.dot(center_pca)
+
+                # Height and Z center
+                min_z = np.min(z_vals)
+                max_z = np.max(z_vals)
+                est_height = float(max_z - min_z)
+                center_z = float((min_z + max_z) / 2.0)
+
+                center_x = float(center_xy[0])
+                center_y = float(center_xy[1])
+
+                # Yaw: angle of principal axis (first eigenvector) in vehicle XY
+                principal = eigvecs[:, 0]
+                yaw = math.atan2(float(principal[1]), float(principal[0]))
+            else:
+                # Fallback to axis-aligned bounding box
+                min_x = np.min(points_veh[:, 0])
+                max_x = np.max(points_veh[:, 0])
+                min_y = np.min(points_veh[:, 1])
+                max_y = np.max(points_veh[:, 1])
+                min_z = np.min(points_veh[:, 2])
+                max_z = np.max(points_veh[:, 2])
+
+                est_length = max_x - min_x
+                est_width = max_y - min_y
+                est_height = max_z - min_z
+
+                center_x = (min_x + max_x) / 2.0
+                center_y = (min_y + max_y) / 2.0
+                center_z = (min_z + max_z) / 2.0
+                yaw = 0.0
+
             obstacle = Obstacle(
                 id=obstacle_id,
                 obstacle_type=class_name,
@@ -494,6 +530,7 @@ class Perception:
                 length=est_length,
                 width=est_width,
                 height=est_height,
+                yaw=yaw,
             )
             obstacles.append(obstacle)
             obstacle_id += 1
