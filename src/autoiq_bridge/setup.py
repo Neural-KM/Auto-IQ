@@ -1,3 +1,5 @@
+import os
+from glob import glob
 from setuptools import find_packages, setup
 
 package_name = 'autoiq_bridge'
@@ -10,13 +12,15 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/config', ['config/objects.json']),
+        ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='skully',
     maintainer_email='boliyadeep2003@gmail.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='Custom CARLA to ROS2 bridge for AutoIQ',
+    license='MIT',
     extras_require={
         'test': [
             'pytest',
@@ -24,6 +28,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'carla_bridge_node = autoiq_bridge.carla_bridge_node:main',
         ],
     },
 )

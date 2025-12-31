@@ -1,0 +1,166 @@
+{
+    "objects": [
+        {
+            "type": "vehicle.tesla.model3",
+            "id": "ego_vehicle",
+            "spawn_point_index": 0,
+            "sensors": [
+                {
+                    "type": "sensor.camera.rgb",
+                    "id": "front_rgb",
+                    "spawn_point": {
+                        "x": 0.2,
+                        "y": 0.0,
+                        "z": 1.5,
+                        "roll": 0.0,
+                        "pitch": 0.0,
+                        "yaw": 0.0
+                    },
+                    "image_size_x": 1280,
+                    "image_size_y": 720,
+                    "fov": 90.0,
+                    "sensor_tick": 0.0
+                },
+                {
+                    "type": "sensor.camera.rgb",
+                    "id": "third_person",
+                    "spawn_point": {
+                        "x": -6.0,
+                        "y": 0.0,
+                        "z": 2.5,
+                        "roll": 0.0,
+                        "pitch": -8.0,
+                        "yaw": 0.0
+                    },
+                    "image_size_x": 1280,
+                    "image_size_y": 720,
+                    "fov": 90.0,
+                    "sensor_tick": 0.0
+                },
+                {
+                    "type": "sensor.camera.rgb",
+                    "id": "left_rgb",
+                    "spawn_point": {
+                        "x": 0.0,
+                        "y": -0.5,
+                        "z": 1.5,
+                        "roll": 0.0,
+                        "pitch": 0.0,
+                        "yaw": -90.0
+                    },
+                    "image_size_x": 1280,
+                    "image_size_y": 720,
+                    "fov": 90.0,
+                    "sensor_tick": 0.0
+                },
+                {
+                    "type": "sensor.camera.rgb",
+                    "id": "right_rgb",
+                    "spawn_point": {
+                        "x": 0.0,
+                        "y": 0.5,
+                        "z": 1.5,
+                        "roll": 0.0,
+                        "pitch": 0.0,
+                        "yaw": 90.0
+                    },
+                    "image_size_x": 1280,
+                    "image_size_y": 720,
+                    "fov": 90.0,
+                    "sensor_tick": 0.0
+                },
+                {
+                    "type": "sensor.camera.rgb",
+                    "id": "back_rgb",
+                    "spawn_point": {
+                        "x": -2.0,
+                        "y": 0.0,
+                        "z": 1.5,
+                        "roll": 0.0,
+                        "pitch": 0.0,
+                        "yaw": 180.0
+                    },
+                    "image_size_x": 1280,
+                    "image_size_y": 720,
+                    "fov": 90.0,
+                    "sensor_tick": 0.0
+                },
+                {
+                    "type": "sensor.camera.semantic_segmentation",
+                    "id": "semantic",
+                    "spawn_point": {
+                        "x": 0.2,
+                        "y": 0.0,
+                        "z": 1.5,
+                        "roll": 0.0,
+                        "pitch": 0.0,
+                        "yaw": 0.0
+                    },
+                    "image_size_x": 1280,
+                    "image_size_y": 720,
+                    "fov": 90.0,
+                    "sensor_tick": 0.0
+                },
+                {
+                    "type": "sensor.camera.depth",
+                    "id": "depth",
+                    "spawn_point": {
+                        "x": 0.2,
+                        "y": 0.0,
+                        "z": 1.5,
+                        "roll": 0.0,
+                        "pitch": 0.0,
+                        "yaw": 0.0
+                    },
+                    "image_size_x": 1280,
+                    "image_size_y": 720,
+                    "fov": 90.0,
+                    "sensor_tick": 0.0
+                },
+                {
+                    "type": "sensor.lidar.ray_cast",
+                    "id": "lidar",
+                    "spawn_point": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 2.4,
+                        "roll": 0.0,
+                        "pitch": 0.0,
+                        "yaw": 0.0
+                    },
+                    "channels": 64,
+                    "range": 100.0,
+                    "points_per_second": 1200000,
+                    "rotation_frequency": 20.0,
+                    "upper_fov": 10.0,
+                    "lower_fov": -30.0,
+                    "sensor_tick": 0.0
+                },
+                {
+                    "type": "sensor.other.gnss",
+                    "id": "gnss",
+                    "spawn_point": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 2.0,
+                        "roll": 0.0,
+                        "pitch": 0.0,
+                        "yaw": 0.0
+                    }
+                },
+                {
+                    "type": "sensor.other.imu",
+                    "id": "imu",
+                    "spawn_point": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 0.0,
+                        "roll": 0.0,
+                        "pitch": 0.0,
+                        "yaw": 0.0
+                    }
+                }
+            ]
+        }
+    ]
+}
