@@ -1,6 +1,9 @@
 # Model Weights
 *.pt
 
+#
+.vscode/
+
 # build artifacts
 install/
 build/
