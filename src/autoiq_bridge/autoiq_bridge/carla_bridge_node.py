@@ -80,7 +80,7 @@ class CarlaBridgeNode(Node):
         self.objects_file = self.get_parameter('objects_file').value
         self.spawn_point_index = self.get_parameter('spawn_point_index').value
         self.vehicle_type = self.get_parameter('vehicle_type').value
-        
+
         # CARLA objects
         self.client = None
         self.world = None
@@ -94,7 +94,7 @@ class CarlaBridgeNode(Node):
         self.sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
-            depth=5
+            depth=1
         )
         
         # Publishers
@@ -105,7 +105,7 @@ class CarlaBridgeNode(Node):
             Twist,
             '/carla/ego_vehicle/vehicle_control',
             self.control_callback,
-            10
+            1
         )
         
         # Control state
@@ -568,14 +568,15 @@ class CarlaBridgeNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     
-    node = CarlaBridgeNode()
-    
+    node = None
     try:
+        node = CarlaBridgeNode()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
+        if node is not None:
+            node.destroy_node()
         rclpy.shutdown()
 
 
