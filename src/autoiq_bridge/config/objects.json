@@ -119,7 +119,7 @@
                 },
                 {
                     "type": "sensor.lidar.ray_cast",
-                    "id": "lidar",
+                    "id": "top",
                     "spawn_point": {
                         "x": 0.0,
                         "y": 0.0,

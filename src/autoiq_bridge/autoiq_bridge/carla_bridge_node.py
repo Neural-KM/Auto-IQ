@@ -12,6 +12,7 @@ import json
 import math
 import sys
 import os
+import time
 import threading
 from pathlib import Path
 
@@ -25,7 +26,7 @@ from std_msgs.msg import Header
 from sensor_msgs.msg import Image, PointCloud2, CameraInfo, NavSatFix, Imu
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
-from tf2_ros import TransformBroadcaster
+from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
 
 import carla
 
@@ -89,6 +90,7 @@ class CarlaBridgeNode(Node):
         
         # TF broadcaster
         self.tf_broadcaster = TransformBroadcaster(self)
+        self.static_tf_broadcaster = StaticTransformBroadcaster(self)
         
         # QoS profile for sensor data (RELIABLE for RViz compatibility)
         self.sensor_qos = QoSProfile(
@@ -191,6 +193,9 @@ class CarlaBridgeNode(Node):
         # Spawn sensors
         for sensor_cfg in sensor_configs:
             self.spawn_sensor(sensor_cfg)
+        
+        # Publish static transforms for sensors (once, after all sensors spawned)
+        self.publish_static_sensor_tfs()
     
     def spawn_vehicle(self):
         """Spawn the ego vehicle."""
@@ -269,11 +274,27 @@ class CarlaBridgeNode(Node):
         # Spawn sensor attached to vehicle
         sensor_actor = self.world.spawn_actor(bp, transform, attach_to=self.vehicle)
         
+        # Determine frame_id based on sensor type (matches topic structure)
+        if 'sensor.camera.rgb' in sensor_type:
+            frame_id = f'ego_vehicle/sensor/camera/rgb/{sensor_id}'
+        elif 'sensor.camera.depth' in sensor_type:
+            frame_id = f'ego_vehicle/sensor/camera/depth/{sensor_id}'
+        elif 'sensor.camera.semantic_segmentation' in sensor_type:
+            frame_id = f'ego_vehicle/ground_truth/camera/semantic/{sensor_id}'
+        elif sensor_type == 'sensor.lidar.ray_cast':
+            frame_id = f'ego_vehicle/sensor/lidar/{sensor_id}'
+        elif sensor_type == 'sensor.other.gnss':
+            frame_id = f'ego_vehicle/sensor/gnss/{sensor_id}'
+        elif sensor_type == 'sensor.other.imu':
+            frame_id = f'ego_vehicle/sensor/imu/{sensor_id}'
+        else:
+            frame_id = f'ego_vehicle/{sensor_id}'
+        
         # Create publishers based on sensor type
         sensor_data = {
             'actor': sensor_actor,
             'config': config,
-            'frame_id': f'ego_vehicle/{sensor_id}'
+            'frame_id': frame_id
         }
         
         if 'sensor.camera.rgb' in sensor_type:
@@ -312,8 +333,8 @@ class CarlaBridgeNode(Node):
                 Imu, f'/carla/ego_vehicle/sensor/imu/{sensor_id}/data', self.sensor_qos)
             sensor_actor.listen(lambda data, sd=sensor_data: self.imu_callback(data, sd))
         
-        self.sensors[sensor_id] = sensor_data
-        self.get_logger().info(f'Spawned sensor: {sensor_type} as {sensor_id}')
+        self.sensors[frame_id] = sensor_data
+        self.get_logger().info(f'Spawned sensor: {sensor_type} as {sensor_id} (frame: {frame_id})')
     
     # ==================== Sensor Callbacks ====================
     
@@ -324,9 +345,13 @@ class CarlaBridgeNode(Node):
         array = array.reshape((carla_image.height, carla_image.width, 4))
         rgb_array = array[:, :, :3][:, :, ::-1]  # BGRA -> RGB
         
+        # Use ROS time for TF synchronization
+        ros_stamp = self.get_clock().now().to_msg()
+        
         # Create and publish Image message
         msg = Image()
         msg.header = create_header(sensor_data['frame_id'], carla_image.timestamp)
+        msg.header.stamp = ros_stamp
         msg.height = carla_image.height
         msg.width = carla_image.width
         msg.encoding = 'rgb8'
@@ -345,6 +370,7 @@ class CarlaBridgeNode(Node):
             sensor_data['frame_id'],
             carla_image.timestamp
         )
+        info_msg.header.stamp = ros_stamp
         sensor_data['info_pub'].publish(info_msg)
     
     def depth_callback(self, carla_image, sensor_data: dict):
@@ -360,8 +386,12 @@ class CarlaBridgeNode(Node):
         normalized /= (256.0 * 256.0 * 256.0 - 1.0)
         depth_meters = normalized * 1000.0  # Convert to meters
         
+        # Use ROS time for TF synchronization
+        ros_stamp = self.get_clock().now().to_msg()
+        
         # Create and publish Image message (32FC1)
         msg = carla_depth_to_ros(depth_meters, sensor_data['frame_id'], carla_image.timestamp)
+        msg.header.stamp = ros_stamp
         sensor_data['image_pub'].publish(msg)
         
         # Publish camera info
@@ -373,6 +403,7 @@ class CarlaBridgeNode(Node):
             sensor_data['frame_id'],
             carla_image.timestamp
         )
+        info_msg.header.stamp = ros_stamp
         sensor_data['info_pub'].publish(info_msg)
     
     def semantic_callback(self, carla_image, sensor_data: dict):
@@ -382,8 +413,12 @@ class CarlaBridgeNode(Node):
         array = array.reshape((carla_image.height, carla_image.width, 4))
         semantic_labels = array[:, :, 2]  # Red channel has class ID
         
+        # Use ROS time for TF synchronization
+        ros_stamp = self.get_clock().now().to_msg()
+        
         # Create and publish Image message (mono8)
         msg = carla_semantic_to_ros(semantic_labels, sensor_data['frame_id'], carla_image.timestamp)
+        msg.header.stamp = ros_stamp
         sensor_data['image_pub'].publish(msg)
         
         # Publish camera info
@@ -395,22 +430,44 @@ class CarlaBridgeNode(Node):
             sensor_data['frame_id'],
             carla_image.timestamp
         )
+        info_msg.header.stamp = ros_stamp
         sensor_data['info_pub'].publish(info_msg)
     
     def lidar_callback(self, carla_lidar, sensor_data: dict):
         """Process LiDAR point cloud data."""
+        t0 = time.perf_counter()
+
         # Convert to numpy array (x, y, z, intensity)
-        points = np.frombuffer(carla_lidar.raw_data, dtype=np.float32)
-        points = points.reshape((-1, 4)).copy()  # Make a copy since raw_data is read-only
+        # Use bytes() to ensure proper conversion like original carla-ros-bridge
+        lidar_data = np.frombuffer(bytes(carla_lidar.raw_data), dtype=np.float32)
+        lidar_data = lidar_data.reshape((-1, 4)).copy()
         
-        # CARLA LiDAR: x=forward, y=right, z=up
-        # ROS convention: x=forward, y=left, z=up
-        # Flip Y axis
-        points[:, 1] = -points[:, 1]
+        # CARLA LiDAR uses left-handed coordinate system, ROS uses right-handed
+        # We take the opposite of y axis
+        lidar_data[:, 1] *= -1
         
-        # Create and publish PointCloud2 message
-        msg = carla_lidar_to_ros(points, sensor_data['frame_id'], carla_lidar.timestamp)
+        num_points = lidar_data.shape[0]
+
+        t1 = time.perf_counter()
+
+        # Create and publish PointCloud2 message with ROS time (for TF sync)
+        msg = carla_lidar_to_ros(lidar_data, sensor_data['frame_id'], carla_lidar.timestamp)
+        msg.header.stamp = self.get_clock().now().to_msg()
+        
+        t2 = time.perf_counter()
+
         sensor_data['cloud_pub'].publish(msg)
+
+        t3 = time.perf_counter()
+        
+        # Log the results
+        prep_time = (t1 - t0) * 1000  # ms
+        conv_time = (t2 - t1) * 1000  # ms
+        pub_time  = (t3 - t2) * 1000  # ms
+        
+        # self.get_logger().info(
+        #     f'LiDAR Profiling: Points={num_points} | Prep={prep_time:.2f}ms | Conv={conv_time:.2f}ms | Publish (Overhead)={pub_time:.2f}ms'
+        # )
     
     def gnss_callback(self, carla_gnss, sensor_data: dict):
         """Process GNSS data."""
@@ -480,12 +537,14 @@ class CarlaBridgeNode(Node):
         with self.control_lock:
             self.vehicle.apply_control(self.current_control)
         
-        # Tick the world
+        # Tick the world (this triggers sensor callbacks in CARLA thread)
         self.world.tick()
         
-        # Publish odometry and TF
-        self.publish_odometry()
+        # Publish TF and odometry AFTER tick
+        # Note: There's an inherent race with sensor callbacks, but publishing
+        # TF at high rate (every tick) minimizes the window
         self.publish_tf()
+        self.publish_odometry()
     
     def publish_odometry(self):
         """Publish vehicle odometry."""
@@ -498,45 +557,53 @@ class CarlaBridgeNode(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         self.odom_pub.publish(msg)
     
+    def publish_static_sensor_tfs(self):
+        """Publish static transforms for all sensors (called once after spawning)."""
+        static_transforms = []
+        
+        for sensor_id, sensor_data in self.sensors.items():
+            rel_tf = TransformStamped()
+            rel_tf.header.stamp = self.get_clock().now().to_msg()
+            rel_tf.header.frame_id = 'ego_vehicle'
+            rel_tf.child_frame_id = sensor_data['frame_id']  # Use the full frame path
+            
+            # Use the spawn point from config for relative position
+            sp = sensor_data['config'].get('spawn_point', {})
+            rel_tf.transform.translation.x = sp.get('x', 0.0)
+            rel_tf.transform.translation.y = -sp.get('y', 0.0)  # Flip Y
+            rel_tf.transform.translation.z = sp.get('z', 0.0)
+            
+            roll = math.radians(sp.get('roll', 0.0))
+            pitch = math.radians(sp.get('pitch', 0.0))
+            yaw = math.radians(-sp.get('yaw', 0.0))  # Flip yaw
+            rel_tf.transform.rotation = euler_to_quaternion(roll, pitch, yaw)
+            
+            static_transforms.append(rel_tf)
+        
+        if static_transforms:
+            self.static_tf_broadcaster.sendTransform(static_transforms)
+            self.get_logger().info(f'Published {len(static_transforms)} static sensor transforms')
+    
     def publish_tf(self):
-        """Publish TF transforms."""
+        """Publish TF transforms (only dynamic transforms like map->ego_vehicle)."""
         if self.vehicle is None or not self.vehicle.is_alive:
             return
         
         timestamp = self.world.get_snapshot().timestamp.elapsed_seconds
         transform = self.vehicle.get_transform()
         
-        # Map -> ego_vehicle
+        # Map -> ego_vehicle (dynamic - vehicle moves)
         tf_msg = carla_transform_to_ros(transform, 'map', 'ego_vehicle', timestamp)
-        tf_msg.header.stamp = self.get_clock().now().to_msg()
-        self.tf_broadcaster.sendTransform(tf_msg)
         
-        # Publish sensor transforms
-        for sensor_id, sensor_data in self.sensors.items():
-            sensor_actor = sensor_data['actor']
-            if sensor_actor.is_alive:
-                # Get relative transform (sensor is attached to vehicle)
-                sensor_transform = sensor_actor.get_transform()
-                vehicle_transform = self.vehicle.get_transform()
-                
-                # Compute relative transform
-                rel_tf = TransformStamped()
-                rel_tf.header.stamp = self.get_clock().now().to_msg()
-                rel_tf.header.frame_id = 'ego_vehicle'
-                rel_tf.child_frame_id = f'ego_vehicle/{sensor_id}'
-                
-                # Use the spawn point from config for relative position
-                sp = sensor_data['config'].get('spawn_point', {})
-                rel_tf.transform.translation.x = sp.get('x', 0.0)
-                rel_tf.transform.translation.y = -sp.get('y', 0.0)  # Flip Y
-                rel_tf.transform.translation.z = sp.get('z', 0.0)
-                
-                roll = math.radians(sp.get('roll', 0.0))
-                pitch = math.radians(sp.get('pitch', 0.0))
-                yaw = math.radians(-sp.get('yaw', 0.0))  # Flip yaw
-                rel_tf.transform.rotation = euler_to_quaternion(roll, pitch, yaw)
-                
-                self.tf_broadcaster.sendTransform(rel_tf)
+        # Add a small buffer (50ms = one tick at 20Hz) to the TF timestamp
+        # This prevents "extrapolation into future" errors in RViz because
+        # sensor callbacks may run with slightly newer timestamps than the TF publish time
+        now = self.get_clock().now()
+        tf_buffer_ns = int(0.05 * 1e9)  # 50ms buffer
+        buffered_time = rclpy.time.Time(nanoseconds=now.nanoseconds + tf_buffer_ns)
+        tf_msg.header.stamp = buffered_time.to_msg()
+        
+        self.tf_broadcaster.sendTransform(tf_msg)
     
     # ==================== Cleanup ====================
     

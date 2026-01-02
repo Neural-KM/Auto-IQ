@@ -132,46 +132,65 @@ def carla_semantic_to_ros(semantic_array: np.ndarray, frame_id: str, timestamp: 
 
 def carla_lidar_to_ros(points: np.ndarray, frame_id: str, timestamp: float) -> PointCloud2:
     """
-    Convert CARLA LiDAR points to ROS2 PointCloud2 message.
+    Convert CARLA LiDAR points to ROS2 PointCloud2 message with RGB coloring by height.
     
     Args:
-        points: Nx4 array of (x, y, z, intensity) or Nx3 (x, y, z)
+        points: Nx4 array of (x, y, z, intensity)
         frame_id: TF frame ID
         timestamp: CARLA timestamp
         
     Returns:
-        sensor_msgs/PointCloud2 message
+        sensor_msgs/PointCloud2 message with x, y, z, intensity, and rgb fields
     """
     msg = PointCloud2()
     msg.header = create_header(frame_id, timestamp)
     
-    # Determine if we have intensity
-    has_intensity = points.shape[1] >= 4
+    num_points = len(points)
     
-    # Define fields
+    # Compute RGB color based on height (Z) for nice visualization
+    z_values = points[:, 2]
+    z_min, z_max = -2.0, 1.0
+    z_normalized = np.clip((z_values - z_min) / (z_max - z_min), 0.0, 1.0)
+    
+    # Red-Yellow-Green gradient: red (low) -> yellow (mid) -> green (high)
+    r = np.clip(2.0 - 2.0 * z_normalized, 0, 1)
+    g = np.clip(2.0 * z_normalized, 0, 1)
+    b = np.zeros_like(z_normalized)
+    
+    # Pack RGB into uint32 (RViz expects this format for 'rgb' field)
+    r_uint = (r * 255).astype(np.uint8)
+    g_uint = (g * 255).astype(np.uint8)
+    b_uint = (b * 255).astype(np.uint8)
+    rgb_packed = (r_uint.astype(np.uint32) << 16) | (g_uint.astype(np.uint32) << 8) | b_uint.astype(np.uint32)
+    rgb_float = rgb_packed.view(np.float32)
+    
+    # Define fields: x, y, z, intensity, rgb
     fields = [
         PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
         PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
         PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+        PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1),
+        PointField(name='rgb', offset=16, datatype=PointField.FLOAT32, count=1),
     ]
+    point_step = 20
     
-    if has_intensity:
-        fields.append(
-            PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1)
-        )
-        point_step = 16
-        cloud_data = points[:, :4].astype(np.float32)
-    else:
-        point_step = 12
-        cloud_data = points[:, :3].astype(np.float32)
+    # Build cloud data array
+    cloud_data = np.zeros((num_points, 5), dtype=np.float32)
+    cloud_data[:, 0] = points[:, 0]
+    cloud_data[:, 1] = points[:, 1]
+    cloud_data[:, 2] = points[:, 2]
+    cloud_data[:, 3] = points[:, 3]
+    cloud_data[:, 4] = rgb_float
+    
+    cloud_data = np.ascontiguousarray(cloud_data)
     
     msg.fields = fields
     msg.is_bigendian = False
     msg.point_step = point_step
     msg.height = 1
-    msg.width = len(points)
+    msg.width = num_points
     msg.row_step = msg.point_step * msg.width
-    msg.is_dense = True
+    msg.is_dense = False
     msg.data = cloud_data.tobytes()
     
     return msg
