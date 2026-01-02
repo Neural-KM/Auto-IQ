@@ -98,12 +98,12 @@ class CarlaBridgeNode(Node):
         )
         
         # Publishers
-        self.odom_pub = self.create_publisher(Odometry, '/carla/ego_vehicle/odometry', 10)
+        self.odom_pub = self.create_publisher(Odometry, '/carla/ego_vehicle/ground_truth/odometry', 10)
         
         # Subscribers
         self.control_sub = self.create_subscription(
             Twist,
-            '/carla/ego_vehicle/vehicle_control',
+            '/carla/ego_vehicle/control',
             self.control_callback,
             1
         )
@@ -278,38 +278,38 @@ class CarlaBridgeNode(Node):
         
         if 'sensor.camera.rgb' in sensor_type:
             sensor_data['image_pub'] = self.create_publisher(
-                Image, f'/carla/ego_vehicle/{sensor_id}/image_raw', self.sensor_qos)
+                Image, f'/carla/ego_vehicle/sensor/camera/rgb/{sensor_id}/image', self.sensor_qos)
             sensor_data['info_pub'] = self.create_publisher(
-                CameraInfo, f'/carla/ego_vehicle/{sensor_id}/camera_info', self.sensor_qos)
+                CameraInfo, f'/carla/ego_vehicle/sensor/camera/rgb/{sensor_id}/camera_info', self.sensor_qos)
             sensor_actor.listen(lambda data, sd=sensor_data: self.rgb_callback(data, sd))
             
         elif 'sensor.camera.depth' in sensor_type:
             sensor_data['image_pub'] = self.create_publisher(
-                Image, f'/carla/ego_vehicle/{sensor_id}/image_raw', self.sensor_qos)
+                Image, f'/carla/ego_vehicle/sensor/camera/depth/{sensor_id}/image', self.sensor_qos)
             sensor_data['info_pub'] = self.create_publisher(
-                CameraInfo, f'/carla/ego_vehicle/{sensor_id}/camera_info', self.sensor_qos)
+                CameraInfo, f'/carla/ego_vehicle/sensor/camera/depth/{sensor_id}/camera_info', self.sensor_qos)
             sensor_actor.listen(lambda data, sd=sensor_data: self.depth_callback(data, sd))
             
         elif 'sensor.camera.semantic_segmentation' in sensor_type:
             sensor_data['image_pub'] = self.create_publisher(
-                Image, f'/carla/ego_vehicle/{sensor_id}/image_raw', self.sensor_qos)
+                Image, f'/carla/ego_vehicle/ground_truth/camera/semantic/{sensor_id}/image', self.sensor_qos)
             sensor_data['info_pub'] = self.create_publisher(
-                CameraInfo, f'/carla/ego_vehicle/{sensor_id}/camera_info', self.sensor_qos)
+                CameraInfo, f'/carla/ego_vehicle/ground_truth/camera/semantic/{sensor_id}/camera_info', self.sensor_qos)
             sensor_actor.listen(lambda data, sd=sensor_data: self.semantic_callback(data, sd))
             
         elif sensor_type == 'sensor.lidar.ray_cast':
             sensor_data['cloud_pub'] = self.create_publisher(
-                PointCloud2, f'/carla/ego_vehicle/{sensor_id}/point_cloud', self.sensor_qos)
+                PointCloud2, f'/carla/ego_vehicle/sensor/lidar/{sensor_id}/point_cloud', self.sensor_qos)
             sensor_actor.listen(lambda data, sd=sensor_data: self.lidar_callback(data, sd))
             
         elif sensor_type == 'sensor.other.gnss':
             sensor_data['gnss_pub'] = self.create_publisher(
-                NavSatFix, f'/carla/ego_vehicle/{sensor_id}/fix', self.sensor_qos)
+                NavSatFix, f'/carla/ego_vehicle/sensor/gnss/{sensor_id}/fix', self.sensor_qos)
             sensor_actor.listen(lambda data, sd=sensor_data: self.gnss_callback(data, sd))
             
         elif sensor_type == 'sensor.other.imu':
             sensor_data['imu_pub'] = self.create_publisher(
-                Imu, f'/carla/ego_vehicle/{sensor_id}', self.sensor_qos)
+                Imu, f'/carla/ego_vehicle/sensor/imu/{sensor_id}/data', self.sensor_qos)
             sensor_actor.listen(lambda data, sd=sensor_data: self.imu_callback(data, sd))
         
         self.sensors[sensor_id] = sensor_data

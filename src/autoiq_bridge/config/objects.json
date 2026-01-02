@@ -7,7 +7,7 @@
             "sensors": [
                 {
                     "type": "sensor.camera.rgb",
-                    "id": "front_rgb",
+                    "id": "front",
                     "spawn_point": {
                         "x": 0.2,
                         "y": 0.0,
@@ -39,7 +39,7 @@
                 },
                 {
                     "type": "sensor.camera.rgb",
-                    "id": "left_rgb",
+                    "id": "left",
                     "spawn_point": {
                         "x": 0.0,
                         "y": -0.5,
@@ -55,7 +55,7 @@
                 },
                 {
                     "type": "sensor.camera.rgb",
-                    "id": "right_rgb",
+                    "id": "right",
                     "spawn_point": {
                         "x": 0.0,
                         "y": 0.5,
@@ -71,7 +71,7 @@
                 },
                 {
                     "type": "sensor.camera.rgb",
-                    "id": "back_rgb",
+                    "id": "back",
                     "spawn_point": {
                         "x": -2.0,
                         "y": 0.0,
@@ -87,7 +87,7 @@
                 },
                 {
                     "type": "sensor.camera.semantic_segmentation",
-                    "id": "semantic",
+                    "id": "front",
                     "spawn_point": {
                         "x": 0.2,
                         "y": 0.0,
@@ -103,7 +103,7 @@
                 },
                 {
                     "type": "sensor.camera.depth",
-                    "id": "depth",
+                    "id": "front",
                     "spawn_point": {
                         "x": 0.2,
                         "y": 0.0,

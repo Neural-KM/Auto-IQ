@@ -2,16 +2,20 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>perception</name>
-  <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <version>0.0.1</version>
+  <description>Perception package for AutoIQ - Object detection and lane detection</description>
   <maintainer email="boliyadeep2003@gmail.com">skully</maintainer>
-  <license>TODO: License declaration</license>
+  <license>MIT</license>
 
   <depend>rclpy</depend>
+  <depend>std_msgs</depend>
   <depend>sensor_msgs</depend>
-  <depend>vision_msgs</depend>
+  <depend>geometry_msgs</depend>
   <depend>visualization_msgs</depend>
-  <depend>cv_bridge</depend>
+  <depend>builtin_interfaces</depend>
+
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

@@ -37,6 +37,8 @@
 *   **Camera calibration & projection:** Intrinsics/extrinsics management; critical when projecting between image/depth/3D.
 
 ---
+## Basic changes to code structure
+- use camera pitch from sensor config
 
 ## Tasks
 - [*] Implement rgb+depth camera based object detection
