@@ -537,14 +537,12 @@ class CarlaBridgeNode(Node):
         with self.control_lock:
             self.vehicle.apply_control(self.current_control)
         
-        # Tick the world (this triggers sensor callbacks in CARLA thread)
+        # Tick the world
         self.world.tick()
         
-        # Publish TF and odometry AFTER tick
-        # Note: There's an inherent race with sensor callbacks, but publishing
-        # TF at high rate (every tick) minimizes the window
-        self.publish_tf()
+        # Publish odometry and TF
         self.publish_odometry()
+        self.publish_tf()
     
     def publish_odometry(self):
         """Publish vehicle odometry."""
@@ -556,6 +554,9 @@ class CarlaBridgeNode(Node):
         msg = carla_vehicle_to_odometry(self.vehicle, 'map', 'ego_vehicle')
         msg.header.stamp = self.get_clock().now().to_msg()
         self.odom_pub.publish(msg)
+        
+        # Also publish TF in async mode
+        self.publish_tf()
     
     def publish_static_sensor_tfs(self):
         """Publish static transforms for all sensors (called once after spawning)."""
@@ -594,15 +595,7 @@ class CarlaBridgeNode(Node):
         
         # Map -> ego_vehicle (dynamic - vehicle moves)
         tf_msg = carla_transform_to_ros(transform, 'map', 'ego_vehicle', timestamp)
-        
-        # Add a small buffer (50ms = one tick at 20Hz) to the TF timestamp
-        # This prevents "extrapolation into future" errors in RViz because
-        # sensor callbacks may run with slightly newer timestamps than the TF publish time
-        now = self.get_clock().now()
-        tf_buffer_ns = int(0.05 * 1e9)  # 50ms buffer
-        buffered_time = rclpy.time.Time(nanoseconds=now.nanoseconds + tf_buffer_ns)
-        tf_msg.header.stamp = buffered_time.to_msg()
-        
+        tf_msg.header.stamp = self.get_clock().now().to_msg()
         self.tf_broadcaster.sendTransform(tf_msg)
     
     # ==================== Cleanup ====================

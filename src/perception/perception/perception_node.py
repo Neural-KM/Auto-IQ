@@ -27,6 +27,7 @@ from sensor_msgs.msg import Image, CameraInfo, PointCloud2
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
 from geometry_msgs.msg import Point, Vector3
+from builtin_interfaces.msg import Time
 
 import tf2_ros
 from tf2_ros import TransformException
@@ -417,7 +418,10 @@ class PerceptionNode(Node):
     def _publish_obstacle_markers(self, obstacles: list):
         """Publish 3D bounding box markers for obstacles."""
         marker_array = MarkerArray()
-        timestamp = self.get_clock().now().to_msg()
+        
+        # Use timestamp 0 to tell RViz to use the latest available TF
+        # This avoids "extrapolation into future" errors when clocks differ slightly
+        timestamp = Time(sec=0, nanosec=0)
         
         # Clear previous markers
         clear_marker = Marker()
@@ -481,7 +485,9 @@ class PerceptionNode(Node):
     def _publish_lane_markers(self, result: LaneDetection):
         """Publish lane markers."""
         marker_array = MarkerArray()
-        timestamp = self.get_clock().now().to_msg()
+        
+        # Use timestamp 0 to tell RViz to use the latest available TF
+        timestamp = Time(sec=0, nanosec=0)
         
         clear_marker = Marker()
         clear_marker.header.frame_id = 'ego_vehicle'
