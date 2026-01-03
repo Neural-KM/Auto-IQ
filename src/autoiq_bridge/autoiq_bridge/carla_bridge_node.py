@@ -27,6 +27,7 @@ from sensor_msgs.msg import Image, PointCloud2, CameraInfo, NavSatFix, Imu
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
 from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
+from autoiq_msgs.msg import VehicleControl
 
 import carla
 
@@ -104,7 +105,7 @@ class CarlaBridgeNode(Node):
         
         # Subscribers
         self.control_sub = self.create_subscription(
-            Twist,
+            VehicleControl,
             '/carla/ego_vehicle/control',
             self.control_callback,
             1
@@ -178,8 +179,6 @@ class CarlaBridgeNode(Node):
             
             if ego_config:
                 self.vehicle_type = ego_config.get('type', self.vehicle_type)
-                if 'spawn_point_index' in ego_config:
-                    self.spawn_point_index = ego_config['spawn_point_index']
                 sensor_configs = ego_config.get('sensors', [])
             else:
                 sensor_configs = []
@@ -504,27 +503,20 @@ class CarlaBridgeNode(Node):
     
     # ==================== Control ====================
     
-    def control_callback(self, msg: Twist):
+    def control_callback(self, msg: VehicleControl):
         """
         Handle vehicle control commands.
         
-        Converts Twist message to CARLA VehicleControl.
-        linear.x = throttle (positive) or brake (negative)
-        angular.z = steering angle
+        Converts VehicleControl message to CARLA VehicleControl.
         """
         with self.control_lock:
-            # Map Twist to VehicleControl
-            if msg.linear.x >= 0:
-                self.current_control.throttle = min(msg.linear.x, 1.0)
-                self.current_control.brake = 0.0
-            else:
-                self.current_control.throttle = 0.0
-                self.current_control.brake = min(-msg.linear.x, 1.0)
-            
-            # Steering: angular.z is steering angle in radians
-            # CARLA steering is -1 to 1
-            max_steer_angle = math.radians(70.0)  # Max steering angle
-            self.current_control.steer = max(-1.0, min(1.0, msg.angular.z / max_steer_angle))
+            self.current_control.throttle = max(0.0, min(1.0, msg.throttle))
+            self.current_control.brake = max(0.0, min(1.0, msg.brake))
+            self.current_control.steer = max(-1.0, min(1.0, msg.steer))
+            self.current_control.hand_brake = msg.hand_brake
+            self.current_control.reverse = msg.reverse
+            self.current_control.manual_gear_shift = msg.manual_gear_shift
+            self.current_control.gear = msg.gear
     
     # ==================== Tick ====================
     
