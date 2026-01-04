@@ -16,8 +16,8 @@ import numpy as np
 import cv2
 from typing import List, Optional, Dict, Any
 
-from perception.object_detector import ObjectDetector
-from perception.obstacle import Obstacle
+from perception.core.object_detector import ObjectDetector
+from perception.data_classes.obstacle import Obstacle
 
 
 class Perception:

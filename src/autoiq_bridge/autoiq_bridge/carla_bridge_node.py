@@ -215,9 +215,10 @@ class CarlaBridgeNode(Node):
             spawn_point = spawn_points[0]  # Default spawn point
             self.get_logger().warn(f'Spawn index {self.spawn_point_index} out of range, using 0')
         
+        vehicle_bp.set_attribute('role_name', 'hero')
         # Spawn vehicle
         self.vehicle = self.world.spawn_actor(vehicle_bp, spawn_point)
-        self.get_logger().info(f'Spawned vehicle: {self.vehicle.type_id} at spawn point {self.spawn_point_index}')
+        self.get_logger().info(f'Spawned vehicle: {self.vehicle.type_id} at spawn point {self.spawn_point_index}. Role name: {self.vehicle.attributes.get("role_name", "unknown")}')
     
     def spawn_sensor(self, config: dict):
         """

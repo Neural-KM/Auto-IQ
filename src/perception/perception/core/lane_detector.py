@@ -9,8 +9,8 @@ Outputs polynomial fits and lane geometry for path planning.
 
 import numpy as np
 import cv2
-from perception.semantic_labels import SemanticLabels
-from perception.lane import LaneDetection
+from perception.data_classes.semantic_labels import SemanticLabels
+from perception.data_classes.lane import LaneDetection
 
 
 class LaneDetector:

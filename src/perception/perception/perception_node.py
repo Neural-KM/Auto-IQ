@@ -10,9 +10,11 @@ Initialization Requirements (must all be received before processing starts):
 1. TF transform: ego_vehicle -> camera_frame
 2. TF transform: ego_vehicle -> lidar_frame (only for frustum filtering method)
 3. CameraInfo message (intrinsics)
+4. CARLA connection (for ground truth obstacles)
 
 Publishes:
-- /perception/obstacles (MarkerArray with 3D bounding boxes)
+- /perception/obstacles (MarkerArray with 3D bounding boxes) - detected or ground truth based on use_ground_truth param
+- /perception/ground_truth/obstacles (MarkerArray) - always published ground truth
 - /perception/lanes (MarkerArray with lane lines)
 - /perception/debug/* (debug images)
 """
@@ -22,6 +24,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+import struct
 
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2
 from visualization_msgs.msg import Marker, MarkerArray
@@ -36,6 +39,9 @@ from perception.perception import Perception
 from perception.lane_detector import LaneDetector
 from perception.lane import LaneDetection
 from perception.obstacle import Obstacle
+from perception.perception.tools.ground_truth_perception import GroundTruthPerception
+
+import carla
 
 
 class PerceptionNode(Node):
@@ -54,29 +60,39 @@ class PerceptionNode(Node):
         super().__init__('perception_node')
         
         # ==================== Parameters ====================
-        # All parameters MUST be provided via YAML config file
-        self.use_ground_truth = self.declare_parameter('use_ground_truth').value
-        self.model_path = self.declare_parameter('model_path').value
-        self.conf_threshold = self.declare_parameter('conf_threshold').value
-        self.obstacle_radius = self.declare_parameter('obstacle_radius').value
-        self.enable_object_detection = self.declare_parameter('enable_object_detection').value
-        self.enable_lane_detection = self.declare_parameter('enable_lane_detection').value
-        self.enable_debug_viz = self.declare_parameter('enable_debug_viz').value
-        self.perception_method = self.declare_parameter('perception_method').value
+        self.use_ground_truth = self.declare_parameter('use_ground_truth', True).value
+        self.model_path = self.declare_parameter('model_path', 'yolov8n.pt').value
+        self.conf_threshold = self.declare_parameter('conf_threshold', 0.5).value
+        self.obstacle_radius = self.declare_parameter('obstacle_radius', 50.0).value
+        self.enable_object_detection = self.declare_parameter('enable_object_detection', True).value
+        self.enable_lane_detection = self.declare_parameter('enable_lane_detection', False).value
+        self.enable_debug_viz = self.declare_parameter('enable_debug_viz', False).value
+        self.perception_method = self.declare_parameter('perception_method', 1).value
+        
+        # CARLA connection parameters (for ground truth)
+        self.declare_parameter('carla_host', 'localhost')
+        self.declare_parameter('carla_port', 2000)
+        self.declare_parameter('carla_timeout', 10.0)
+        self.declare_parameter('ground_truth_rate', 10.0)  # Hz for ground truth publishing
+        
+        carla_host = self.get_parameter('carla_host').value
+        carla_port = self.get_parameter('carla_port').value
+        carla_timeout = self.get_parameter('carla_timeout').value
+        ground_truth_rate = self.get_parameter('ground_truth_rate').value
         
         # TF frame names
-        self.camera_frame = self.declare_parameter('camera_frame').value
-        self.lidar_frame = self.declare_parameter('lidar_frame').value
+        self.camera_frame = self.declare_parameter('camera_frame', 'ego_vehicle/sensor/camera/rgb/front').value
+        self.lidar_frame = self.declare_parameter('lidar_frame', 'ego_vehicle/sensor/lidar/top').value
 
-        # Hood mask parameters
+        # Hood mask parameters (normalized 0-1 values)
         self.hood_mask_config = {
-            'enabled': self.declare_parameter('hood_mask.enabled').value,
-            'top_y': self.declare_parameter('hood_mask.top_y').value,
-            'top_left_x': self.declare_parameter('hood_mask.top_left_x').value,
-            'top_right_x': self.declare_parameter('hood_mask.top_right_x').value,
-            'bottom_y': self.declare_parameter('hood_mask.bottom_y').value,
-            'bottom_left_x': self.declare_parameter('hood_mask.bottom_left_x').value,
-            'bottom_right_x': self.declare_parameter('hood_mask.bottom_right_x').value,
+            'enabled': self.declare_parameter('hood_mask.enabled', True).value,
+            'top_y': self.declare_parameter('hood_mask.top_y', 0.85).value,
+            'top_left_x': self.declare_parameter('hood_mask.top_left_x', 0.25).value,
+            'top_right_x': self.declare_parameter('hood_mask.top_right_x', 0.75).value,
+            'bottom_y': self.declare_parameter('hood_mask.bottom_y', 1.0).value,
+            'bottom_left_x': self.declare_parameter('hood_mask.bottom_left_x', 0.08).value,
+            'bottom_right_x': self.declare_parameter('hood_mask.bottom_right_x', 0.92).value,
         }
         
         # ==================== Initialization State ====================
@@ -105,6 +121,18 @@ class PerceptionNode(Node):
         self.lidar_x = None
         self.lidar_y = None
         self.lidar_z = None
+        
+        # ==================== CARLA Connection (for ground truth) ====================
+        self.carla_world = None
+        self.ground_truth_perception = None
+        try:
+            carla_client = carla.Client(carla_host, carla_port)
+            carla_client.set_timeout(carla_timeout)
+            self.carla_world = carla_client.get_world()
+            self.get_logger().info('Connected to CARLA for ground truth obstacles')
+        except Exception as e:
+            self.get_logger().warn(f'Ground truth obstacles will not be available. ERROR:{e}')
+
         
         # ==================== TF2 ====================
         self.tf_buffer = tf2_ros.Buffer()
@@ -155,6 +183,11 @@ class PerceptionNode(Node):
                     self.lidar_callback, sensor_qos)
         
         # ==================== Publishers ====================
+        # Ground truth obstacles - always published
+        self.ground_truth_pub = self.create_publisher(
+            MarkerArray, '/perception/ground_truth/obstacles', 10)
+        
+        # Active obstacles (ground truth or detected based on use_ground_truth param)
         self.obstacles_pub = self.create_publisher(MarkerArray, '/perception/obstacles', 10)
         self.lanes_pub = self.create_publisher(MarkerArray, '/perception/lanes', 10)
         
@@ -162,11 +195,15 @@ class PerceptionNode(Node):
             self.debug_rgb_pub = self.create_publisher(Image, '/perception/debug/rgb', 10)
             self.debug_bev_pub = self.create_publisher(Image, '/perception/debug/bev', 10)
         
+        # ==================== Ground Truth Timer ====================
+        # Always publish ground truth at a fixed rate
+        self.gt_timer = self.create_timer(1.0 / ground_truth_rate, self._publish_ground_truth_obstacles)
+        
         # ==================== Initialization Timer ====================
         # Periodically try to complete initialization
         self.init_timer = self.create_timer(0.5, self._try_initialize)
         
-        self.get_logger().info(f'Perception Node created (ground_truth={self.use_ground_truth})')
+        self.get_logger().info(f'Perception Node created (use_ground_truth={self.use_ground_truth})')
         self.get_logger().info('Waiting for TF transforms and CameraInfo before starting...')
     
     # ==================== Initialization ====================
@@ -240,13 +277,13 @@ class PerceptionNode(Node):
     def _check_ready(self) -> bool:
         """Check if all required initialization data has been received."""
         if not self.camera_info_received:
-            self.get_logger().info('CameraInfo not yet received')
+            self.get_logger().warn('CameraInfo not yet received')
             return False
         if not self.camera_tf_received:
-            self.get_logger().info('Camera TF not yet received')
+            self.get_logger().warn('Camera TF not yet received')
             return False
         if not self.lidar_tf_received:
-            self.get_logger().info('LiDAR TF not yet received')
+            self.get_logger().warn('LiDAR TF not yet received')
             return False
         return True
     
@@ -321,9 +358,8 @@ class PerceptionNode(Node):
     
     def rgb_callback(self, msg: Image):
         """Process RGB image for object detection."""
-        self.get_logger().info('RGB image received for object detection', throttle_duration_sec=1.0)
+        self.get_logger().info('RGB image received', throttle_duration_sec=5.0)
         if not self.initialized or self.perception is None:
-            self.get_logger().warn(f'Init {self.initialized}, perception {self.perception}')
             return
         
         # Convert ROS Image to numpy
@@ -354,6 +390,8 @@ class PerceptionNode(Node):
                     lidar_points=self.latest_lidar,
                     radius=self.obstacle_radius
                 )
+        self.get_logger().info(f'Detected {len(obstacles)} obstacles', throttle_duration_sec=1.0)
+
         if obstacles:
             self._publish_obstacle_markers(obstacles)
         
@@ -374,11 +412,10 @@ class PerceptionNode(Node):
     
     def lidar_callback(self, msg: PointCloud2):
         """Store latest LiDAR points."""
-        self.get_logger().info('LiDAR point cloud received for frustum filtering', throttle_duration_sec=1.0)
+        self.get_logger().info('LiDAR point cloud received', throttle_duration_sec=5.0)
         if not self.initialized:
             return
         
-        import struct
         
         point_step = msg.point_step
         data = msg.data
@@ -565,6 +602,114 @@ class PerceptionNode(Node):
             out_msg.step = lane_fit_img.shape[1] * 3
             out_msg.data = lane_fit_img.tobytes()
             self.debug_bev_pub.publish(out_msg)
+    
+    # ==================== Ground Truth Detection ====================
+    
+    def _init_ground_truth_perception(self) -> bool:
+        """Initialize GroundTruthPerception by finding ego vehicle. Returns True if successful."""
+        if self.carla_world is None:
+            self.get_logger().warn('No CARLA connection, cannot initialize GroundTruthPerception')
+            return False
+        
+        # Look for vehicle with role_name 'ego_vehicle' or 'hero'
+        actors = self.carla_world.get_actors()
+        vehicles = actors.filter('vehicle.*')
+        
+        for vehicle in vehicles:
+            if vehicle.attributes.get('role_name') == 'hero':
+                self.ground_truth_perception = GroundTruthPerception(vehicle, self.carla_world)
+                self.get_logger().info('GroundTruthPerception initialized')
+                return True
+        
+        return False
+    
+    def _publish_ground_truth_obstacles(self):
+        """Publish ground truth obstacles (always runs)."""
+        self.get_logger().info('Publishing ground truth obstacles', throttle_duration_sec=5.0)
+        if self.carla_world is None:
+            self.get_logger().warn('No CARLA connection, cannot publish ground truth obstacles')
+            return
+        
+        # Initialize GroundTruthPerception if not done yet
+        if self.ground_truth_perception is None:
+            if not self._init_ground_truth_perception():
+                self.get_logger().warn('Ego vehicle not found in CARLA, cannot publish ground truth obstacles', throttle_duration_sec=5.0)
+                return
+        
+        # Detect obstacles using GroundTruthPerception class
+        obstacles = self.ground_truth_perception.detect_obstacles()
+        self.get_logger().info(f'Ground truth obstacles: {len(obstacles)}', throttle_duration_sec=1.0)
+        if not obstacles:
+            # Publish empty marker array to clear previous markers
+            marker_array = MarkerArray()
+            clear_marker = Marker()
+            clear_marker.header.frame_id = 'ego_vehicle'
+            clear_marker.header.stamp = Time(sec=0, nanosec=0)
+            clear_marker.ns = 'ground_truth_obstacles'
+            clear_marker.id = 0
+            clear_marker.action = Marker.DELETEALL
+            marker_array.markers.append(clear_marker)
+            self.ground_truth_pub.publish(marker_array)
+            
+            # If using ground truth mode, also publish to main topic
+            if self.use_ground_truth:
+                self.obstacles_pub.publish(marker_array)
+            return
+        
+        # Create marker array for ground truth topic
+        gt_marker_array = self._create_obstacle_marker_array(obstacles, 'ground_truth_obstacles')
+        self.ground_truth_pub.publish(gt_marker_array)
+        
+        # If using ground truth mode, also publish to main obstacles topic
+        if self.use_ground_truth:
+            main_marker_array = self._create_obstacle_marker_array(obstacles, 'obstacles')
+            self.obstacles_pub.publish(main_marker_array)
+    
+    def _create_obstacle_marker_array(self, obstacles: list, namespace: str) -> MarkerArray:
+        """Create a MarkerArray from obstacles."""
+        marker_array = MarkerArray()
+        timestamp = Time(sec=0, nanosec=0)
+        
+        # Clear previous markers
+        clear_marker = Marker()
+        clear_marker.header.frame_id = 'ego_vehicle'
+        clear_marker.header.stamp = timestamp
+        clear_marker.ns = namespace
+        clear_marker.id = 0
+        clear_marker.action = Marker.DELETEALL
+        marker_array.markers.append(clear_marker)
+        
+        for i, obs in enumerate(obstacles):
+            marker = Marker()
+            marker.header.frame_id = 'ego_vehicle'
+            marker.header.stamp = timestamp
+            marker.ns = namespace
+            marker.id = i + 1
+            marker.type = Marker.CUBE
+            marker.action = Marker.ADD
+            
+            marker.pose.position.x = obs.x
+            marker.pose.position.y = obs.y
+            marker.pose.position.z = obs.z
+            
+            marker.pose.orientation.x = 0.0
+            marker.pose.orientation.y = 0.0
+            marker.pose.orientation.z = math.sin(obs.yaw / 2)
+            marker.pose.orientation.w = math.cos(obs.yaw / 2)
+            
+            marker.scale.x = obs.length
+            marker.scale.y = obs.width
+            marker.scale.z = obs.height
+            
+            # Color based on type
+            if obs.obstacle_type == 'vehicle':
+                marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.7)
+            else:
+                marker.color = ColorRGBA(r=1.0, g=0.5, b=0.0, a=0.7)
+            
+            marker_array.markers.append(marker)
+        
+        return marker_array
 
 
 def main(args=None):

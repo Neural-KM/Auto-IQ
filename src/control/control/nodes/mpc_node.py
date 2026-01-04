@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Control Node
-============
+MPC Control Node
+================
 
-ROS2 node for vehicle control (MPC or PID).
+ROS2 node for vehicle control using Model Predictive Control (MPC).
 Subscribes to trajectory and odometry, publishes vehicle control commands.
 
 Subscribes:
@@ -12,22 +12,23 @@ Subscribes:
 
 Publishes:
 - /carla/ego_vehicle/control (autoiq_msgs/VehicleControl) - Vehicle control
+- /control/predicted_trajectory (nav_msgs/Path) - MPC predicted trajectory
 - /control/status (std_msgs/String) - Control status
 """
 
 import math
+import time
 import numpy as np
 
 import rclpy
 from rclpy.node import Node
 
 from nav_msgs.msg import Path, Odometry
+from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
 from autoiq_msgs.msg import VehicleControl
 
-from control.mpc_controller import MPCController
-from control.pure_pursuit_controller import PurePursuitController
-from control.pid_controller import PIDController
+from control.controllers.mpc_controller import MPCController
 
 
 def quaternion_to_yaw(q):
@@ -37,41 +38,27 @@ def quaternion_to_yaw(q):
     return math.atan2(siny_cosp, cosy_cosp)
 
 
-class ControlNode(Node):
+class MPCNode(Node):
     """
-    ROS2 Control Node.
+    ROS2 MPC Control Node.
     
-    Follows trajectories using MPC or PID control.
-    Communication happens over ROS2 topics instead of WorldState.
+    Uses Nonlinear Model Predictive Control (NMPC) for trajectory tracking.
+    The MPC optimizes over a prediction horizon to find optimal steering
+    and acceleration inputs.
     """
     
     def __init__(self):
-        super().__init__('control_node')
+        super().__init__('mpc_node')
         
         # ==================== Parameters ====================
-        self.declare_parameter('controller_type', 'mpc')
         self.declare_parameter('target_speed', 30.0)  # km/h
         self.declare_parameter('mpc_horizon', 20)
         self.declare_parameter('mpc_dt', 0.05)
-        self.declare_parameter('trajectory_mode', 0)
+        self.declare_parameter('trajectory_mode', 0)  # 0: heuristic, 1: trapezoidal
         self.declare_parameter('max_steering_diff', 0.1)
         self.declare_parameter('control_rate', 20.0)  # Hz
         
-        # PID parameters
-        self.declare_parameter('pid_kp', 1.0)
-        self.declare_parameter('pid_ki', 0.0)
-        self.declare_parameter('pid_kd', 0.0)
-        self.declare_parameter('max_throttle', 0.75)
-        self.declare_parameter('max_brake', 0.3)
-        self.declare_parameter('max_steering', 1.0)
-        
-        # Pure Pursuit parameters
-        self.declare_parameter('wheelbase', 2.875)
-        self.declare_parameter('min_lookahead', 4.0)
-        self.declare_parameter('max_lookahead', 25.0)
-        self.declare_parameter('lookahead_ratio', 0.5)
-        
-        self.controller_type = self.get_parameter('controller_type').value
+        # Get parameters
         self.target_speed = self.get_parameter('target_speed').value
         mpc_horizon = self.get_parameter('mpc_horizon').value
         mpc_dt = self.get_parameter('mpc_dt').value
@@ -79,40 +66,15 @@ class ControlNode(Node):
         self.max_steering_diff = self.get_parameter('max_steering_diff').value
         control_rate = self.get_parameter('control_rate').value
         
-        pid_kp = self.get_parameter('pid_kp').value
-        pid_ki = self.get_parameter('pid_ki').value
-        pid_kd = self.get_parameter('pid_kd').value
-        self.max_throttle = self.get_parameter('max_throttle').value
-        self.max_brake = self.get_parameter('max_brake').value
-        self.max_steering = self.get_parameter('max_steering').value
+        # ==================== Initialize MPC Controller ====================
+        self.get_logger().info(f'Initializing MPC (horizon={mpc_horizon}, dt={mpc_dt}, mode={trajectory_mode})')
         
-        wheelbase = self.get_parameter('wheelbase').value
-        min_lookahead = self.get_parameter('min_lookahead').value
-        max_lookahead = self.get_parameter('max_lookahead').value
-        lookahead_ratio = self.get_parameter('lookahead_ratio').value
-        
-        # ==================== Initialize Controllers ====================
-        if self.controller_type == 'mpc':
-            self.get_logger().info(f'Using MPC control (horizon={mpc_horizon}, mode={trajectory_mode})')
-            self.mpc = MPCController(
-                dt=mpc_dt, 
-                horizon=mpc_horizon, 
-                target_speed=self.target_speed,
-                trajectory_mode=trajectory_mode
-            )
-        else:
-            self.get_logger().info('Using Pure Pursuit + PID control')
-            self.mpc = None
-        
-        # Pure Pursuit (for PID mode) - stores state internally
-        self.pp_wheelbase = wheelbase
-        self.pp_min_lookahead = min_lookahead
-        self.pp_max_lookahead = max_lookahead
-        self.pp_lookahead_ratio = lookahead_ratio
-        
-        # PID for longitudinal control
-        output_limits = (-self.max_brake, self.max_throttle)
-        self.pid = PIDController(pid_kp, pid_ki, pid_kd, 1.0/control_rate, output_limits)
+        self.mpc = MPCController(
+            dt=mpc_dt, 
+            horizon=mpc_horizon, 
+            target_speed=self.target_speed,
+            trajectory_mode=trajectory_mode
+        )
         
         # ==================== State ====================
         self.vehicle_x = None
@@ -124,6 +86,10 @@ class ControlNode(Node):
         self.has_trajectory = False
         
         self.previous_steering = 0.0
+        
+        # Performance monitoring
+        self._last_solve_time_ms = 0.0
+        self._last_optimal_control = None
         
         # ==================== Subscribers ====================
         self.trajectory_sub = self.create_subscription(
@@ -140,15 +106,20 @@ class ControlNode(Node):
             '/carla/ego_vehicle/control', 
             10)
         
+        self.predicted_pub = self.create_publisher(
+            Path,
+            '/control/predicted_trajectory',
+            10)
+        
         self.status_pub = self.create_publisher(String, '/control/status', 10)
         
         # ==================== Control Loop ====================
         control_period = 1.0 / control_rate
         self.control_timer = self.create_timer(control_period, self.control_loop)
         
-        self._last_solve_time_ms = 0.0
-        
-        self.get_logger().info(f'Control Node initialized ({self.controller_type}, {control_rate}Hz)')
+        self.get_logger().info(f'MPC Node initialized ({control_rate}Hz)')
+        self.get_logger().info(f'  Target speed: {self.target_speed} km/h')
+        self.get_logger().info(f'  Horizon: {mpc_horizon} steps, dt: {mpc_dt}s')
     
     # ==================== Callbacks ====================
     
@@ -171,8 +142,7 @@ class ControlNode(Node):
         self.has_trajectory = True
         
         # Update MPC waypoints
-        if self.mpc is not None:
-            self.mpc.set_waypoints(waypoints)
+        self.mpc.set_waypoints(waypoints)
     
     def odom_callback(self, msg: Odometry):
         """Update vehicle state from odometry."""
@@ -207,11 +177,11 @@ class ControlNode(Node):
             self._publish_stop()
             return
         
-        # Run controller
-        if self.controller_type == 'mpc':
-            steering, throttle, brake = self._run_mpc()
-        else:
-            steering, throttle, brake = self._run_pid()
+        # Run MPC
+        steering, throttle, brake = self._run_mpc()
+        
+        # Publish predicted trajectory for visualization
+        self._publish_predicted_trajectory()
         
         # Apply steering smoothing
         steering = self._smooth_steering(steering)
@@ -221,9 +191,9 @@ class ControlNode(Node):
     
     def _run_mpc(self):
         """Run MPC control step."""
-        import time
         t_start = time.time()
         
+        # Build current state vector [x, y, psi, v]
         current_state = np.array([
             self.vehicle_x, 
             self.vehicle_y, 
@@ -231,15 +201,21 @@ class ControlNode(Node):
             self.vehicle_speed
         ])
         
+        # Convert target speed to m/s
         target_speed_ms = self.target_speed / 3.6
+        
+        # Solve MPC optimization
         optimal_control = self.mpc.solve(current_state, target_speed_ms)
         
         self._last_solve_time_ms = (time.time() - t_start) * 1000
         
         if optimal_control is None:
-            self.get_logger().warn('MPC solve failed')
+            self.get_logger().warn('MPC solve failed - using previous steering with brake')
             return self.previous_steering, 0.0, 1.0
         
+        self._last_optimal_control = optimal_control
+        
+        # Unpack optimal control [steering_rad, acceleration]
         steering_rad, accel = optimal_control
         
         # Convert steering angle to normalized [-1, 1]
@@ -256,82 +232,13 @@ class ControlNode(Node):
         
         return float(steering), float(throttle), float(brake)
     
-    def _run_pid(self):
-        """Run Pure Pursuit + PID control step."""
-        if not self.current_waypoints:
-            return 0.0, 0.0, 1.0
-        
-        # Pure Pursuit for steering
-        steering = self._pure_pursuit_steering()
-        
-        # PID for speed
-        current_speed_kmh = self.vehicle_speed * 3.6
-        error = self.target_speed - current_speed_kmh
-        accel = self.pid.step(error)
-        
-        if accel >= 0:
-            throttle = min(accel, self.max_throttle)
-            brake = 0.0
-        else:
-            throttle = 0.0
-            brake = min(abs(accel), self.max_brake)
-        
-        return float(steering), float(throttle), float(brake)
-    
-    def _pure_pursuit_steering(self):
-        """Compute steering using Pure Pursuit algorithm."""
-        if not self.current_waypoints:
-            return 0.0
-        
-        # Compute adaptive lookahead
-        lookahead = self.pp_min_lookahead + self.pp_lookahead_ratio * self.vehicle_speed
-        lookahead = np.clip(lookahead, self.pp_min_lookahead, self.pp_max_lookahead)
-        
-        # Find lookahead point
-        lookahead_point = None
-        for wp in self.current_waypoints:
-            dist = math.sqrt((wp[0] - self.vehicle_x)**2 + (wp[1] - self.vehicle_y)**2)
-            if dist >= lookahead:
-                lookahead_point = wp
-                break
-        
-        if lookahead_point is None and self.current_waypoints:
-            lookahead_point = self.current_waypoints[-1]
-        
-        if lookahead_point is None:
-            return 0.0
-        
-        # Vector to lookahead point
-        dx = lookahead_point[0] - self.vehicle_x
-        dy = lookahead_point[1] - self.vehicle_y
-        ld = math.sqrt(dx**2 + dy**2)
-        
-        if ld < self.pp_min_lookahead * 0.5:
-            return 0.0
-        
-        ld = max(ld, self.pp_min_lookahead)
-        
-        # Transform to vehicle frame
-        cos_yaw = math.cos(-self.vehicle_yaw)
-        sin_yaw = math.sin(-self.vehicle_yaw)
-        local_y = dx * sin_yaw + dy * cos_yaw
-        
-        # Pure pursuit formula
-        curvature = 2.0 * local_y / (ld * ld)
-        steering_angle = math.atan(self.pp_wheelbase * curvature)
-        
-        # Normalize
-        max_steering_angle = math.radians(35.0)
-        steering = steering_angle / max_steering_angle
-        
-        return np.clip(steering, -self.max_steering, self.max_steering)
-    
     def _smooth_steering(self, steering):
-        """Apply steering smoothing."""
+        """Apply steering smoothing to prevent jerky movements."""
         if steering > self.previous_steering + self.max_steering_diff:
             steering = self.previous_steering + self.max_steering_diff
         elif steering < self.previous_steering - self.max_steering_diff:
             steering = self.previous_steering - self.max_steering_diff
+        
         self.previous_steering = steering
         return steering
     
@@ -368,22 +275,55 @@ class ControlNode(Node):
     def _publish_status(self):
         """Publish control status."""
         status = {
-            'controller_type': self.controller_type,
+            'controller': 'mpc',
             'has_trajectory': self.has_trajectory,
             'num_waypoints': len(self.current_waypoints) if self.current_waypoints else 0,
             'vehicle_speed_kmh': self.vehicle_speed * 3.6 if self.vehicle_speed else 0.0,
             'target_speed_kmh': self.target_speed,
-            'solve_time_ms': self._last_solve_time_ms
+            'solve_time_ms': self._last_solve_time_ms,
+            'steering': self.previous_steering
         }
         
         status_msg = String()
         status_msg.data = str(status)
         self.status_pub.publish(status_msg)
+    
+    def _publish_predicted_trajectory(self):
+        """Publish MPC predicted trajectory for visualization."""
+        predicted = self.mpc.get_predicted_trajectory()
+        
+        if predicted is None or len(predicted) == 0:
+            return
+        
+        path_msg = Path()
+        path_msg.header.frame_id = 'map'
+        path_msg.header.stamp = self.get_clock().now().to_msg()
+        
+        for state in predicted:
+            pose = PoseStamped()
+            pose.header = path_msg.header
+            
+            # State is [x, y, yaw, speed] in CARLA coordinates
+            # Convert to ROS coordinates
+            pose.pose.position.x = state[0]
+            pose.pose.position.y = -state[1]  # Y-axis inversion for ROS
+            pose.pose.position.z = 0.0
+            
+            # Convert yaw to quaternion
+            yaw = -state[2]  # Yaw inversion for ROS
+            pose.pose.orientation.x = 0.0
+            pose.pose.orientation.y = 0.0
+            pose.pose.orientation.z = math.sin(yaw / 2)
+            pose.pose.orientation.w = math.cos(yaw / 2)
+            
+            path_msg.poses.append(pose)
+        
+        self.predicted_pub.publish(path_msg)
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = ControlNode()
+    node = MPCNode()
     
     try:
         rclpy.spin(node)

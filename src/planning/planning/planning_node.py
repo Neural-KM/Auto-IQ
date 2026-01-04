@@ -67,6 +67,9 @@ class PlanningNode(Node):
         self.declare_parameter('lane_change_speed_factor', 0.7)
         self.declare_parameter('sampling_resolution', 2.0)
         
+        # Perception mode - determines which obstacle topic to subscribe to
+        self.declare_parameter('use_ground_truth', True)
+        
         # Get CARLA parameters
         carla_host = self.get_parameter('carla_host').value
         carla_port = self.get_parameter('carla_port').value
@@ -131,8 +134,16 @@ class PlanningNode(Node):
             Int32, '/planning/goal_index',
             self.goal_index_callback, 10)
         
+        # Subscribe to obstacle topic based on use_ground_truth parameter
+        use_ground_truth = self.get_parameter('use_ground_truth').value
+        if use_ground_truth:
+            obstacle_topic = '/perception/ground_truth/obstacles'
+        else:
+            obstacle_topic = '/perception/obstacles'
+        self.get_logger().info(f'Subscribing to obstacles on: {obstacle_topic}')
+        
         self.obstacles_sub = self.create_subscription(
-            MarkerArray, '/perception/obstacles',
+            MarkerArray, obstacle_topic,
             self.obstacles_callback, 10)
         
         # ==================== Publishers ====================

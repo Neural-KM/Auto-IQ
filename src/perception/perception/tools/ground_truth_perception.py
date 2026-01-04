@@ -3,10 +3,10 @@
 import math
 from typing import List
 
-from perception.obstacle import Obstacle
+from perception.data_classes.obstacle import Obstacle
 
 
-class FakePerception:
+class GroundTruthPerception:
     """Ground truth perception using CARLA world state."""
     
     def __init__(self, vehicle, world):

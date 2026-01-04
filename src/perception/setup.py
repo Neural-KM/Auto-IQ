@@ -26,7 +26,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'perception_node = perception.perception_node:main',
+            'perception_node = perception.nodes.perception_node:main',
         ],
     },
 )

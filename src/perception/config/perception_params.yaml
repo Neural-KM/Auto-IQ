@@ -4,6 +4,12 @@
     use_ground_truth: false
     perception_method: 1  # 0=Depth Map, 1=Frustum Filtering
     
+    # CARLA Connection (for ground truth obstacles)
+    carla_host: 'localhost'
+    carla_port: 2000
+    carla_timeout: 10.0
+    ground_truth_rate: 10.0  # Hz for ground truth publishing
+    
     # Object Detection
     enable_object_detection: true
     model_path: 'yolov8n.pt'
