@@ -8,6 +8,8 @@
     carla_host: 'localhost'
     carla_port: 2000
     carla_timeout: 10.0
+
+    # Publishing Rates
     ground_truth_rate: 10.0  # Hz for ground truth publishing
     
     # Object Detection
