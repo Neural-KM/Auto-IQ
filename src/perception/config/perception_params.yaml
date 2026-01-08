@@ -1,7 +1,6 @@
 /**:
   ros__parameters:
-    # Perception Mode
-    use_ground_truth: false
+    # Perception Method
     perception_method: 0  # 0=Frustum Filter with YOLO
     
     # CARLA Connection (for ground truth obstacles)

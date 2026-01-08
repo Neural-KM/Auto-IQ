@@ -2,7 +2,7 @@
 Perception Launch File
 
 All default parameters are defined in config/perception_params.yaml (single source of truth).
-Override via command line: ros2 launch perception perception.launch.py use_ground_truth:=true
+Override via command line: ros2 launch perception perception.launch.py params_file:=/path/to/custom.yaml
 """
 
 import os

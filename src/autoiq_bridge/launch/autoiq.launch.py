@@ -3,6 +3,7 @@ Auto-IQ Complete Stack Launch File
 
 Launches bridge, perception, planning, control, visualization, and RViz.
 Each component can be enabled/disabled via launch arguments.
+Each package uses its own default parameters from its own launch file.
 """
 
 import os
@@ -26,32 +27,15 @@ def generate_launch_description():
     # Config files
     rviz_config = os.path.join(autoiq_bridge_pkg, 'config', 'autoiq.rviz')
     
-    # ==================== Arguments ====================
+    # ==================== Arguments (enable/disable only) ====================
     args = [
-        # Node enables
         DeclareLaunchArgument('enable_bridge', default_value='true'),
         DeclareLaunchArgument('enable_perception', default_value='true'),
         DeclareLaunchArgument('enable_planning', default_value='true'),
         DeclareLaunchArgument('enable_control', default_value='true'),
         DeclareLaunchArgument('enable_visualization', default_value='true'),
         DeclareLaunchArgument('enable_rviz', default_value='true'),
-        
-        # Shared config
-        DeclareLaunchArgument('host', default_value='localhost'),
-        DeclareLaunchArgument('port', default_value='2000'),
-        DeclareLaunchArgument('timeout', default_value='10.0'),
-        DeclareLaunchArgument('use_ground_truth', default_value='true'),
-        DeclareLaunchArgument('controller', default_value='pure_pursuit'),
-        DeclareLaunchArgument('target_speed', default_value='30.0'),
-        DeclareLaunchArgument('spawn_point_index', default_value='50'),
     ]
-    
-    # Common launch arguments to pass
-    common_args = {
-        'carla_host': LaunchConfiguration('host'),
-        'carla_port': LaunchConfiguration('port'),
-        'carla_timeout': LaunchConfiguration('timeout'),
-    }
     
     # ==================== Include Launch Files ====================
     
@@ -61,12 +45,6 @@ def generate_launch_description():
             os.path.join(autoiq_bridge_pkg, 'launch', 'carla_bridge.launch.py')
         ),
         condition=IfCondition(LaunchConfiguration('enable_bridge')),
-        launch_arguments={
-            'host': LaunchConfiguration('host'),
-            'port': LaunchConfiguration('port'),
-            'timeout': LaunchConfiguration('timeout'),
-            'spawn_point_index': LaunchConfiguration('spawn_point_index'),
-        }.items()
     )
     
     # Perception
@@ -83,11 +61,6 @@ def generate_launch_description():
             os.path.join(planning_pkg, 'launch', 'planning.launch.py')
         ),
         condition=IfCondition(LaunchConfiguration('enable_planning')),
-        launch_arguments={
-            **common_args,
-            'target_speed': LaunchConfiguration('target_speed'),
-            'use_ground_truth': LaunchConfiguration('use_ground_truth'),
-        }.items()
     )
     
     # Control
@@ -96,10 +69,6 @@ def generate_launch_description():
             os.path.join(control_pkg, 'launch', 'control.launch.py')
         ),
         condition=IfCondition(LaunchConfiguration('enable_control')),
-        launch_arguments={
-            **common_args,
-            'controller': LaunchConfiguration('controller'),
-        }.items()
     )
     
     # Visualization
@@ -108,10 +77,6 @@ def generate_launch_description():
             os.path.join(visualization_pkg, 'launch', 'visualization.launch.py')
         ),
         condition=IfCondition(LaunchConfiguration('enable_visualization')),
-        launch_arguments={
-            **common_args,
-            'draw_ground_truth_obstacles': LaunchConfiguration('use_ground_truth'),
-        }.items()
     )
     
     # RViz

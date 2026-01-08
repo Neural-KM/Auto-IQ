@@ -56,22 +56,27 @@ class VisualizationNode(Node):
         self.declare_parameter('carla_host', 'localhost')
         self.declare_parameter('carla_port', 2000)
         self.declare_parameter('carla_timeout', 10.0)
-        self.declare_parameter('enable_carla_viz', True)
         self.declare_parameter('enable_2d_viz', False)
         self.declare_parameter('viz_rate', 10.0)  # Hz
         self.declare_parameter('draw_lifetime', 0.15)  # seconds
         
-        # Obstacle visualization options - can enable both independently
-        self.declare_parameter('draw_ground_truth_obstacles', False)
-        self.declare_parameter('draw_detected_obstacles', True)
+        # Comma-separated list of objects to draw in CARLA debug view
+        # Options: trajectory, global_route, predicted, ground_truth_obstacles, detected_obstacles, speed
+        self.declare_parameter('carla_debug_draw', 'trajectory,global_route,predicted,speed')
         
         carla_host = self.get_parameter('carla_host').value
         carla_port = self.get_parameter('carla_port').value
         carla_timeout = self.get_parameter('carla_timeout').value
-        self.enable_carla_viz = self.get_parameter('enable_carla_viz').value
         self.enable_2d_viz = self.get_parameter('enable_2d_viz').value
         viz_rate = self.get_parameter('viz_rate').value
         self.draw_lifetime = self.get_parameter('draw_lifetime').value
+        
+        # Parse carla_debug_draw string into a set of items
+        carla_debug_draw_str = self.get_parameter('carla_debug_draw').value
+        self.carla_draw_items = set()
+        if carla_debug_draw_str:
+            self.carla_draw_items = set(item.strip() for item in carla_debug_draw_str.split(',') if item.strip())
+        self.enable_carla_viz = len(self.carla_draw_items) > 0
         
         # ==================== CARLA Connection ====================
         self.carla_drawer = None
@@ -128,17 +133,14 @@ class VisualizationNode(Node):
             Path, '/control/predicted_trajectory',
             self.predicted_callback, 10)
         
-        # Subscribe to obstacle topics based on parameters
-        self.draw_ground_truth_obstacles = self.get_parameter('draw_ground_truth_obstacles').value
-        self.draw_detected_obstacles = self.get_parameter('draw_detected_obstacles').value
-        
-        if self.draw_ground_truth_obstacles:
+        # Subscribe to obstacle topics based on carla_debug_draw items
+        if 'ground_truth_obstacles' in self.carla_draw_items:
             self.gt_obstacles_sub = self.create_subscription(
                 MarkerArray, '/perception/ground_truth/obstacles',
                 self.ground_truth_obstacles_callback, 10)
             self.get_logger().info('Subscribed to ground truth obstacles')
         
-        if self.draw_detected_obstacles:
+        if 'detected_obstacles' in self.carla_draw_items:
             self.detected_obstacles_sub = self.create_subscription(
                 MarkerArray, '/perception/obstacles',
                 self.detected_obstacles_callback, 10)
@@ -270,21 +272,22 @@ class VisualizationNode(Node):
     def _draw_carla(self):
         """Draw debug shapes in CARLA."""
         lt = self.draw_lifetime
+        items = self.carla_draw_items
         
         # Draw global route
-        if self.global_route:
+        if 'global_route' in items and self.global_route:
             self.carla_drawer.draw_global_route(self.global_route, lifetime=lt)
         
         # Draw local trajectory
-        if self.trajectory:
+        if 'trajectory' in items and self.trajectory:
             self.carla_drawer.draw_trajectory(self.trajectory, lifetime=lt)
         
         # Draw MPC predicted trajectory
-        if self.predicted:
+        if 'predicted' in items and self.predicted:
             self.carla_drawer.draw_predicted_trajectory(self.predicted, lifetime=lt)
         
         # Draw speed indicator
-        if self.vehicle_x is not None:
+        if 'speed' in items and self.vehicle_x is not None:
             self.carla_drawer.draw_speed_indicator(
                 self.vehicle_x, self.vehicle_y,
                 self.vehicle_speed * 3.6,  # Convert to km/h
@@ -292,9 +295,8 @@ class VisualizationNode(Node):
                 lifetime=lt
             )
         
-        # Draw obstacles
         # Ground truth obstacles (green boxes)
-        if self.draw_ground_truth_obstacles:
+        if 'ground_truth_obstacles' in items:
             for obs in self.ground_truth_obstacles:
                 self.carla_drawer.draw_obstacle_box(
                     obs['x'], obs['y'], obs['yaw'],
@@ -305,7 +307,7 @@ class VisualizationNode(Node):
                 )
         
         # Detected obstacles (yellow boxes)
-        if self.draw_detected_obstacles:
+        if 'detected_obstacles' in items:
             for obs in self.detected_obstacles:
                 self.carla_drawer.draw_obstacle_box(
                     obs['x'], obs['y'], obs['yaw'],
@@ -339,12 +341,12 @@ class VisualizationNode(Node):
         
         # Update obstacles - combine both lists for 2D viz with type tag
         all_obstacles = []
-        if self.draw_ground_truth_obstacles:
+        if 'ground_truth_obstacles' in self.carla_draw_items:
             for obs in self.ground_truth_obstacles:
                 obs_copy = obs.copy()
                 obs_copy['source'] = 'ground_truth'
                 all_obstacles.append(obs_copy)
-        if self.draw_detected_obstacles:
+        if 'detected_obstacles' in self.carla_draw_items:
             for obs in self.detected_obstacles:
                 obs_copy = obs.copy()
                 obs_copy['source'] = 'detected'
