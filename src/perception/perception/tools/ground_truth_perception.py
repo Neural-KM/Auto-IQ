@@ -85,15 +85,15 @@ class GroundTruthPerception:
                     id=actor.id,
                     obstacle_type=obstacle_type,
                     x=bbox_center_relative.x,
-                    y=bbox_center_relative.y,
+                    y=-bbox_center_relative.y,  # Flip Y: CARLA left-handed -> ROS right-handed
                     z=bbox_center_relative.z,
                     vx=vx_rel,
-                    vy=vy_rel,
+                    vy=-vy_rel,  # Flip Y velocity as well
                     vz=vz_rel,
                     length=dims_x,
                     width=dims_y,
                     height=dims_z,
-                    yaw=relative_yaw,
+                    yaw=-relative_yaw,  # Flip yaw for right-handed convention
                 )
                 obstacles.append(obstacle)
                 

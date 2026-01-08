@@ -280,7 +280,7 @@ class Perception:
         obstacle_id = 1000
         
         # 1. Transform LiDAR points to Vehicle Frame
-        # LiDAR sensor usually outputs in its own frame (x-forward, y-right, z-up)
+        # LiDAR points are in ROS convention (x-forward, y-left, z-up) after bridge Y-flip
         lidar_pos = self._lidar_position
         lidar_points_veh = lidar_points + np.array([lidar_pos['x'], lidar_pos['y'], lidar_pos['z']])
         
@@ -290,12 +290,14 @@ class Perception:
         # Translate to camera position
         pts_rel = lidar_points_veh - np.array([camera_pos['x'], camera_pos['y'], camera_pos['z']])
         
-        # Rotate to camera frame
-        # Cam X (right) = Veh Y
-        # Cam Y (down) = -Veh Z
+        # Rotate to camera frame (ROS conventions)
+        # Vehicle: X-forward, Y-left, Z-up
+        # Camera:  X-right, Y-down, Z-forward
+        # Cam X (right) = -Veh Y (left is +Y, right is -Y)
+        # Cam Y (down) = -Veh Z (up is +Z, down is -Z)
         # Cam Z (forward) = Veh X
         lidar_points_cam = np.zeros_like(pts_rel)
-        lidar_points_cam[:, 0] = pts_rel[:, 1]   # x = y_veh
+        lidar_points_cam[:, 0] = -pts_rel[:, 1]  # x = -y_veh
         lidar_points_cam[:, 1] = -pts_rel[:, 2]  # y = -z_veh
         lidar_points_cam[:, 2] = pts_rel[:, 0]   # z = x_veh
         
