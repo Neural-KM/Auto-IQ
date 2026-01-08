@@ -457,7 +457,7 @@ class PerceptionNode(Node):
             marker.scale = Vector3(x=obs.length, y=obs.width, z=obs.height)
             
             if obs.obstacle_type == 'vehicle':
-                marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.5)
+                marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.5)
             else:
                 marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.5)
             
@@ -480,7 +480,7 @@ class PerceptionNode(Node):
             distance = (obs.x**2 + obs.y**2)**0.5
             text_marker.text = f"{obs.obstacle_type}: {distance:.1f}m"
             text_marker.scale.z = 0.5
-            text_marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)
+            text_marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=0.5)
             text_marker.lifetime.nanosec = 200000000
             marker_array.markers.append(text_marker)
         

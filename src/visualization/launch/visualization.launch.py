@@ -17,8 +17,8 @@ def generate_launch_description():
         # Options: trajectory, global_route, predicted, ground_truth_obstacles, detected_obstacles, speed
         # Example: "trajectory,ground_truth_obstacles,speed"
         # Empty string disables CARLA debug drawing entirely
-        DeclareLaunchArgument('carla_debug_draw', default_value='trajectory,global_route,predicted,speed'),
-        
+        DeclareLaunchArgument('carla_debug_draw', default_value='speed'),
+
         Node(
             package='visualization',
             executable='visualization_node',
