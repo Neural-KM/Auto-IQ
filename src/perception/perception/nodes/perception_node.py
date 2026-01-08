@@ -8,13 +8,13 @@ Uses the Perception class directly (same as original PerceptionManager).
 
 Initialization Requirements (must all be received before processing starts):
 1. TF transform: ego_vehicle -> camera_frame
-2. TF transform: ego_vehicle -> lidar_frame (only for frustum filtering method)
+2. TF transform: ego_vehicle -> lidar_frame
 3. CameraInfo message (intrinsics)
 4. CARLA connection (for ground truth obstacles)
 
 Publishes:
-- /perception/obstacles (MarkerArray with 3D bounding boxes) - detected or ground truth based on use_ground_truth param
-- /perception/ground_truth/obstacles (MarkerArray) - always published ground truth
+- /perception/obstacles (MarkerArray with 3D bounding boxes) - detected obstacles from YOLO + LiDAR
+- /perception/ground_truth/obstacles (MarkerArray) - ground truth from CARLA
 - /perception/lanes (MarkerArray with lane lines)
 - /perception/debug/* (debug images)
 """
@@ -60,7 +60,6 @@ class PerceptionNode(Node):
         super().__init__('perception_node')
         
         # ==================== Parameters ====================
-        self.use_ground_truth = self.declare_parameter('use_ground_truth', True).value
         self.model_path = self.declare_parameter('model_path', 'yolov8n.pt').value
         self.conf_threshold = self.declare_parameter('conf_threshold', 0.5).value
         self.obstacle_radius = self.declare_parameter('obstacle_radius', 50.0).value
@@ -166,8 +165,8 @@ class PerceptionNode(Node):
                 Image, '/carla/ego_vehicle/ground_truth/camera/semantic/front/image',
                 self.semantic_callback, sensor_qos)
         
-        if not self.use_ground_truth:
-            # Real perception mode
+        # Real perception mode (YOLO + LiDAR)
+        if self.enable_object_detection:
             self.get_logger().info('Using Real Perception mode (YOLO + LiDAR)')
             self.rgb_sub = self.create_subscription(
                 Image, '/carla/ego_vehicle/sensor/camera/rgb/front/image',
@@ -179,11 +178,11 @@ class PerceptionNode(Node):
                 self.lidar_callback, sensor_qos)
         
         # ==================== Publishers ====================
-        # Ground truth obstacles - always published
+        # Ground truth obstacles from CARLA
         self.ground_truth_pub = self.create_publisher(
             MarkerArray, '/perception/ground_truth/obstacles', 10)
         
-        # Active obstacles (ground truth or detected based on use_ground_truth param)
+        # Detected obstacles from YOLO + LiDAR
         self.obstacles_pub = self.create_publisher(MarkerArray, '/perception/obstacles', 10)
         self.lanes_pub = self.create_publisher(MarkerArray, '/perception/lanes', 10)
         
@@ -280,8 +279,8 @@ class PerceptionNode(Node):
         """Complete initialization once all data is available."""
         self.get_logger().info('All initialization data received, completing setup...')
         
-        # Initialize Perception class (for real perception mode)
-        if self.enable_object_detection and not self.use_ground_truth:
+        # Initialize Perception class for object detection
+        if self.enable_object_detection:
             self.perception = Perception(
                 model_path=self.model_path,
                 conf_threshold=self.conf_threshold,
@@ -617,20 +616,11 @@ class PerceptionNode(Node):
             clear_marker.action = Marker.DELETEALL
             marker_array.markers.append(clear_marker)
             self.ground_truth_pub.publish(marker_array)
-            
-            # If using ground truth mode, also publish to main topic
-            if self.use_ground_truth:
-                self.obstacles_pub.publish(marker_array)
             return
         
         # Create marker array for ground truth topic
         gt_marker_array = self._create_obstacle_marker_array(obstacles, 'ground_truth_obstacles')
         self.ground_truth_pub.publish(gt_marker_array)
-        
-        # If using ground truth mode, also publish to main obstacles topic
-        if self.use_ground_truth:
-            main_marker_array = self._create_obstacle_marker_array(obstacles, 'obstacles')
-            self.obstacles_pub.publish(main_marker_array)
     
     def _create_obstacle_marker_array(self, obstacles: list, namespace: str) -> MarkerArray:
         """Create a MarkerArray from obstacles."""
