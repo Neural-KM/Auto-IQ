@@ -67,7 +67,7 @@ class PerceptionNode(Node):
         self.enable_object_detection = self.declare_parameter('enable_object_detection', True).value
         self.enable_lane_detection = self.declare_parameter('enable_lane_detection', False).value
         self.enable_debug_viz = self.declare_parameter('enable_debug_viz', False).value
-        self.perception_method = self.declare_parameter('perception_method', 1).value
+        self.perception_method = self.declare_parameter('perception_method', 0).value
         
         # CARLA connection parameters (for ground truth)
         self.declare_parameter('carla_host', 'localhost')
@@ -168,19 +168,15 @@ class PerceptionNode(Node):
         
         if not self.use_ground_truth:
             # Real perception mode
-            self.get_logger().info('Using Real Perception mode (YOLO + Depth/LiDAR)')
+            self.get_logger().info('Using Real Perception mode (YOLO + LiDAR)')
             self.rgb_sub = self.create_subscription(
                 Image, '/carla/ego_vehicle/sensor/camera/rgb/front/image',
                 self.rgb_callback, sensor_qos)
             
-            self.depth_sub = self.create_subscription(
-                Image, '/carla/ego_vehicle/sensor/camera/depth/front/image',
-                self.depth_callback, sensor_qos)
-            
-            if self.perception_method == Perception.METHOD_FRUSTUM_FILTERING:
-                self.lidar_sub = self.create_subscription(
-                    PointCloud2, '/carla/ego_vehicle/sensor/lidar/top/point_cloud',
-                    self.lidar_callback, sensor_qos)
+            # LiDAR is required for method 0 (frustum filtering)
+            self.lidar_sub = self.create_subscription(
+                PointCloud2, '/carla/ego_vehicle/sensor/lidar/top/point_cloud',
+                self.lidar_callback, sensor_qos)
         
         # ==================== Publishers ====================
         # Ground truth obstacles - always published
@@ -202,9 +198,6 @@ class PerceptionNode(Node):
         # ==================== Initialization Timer ====================
         # Periodically try to complete initialization
         self.init_timer = self.create_timer(0.5, self._try_initialize)
-        
-        self.get_logger().info(f'Perception Node created (use_ground_truth={self.use_ground_truth})')
-        self.get_logger().info('Waiting for TF transforms and CameraInfo before starting...')
     
     # ==================== Initialization ====================
     
@@ -217,13 +210,9 @@ class PerceptionNode(Node):
         if not self.camera_tf_received:
             self._try_get_camera_tf()
         
-        # Try to get LiDAR TF (only needed for frustum filtering)
+        # Try to get LiDAR TF (always needed for method 0 or ground truth)
         if not self.lidar_tf_received:
-            if self.perception_method == Perception.METHOD_FRUSTUM_FILTERING or self.use_ground_truth:
-                self._try_get_lidar_tf()
-            else:
-                # Not needed for depth map method in real perception
-                self.lidar_tf_received = True
+            self._try_get_lidar_tf()
         
         # Check if ready to initialize
         if self._check_ready():
@@ -304,10 +293,10 @@ class PerceptionNode(Node):
                 x=self.camera_x, y=self.camera_y, z=self.camera_height,
                 pitch=self.camera_pitch
             )
-            if self.perception_method == Perception.METHOD_FRUSTUM_FILTERING:
-                self.perception.set_lidar_position(
-                    x=self.lidar_x, y=self.lidar_y, z=self.lidar_z
-                )
+            # Always set LiDAR position for method 0
+            self.perception.set_lidar_position(
+                x=self.lidar_x, y=self.lidar_y, z=self.lidar_z
+            )
             self.get_logger().info(f'Perception initialized: {self.model_path}, method={self.perception_method}')
         
         # Initialize Lane Detector
@@ -358,7 +347,7 @@ class PerceptionNode(Node):
     
     def rgb_callback(self, msg: Image):
         """Process RGB image for object detection."""
-        self.get_logger().info('RGB image received', throttle_duration_sec=5.0)
+        self.get_logger().info('RGB image received', once=True)
         if not self.initialized or self.perception is None:
             return
         
@@ -374,23 +363,14 @@ class PerceptionNode(Node):
         
         self.latest_rgb = img
         
-        # Run detection
+        # Run detection (method 0 always uses LiDAR)
         obstacles = []
-        if self.perception_method == Perception.METHOD_DEPTH_MAP:
-            if self.latest_depth is not None:
-                obstacles = self.perception.detect_obstacles(
-                    rgb_image=img,
-                    depth_image=self.latest_depth,
-                    radius=self.obstacle_radius
-                )
-        else:
-            if self.latest_lidar is not None:
-                obstacles = self.perception.detect_obstacles(
-                    rgb_image=img,
-                    lidar_points=self.latest_lidar,
-                    radius=self.obstacle_radius
-                )
-        self.get_logger().info(f'Detected {len(obstacles)} obstacles', throttle_duration_sec=1.0)
+        if self.latest_lidar is not None:
+            obstacles = self.perception.detect_obstacles(
+                rgb_image=img,
+                lidar_points=self.latest_lidar,
+                radius=self.obstacle_radius
+            )
         self._publish_obstacle_markers(obstacles)
         
         if self.enable_debug_viz:
@@ -398,19 +378,9 @@ class PerceptionNode(Node):
             if annotated is not None:
                 self._publish_debug_rgb(msg, annotated)
     
-    def depth_callback(self, msg: Image):
-        """Store latest depth image."""
-        if not self.initialized:
-            return
-        
-        if msg.encoding == '32FC1':
-            self.latest_depth = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.width)
-        else:
-            self.get_logger().warn(f'Unsupported depth encoding: {msg.encoding}')
-    
     def lidar_callback(self, msg: PointCloud2):
         """Store latest LiDAR points."""
-        self.get_logger().info('LiDAR point cloud received', throttle_duration_sec=5.0)
+        self.get_logger().info('LiDAR point cloud received', once=True)
         if not self.initialized:
             return
         
@@ -623,7 +593,7 @@ class PerceptionNode(Node):
     
     def _publish_ground_truth_obstacles(self):
         """Publish ground truth obstacles (always runs)."""
-        self.get_logger().info('Publishing ground truth obstacles', throttle_duration_sec=5.0)
+        self.get_logger().info('Publishing ground truth obstacles', once=True)
         if self.carla_world is None:
             self.get_logger().warn('No CARLA connection, cannot publish ground truth obstacles')
             return
@@ -636,7 +606,6 @@ class PerceptionNode(Node):
         
         # Detect obstacles using GroundTruthPerception class
         obstacles = self.ground_truth_perception.detect_obstacles()
-        self.get_logger().info(f'Ground truth obstacles: {len(obstacles)}', throttle_duration_sec=1.0)
         if not obstacles:
             # Publish empty marker array to clear previous markers
             marker_array = MarkerArray()

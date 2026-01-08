@@ -28,7 +28,7 @@ pip install -r requirements.txt
 ### Relevant Config params
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `controller` | `mpc` | Control algorithm: `mpc` or `pure_pursuit` |
+| `controller` | `pure_pursuit` | Control algorithm: `mpc` or `pure_pursuit` |
 | `use_ground_truth` | `true` | Use ground truth perception |
 
 ### Usage

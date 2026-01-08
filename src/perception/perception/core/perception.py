@@ -2,8 +2,8 @@
 Real Perception (ROS2 Version)
 ==============================
 
-Obstacle detection from raw sensor data (RGB + Depth cameras / LiDAR).
-Uses YOLO for 2D object detection, then projects to 3D using depth.
+Obstacle detection from RGB camera + LiDAR using frustum filtering.
+Uses YOLO for 2D object detection, then projects LiDAR points to 3D.
 
 This is the ROS2 adaptation of the original Perception class.
 Instead of using sensor_suite.get_sensor(), it accepts images directly.
@@ -22,31 +22,16 @@ from perception.data_classes.obstacle import Obstacle
 
 class Perception:
     """
-    Real perception using camera sensor data.
-    
-    Methods:
-    Method 0: Dense Depth Map Sampling
-        - Data Source: Dense 2D depth image (structured point cloud).
-        - Processing: Projects the 2D bounding box onto the depth map.
-          Samples the center region of the box and computes the median depth value.
-          Assumes the object is a flat plane at that depth.
-        
-    Method 1: Sparse Point Cloud Frustum Filtering
-        - Data Source: Sparse 3D point cloud (unstructured points).
-        - Processing: Projects 3D points onto the 2D image plane.
-          Selects points that fall inside the 2D bounding box (Frustum Filtering).
-          Clusters these points to estimate the 3D centroid and dimensions, handling occlusion.
+    Real perception using RGB camera + LiDAR frustum filtering.
     
     Pipeline:
     1. Get RGB image from sensor data
     2. Run YOLO object detection -> 2D bounding boxes
-    3. Get 3D data (Depth Map or Point Cloud)
-    4. Process data using selected Method (0 or 1)
-    5. Transform to vehicle frame
-    6. Return list of Obstacle instances
+    3. Get LiDAR point cloud
+    4. Project LiDAR points to image and filter by bounding boxes
+    5. Cluster points and fit oriented bounding boxes
+    6. Return list of Obstacle instances in vehicle frame
     """
-    METHOD_FRUSTUM_FILTERING = 1
-    METHOD_DEPTH_MAP = 0
 
     def __init__(self, model_path: str = 'yolov8n.pt', conf_threshold: float = 0.5,
                  method: int = 0, hood_mask_config: Optional[Dict] = None):
@@ -56,9 +41,13 @@ class Perception:
         Args:
             model_path: Path to YOLO model
             conf_threshold: Detection confidence threshold
-            method: Detection method (0=Depth Map, 1=Frustum Filtering)
+            method: Detection method (must be 0 for LiDAR frustum filtering)
             hood_mask_config: Optional hood mask configuration for ObjectDetector
         """
+        # Validate method
+        if method != 0:
+            raise ValueError(f"Only method=0 (LiDAR frustum filtering) is supported. Got method={method}")
+        
         self.method = method
         
         # Initialize object detector
@@ -218,167 +207,11 @@ class Perception:
         
         return (x_final, y_final, z_final)
     
-    def _estimate_dimensions(self, class_name: str) -> tuple:
-        """
-        Estimate object dimensions based on class.
-        
-        Args:
-            class_name: 'vehicle' or 'pedestrian'
-            
-        Returns:
-            (length, width, height) in meters
-        """
-        if class_name == 'vehicle':
-            # Average car dimensions
-            return (4.5, 1.8, 1.5)
-        else:
-            # Pedestrian dimensions
-            return (0.5, 0.5, 1.7)
-    
-    def detect_obstacles(self, rgb_image: np.ndarray, depth_image: Optional[np.ndarray] = None,
+    def detect_obstacles(self, rgb_image: np.ndarray,
                          lidar_points: Optional[np.ndarray] = None,
                          radius: float = 50.0) -> List[Obstacle]:
         """
-        Detect obstacles from sensor data.
-        Dispatches to the selected method.
-        
-        Args:
-            rgb_image: RGB image as numpy array (H, W, 3)
-            depth_image: Depth image in meters as numpy array (H, W), required for METHOD_DEPTH_MAP
-            lidar_points: LiDAR points as Nx3 or Nx4 numpy array, required for METHOD_FRUSTUM_FILTERING
-            radius: Maximum detection radius in meters
-            
-        Returns:
-            List of Obstacle instances, sorted by distance
-        """
-        
-        if self.method == self.METHOD_FRUSTUM_FILTERING:
-            if lidar_points is None:
-                return []
-            return self.detect_obstacles_lidar_frustum_cluster(rgb_image, lidar_points, radius)
-        else:
-            if depth_image is None:
-                return []
-            return self.detect_obstacles_depth(rgb_image, depth_image, radius)
-
-    def detect_obstacles_depth(self, rgb_image: np.ndarray, depth_image: np.ndarray,
-                               radius: float = 50.0) -> List[Obstacle]:
-        """
-        Detect obstacles using RGB + Depth Camera (Method 0).
-        
-        Args:
-            rgb_image: RGB image as numpy array (H, W, 3)
-            depth_image: Depth image in meters as numpy array (H, W)
-            radius: Maximum detection radius in meters
-            
-        Returns:
-            List of Obstacle instances, sorted by distance
-        """
-        if rgb_image is None:
-            return []
-        
-        if depth_image is None:
-            print("[Perception] Warning: No depth image")
-            return []
-        
-        # Compute intrinsics if not done yet
-        if not self._intrinsics_computed:
-            print("[Perception] Warning: Camera intrinsics not set. Call set_intrinsics() first.")
-            return []
-        
-        # Run 2D detection
-        start_time = time.time()
-        detections = self.detector.detect(rgb_image)
-        inference_time = time.time() - start_time
-        print(f"[Perception] YOLO inference time: {inference_time:.3f}s, detections: {len(detections)}")
-        
-        # Store for visualization
-        self._last_rgb_image = rgb_image.copy()
-        self._last_detections = detections
-        
-        if not detections:
-            return []
-        
-        obstacles = []
-        obstacle_id = 1000
-        
-        for det in detections:
-            bbox = det['bbox']  # [x1, y1, x2, y2]
-            class_name = det['class']
-            
-            # Get center of bounding box
-            cx = (bbox[0] + bbox[2]) / 2.0
-            cy = (bbox[1] + bbox[3]) / 2.0
-            
-            # Get depth at center (use median of center region for robustness)
-            x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
-            
-            # Sample depth from center region (middle 50%)
-            margin_x = int((x2 - x1) * 0.25)
-            margin_y = int((y2 - y1) * 0.25)
-            
-            roi_x1 = max(0, x1 + margin_x)
-            roi_x2 = min(depth_image.shape[1], x2 - margin_x)
-            roi_y1 = max(0, y1 + margin_y)
-            roi_y2 = min(depth_image.shape[0], y2 - margin_y)
-            
-            if roi_x2 <= roi_x1 or roi_y2 <= roi_y1:
-                # Fallback to center point
-                depth = depth_image[int(cy), int(cx)]
-            else:
-                depth_roi = depth_image[roi_y1:roi_y2, roi_x1:roi_x2]
-                # Use median to reject outliers (sky, ground)
-                depth = np.median(depth_roi)
-            
-            # Skip if depth is invalid or too far
-            if depth <= 0 or depth > radius:
-                continue
-            
-            # Project to camera frame
-            x_cam, y_cam, z_cam = self._pixel_to_camera_frame(cx, cy, depth)
-            
-            # Transform to vehicle frame
-            x_veh, y_veh, z_veh = self._camera_to_vehicle_frame(x_cam, y_cam, z_cam, self._camera_position)
-            
-            # Estimate dimensions
-            length, width, height = self._estimate_dimensions(class_name)
-            
-            # Create obstacle
-            obstacle = Obstacle(
-                id=obstacle_id,
-                obstacle_type=class_name,
-                x=x_veh,
-                y=y_veh,
-                z=z_veh,
-                vx=0.0,
-                vy=0.0,
-                vz=0.0,
-                length=length,
-                width=width,
-                height=height,
-            )
-            obstacles.append(obstacle)
-            obstacle_id += 1
-        
-        # Sort by distance
-        obstacles.sort(key=lambda o: (o.x**2 + o.y**2 + o.z**2)**0.5)
-        
-        return obstacles
-
-    def detect_obstacles_lidar_frustum_cluster(self, rgb_image: np.ndarray,
-                                               lidar_points: np.ndarray,
-                                               radius: float = 50.0) -> List[Obstacle]:
-        """
-        Detect obstacles from sensor data using Frustum Filtering with LiDAR (Method 1).
-        
-        Algorithm:
-        1. Frustum Filtering: Project LiDAR points to image and select those inside YOLO boxes.
-        2. Coordinate Transform: Convert points to Vehicle Frame.
-        3. Clustering: Remove outliers using statistical filtering (Z-score/Median).
-        4. AABB Fitting (Observed Extents):
-           - Compute the Axis-Aligned Bounding Box (AABB) of the clustered points.
-           - Use min/max coordinates in X, Y, Z to determine dimensions and center.
-           - No assumptions about object size; relies entirely on visible point cloud.
+        Detect obstacles from RGB camera + LiDAR using frustum filtering.
         
         Args:
             rgb_image: RGB image as numpy array (H, W, 3)
@@ -386,7 +219,35 @@ class Perception:
             radius: Maximum detection radius in meters
             
         Returns:
-            List of Obstacle instances, sorted by distance
+            List of Obstacle instances in vehicle frame, sorted by distance
+        """
+        if rgb_image is None or lidar_points is None or len(lidar_points) == 0:
+            return []
+        
+        return self.detect_obstacles_lidar_frustum_cluster(rgb_image, lidar_points, radius)
+
+    def detect_obstacles_lidar_frustum_cluster(self, rgb_image: np.ndarray,
+                                               lidar_points: np.ndarray,
+                                               radius: float = 50.0) -> List[Obstacle]:
+        """
+        Detect obstacles using Frustum Filtering with LiDAR.
+        
+        Algorithm:
+        1. Frustum Filtering: Project LiDAR points to image and select those inside YOLO boxes
+        2. Coordinate Transform: Convert points to Vehicle Frame
+        3. Clustering: Remove outliers using statistical filtering
+        4. Oriented Bounding Box Fitting:
+           - Use PCA on XY plane to find principal axes
+           - Compute oriented bounding box dimensions (length, width, height)
+           - Extract yaw angle from principal axis
+        
+        Args:
+            rgb_image: RGB image as numpy array (H, W, 3)
+            lidar_points: LiDAR points as Nx3 or Nx4 numpy array (x, y, z, [intensity])
+            radius: Maximum detection radius in meters
+            
+        Returns:
+            List of Obstacle instances in vehicle frame, sorted by distance
         """
         if rgb_image is None:
             return []

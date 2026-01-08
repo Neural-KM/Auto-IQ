@@ -12,7 +12,7 @@ def generate_launch_description():
         DeclareLaunchArgument('carla_host', default_value='localhost'),
         DeclareLaunchArgument('carla_port', default_value='2000'),
         DeclareLaunchArgument('carla_timeout', default_value='10.0'),
-        DeclareLaunchArgument('controller', default_value='mpc',
+        DeclareLaunchArgument('controller', default_value='pure_pursuit',
                               description="'mpc' or 'pure_pursuit'"),
         
         # MPC Node

@@ -2,7 +2,7 @@
   ros__parameters:
     # Perception Mode
     use_ground_truth: false
-    perception_method: 1  # 0=Depth Map, 1=Frustum Filtering
+    perception_method: 0  # 0=Frustum Filter with YOLO
     
     # CARLA Connection (for ground truth obstacles)
     carla_host: 'localhost'
@@ -19,7 +19,7 @@
     obstacle_radius: 50.0
     
     # Lane Detection
-    enable_lane_detection: true
+    enable_lane_detection: false
     
     # Debug
     enable_debug_viz: false

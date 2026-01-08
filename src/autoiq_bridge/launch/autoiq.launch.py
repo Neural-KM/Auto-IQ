@@ -41,7 +41,7 @@ def generate_launch_description():
         DeclareLaunchArgument('port', default_value='2000'),
         DeclareLaunchArgument('timeout', default_value='10.0'),
         DeclareLaunchArgument('use_ground_truth', default_value='true'),
-        DeclareLaunchArgument('controller', default_value='mpc'),
+        DeclareLaunchArgument('controller', default_value='pure_pursuit'),
         DeclareLaunchArgument('target_speed', default_value='30.0'),
         DeclareLaunchArgument('spawn_point_index', default_value='50'),
     ]
