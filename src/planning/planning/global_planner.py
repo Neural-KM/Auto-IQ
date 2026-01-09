@@ -284,31 +284,6 @@ class GlobalPlanner:
             return RoadOption.VOID
         return self._route[self._route_index][1]
     
-    def draw_route(self, world, life_time=60.0, color=None):
-        """
-        Draw the route in the CARLA world.
-        
-        Args:
-            world: CARLA world instance
-            life_time: How long to display (seconds)
-            color: carla.Color (default: green)
-        """
-        if not self._route:
-            return
-        
-        if color is None:
-            color = carla.Color(0, 255, 0)  # Green
-        
-        debug = world.debug
-        
-        for wp, road_option in self._route:
-            debug.draw_point(
-                wp.transform.location + carla.Location(z=0.5),
-                size=0.1,
-                color=color,
-                life_time=life_time
-            )
-    
     # =========================================================================
     # Internal methods for graph building and path search
     # =========================================================================
@@ -627,54 +602,6 @@ class GlobalPlanner:
                 closest_index = i
         
         return closest_index
-
-
-# =============================================================================
-# Spawn Point Utilities
-# =============================================================================
-
-def get_spawn_points(world):
-    """Get all spawn points in the map."""
-    return world.get_map().get_spawn_points()
-
-
-def get_random_destination(world, current_location=None, min_distance=50.0):
-    """
-    Get a random destination that's at least min_distance away.
-    
-    Args:
-        world: CARLA world
-        current_location: carla.Location to measure distance from
-        min_distance: Minimum distance for destination
-        
-    Returns:
-        carla.Transform of destination spawn point
-    """
-    import random
-    
-    spawn_points = get_spawn_points(world)
-    
-    if current_location is None:
-        return random.choice(spawn_points)
-    
-    # Filter spawn points by distance
-    valid_points = [
-        sp for sp in spawn_points
-        if current_location.distance(sp.location) >= min_distance
-    ]
-    
-    if valid_points:
-        return random.choice(valid_points)
-    return random.choice(spawn_points)
-
-
-def print_spawn_points(world):
-    """Print all spawn points with indices."""
-    spawn_points = get_spawn_points(world)
-    print(f"\n{len(spawn_points)} spawn points available:")
-    for i, sp in enumerate(spawn_points):
-        print(f"  [{i:3d}] x={sp.location.x:7.1f}, y={sp.location.y:7.1f}, z={sp.location.z:5.1f}")
-
 
 if __name__ == '__main__':
     import sys
