@@ -28,10 +28,23 @@ from geometry_msgs.msg import PoseStamped, Point
 from std_msgs.msg import String, Int32
 from visualization_msgs.msg import MarkerArray
 
+from typing import List
+
 import carla
 
 from planning.global_planner import GlobalPlanner, RoadOption
-from planning.behavior_planner import BehaviorState
+from planning.behavior_planner import (
+    BehaviorPlanner,
+    BehaviorPlannerConfig,
+    BehaviorState,
+    ObstacleInfo,
+    LaneAvailability,
+)
+from planning.motion_planner import (
+    MotionPlanner, 
+    MotionPlannerConfig,
+    VehicleState,
+)
 
 
 def quaternion_to_yaw(q):
@@ -63,8 +76,9 @@ class PlanningNode(Node):
         self.declare_parameter('lookahead_distance', 15.0)
         self.declare_parameter('waypoint_spacing', 2.0)
         self.declare_parameter('lookahead_waypoints', 40)
-        self.declare_parameter('lane_change_trigger_distance', 20.0)
+        self.declare_parameter('lane_change_trigger_distance', 35.0)  # Base distance
         self.declare_parameter('lane_change_speed_factor', 0.7)
+        self.declare_parameter('lane_change_time', 3.0)  # Time to complete lane change (seconds)
         self.declare_parameter('sampling_resolution', 2.0)
         
         # Perception mode - determines which obstacle topic to subscribe to
@@ -82,6 +96,7 @@ class PlanningNode(Node):
         self.lookahead_waypoints = self.get_parameter('lookahead_waypoints').value
         self.lane_change_trigger_distance = self.get_parameter('lane_change_trigger_distance').value
         self.lane_change_speed_factor = self.get_parameter('lane_change_speed_factor').value
+        self.lane_change_time = self.get_parameter('lane_change_time').value
         self.sampling_resolution = self.get_parameter('sampling_resolution').value
         
         # ==================== Connect to CARLA ====================
@@ -103,23 +118,43 @@ class PlanningNode(Node):
             sampling_resolution=self.sampling_resolution
         )
         
+        # Initialize Behavior Planner (state machine)
+        behavior_config = BehaviorPlannerConfig(
+            lane_width=3.5,
+            lane_change_time=self.lane_change_time,
+            base_trigger_distance=self.lane_change_trigger_distance,
+            safety_buffer=5.0,
+            prepare_timeout=2.0,  # Timeout for PREPARING state
+            lane_change_cooldown=3.0,
+        )
+        self.behavior_planner = BehaviorPlanner(config=behavior_config)
+        
+        # Initialize Motion Planner (trajectory generation)
+        motion_config = MotionPlannerConfig(
+            lane_width=3.5,
+            lane_change_time=self.lane_change_time,
+            longitudinal_horizon=4.0,
+            dt=0.1,
+        )
+        self.motion_planner = MotionPlanner(config=motion_config)
+        
         # ==================== State ====================
         self.initialized = True
         self.is_navigating = False
         self.destination_reached = False
+        self._destination = None  # Current destination for replanning
         
-        # Vehicle state (from odometry)
-        self.vehicle_location = None
-        self.vehicle_transform = None
+        # Vehicle state (from odometry) - stored as ROS coordinates
+        self.vehicle_x = 0.0
+        self.vehicle_y = 0.0
+        self.vehicle_yaw = 0.0
         self.vehicle_speed = 0.0
         
-        # Behavior state
-        self.behavior_state = BehaviorState.LANE_FOLLOWING
-        self.lane_change_waypoints = []
-        self.lane_change_index = 0
+        # CARLA-format location (for map queries only)
+        self.vehicle_location = None
         
-        # Obstacle detection (from perception)
-        self.current_obstacle = None
+        # Obstacle detection (from perception) - list of all obstacles
+        self.current_obstacles: List[ObstacleInfo] = []
         
         # ==================== Subscribers ====================
         self.odom_sub = self.create_subscription(
@@ -164,25 +199,18 @@ class PlanningNode(Node):
         quat = msg.pose.pose.orientation
         vel = msg.twist.twist.linear
         
-        # Convert to CARLA coordinates (ROS uses different convention)
+        # Store ROS coordinates
+        self.vehicle_x = pos.x
+        self.vehicle_y = pos.y
+        self.vehicle_yaw = quaternion_to_yaw(quat)
+        self.vehicle_speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+        
+        # Also store CARLA-format location for map queries
         self.vehicle_location = carla.Location(
             x=pos.x,
             y=-pos.y,  # Y-axis inversion for CARLA
             z=pos.z
         )
-        
-        yaw_rad = quaternion_to_yaw(quat)
-        self.vehicle_transform = carla.Transform(
-            self.vehicle_location,
-            carla.Rotation(
-                pitch=0.0,
-                yaw=math.degrees(-yaw_rad),  # Yaw inversion for CARLA
-                roll=0.0
-            )
-        )
-        
-        # Speed in m/s
-        self.vehicle_speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
     
     def goal_callback(self, msg: PoseStamped):
         """Set navigation goal from PoseStamped."""
@@ -217,6 +245,8 @@ class PlanningNode(Node):
     
     def _set_destination(self, goal_location: carla.Location, description: str):
         """Set navigation destination and compute route."""
+        self._destination = goal_location  # Store for replanning
+        
         success = self.global_planner.set_destination(
             self.vehicle_location,
             goal_location
@@ -225,46 +255,45 @@ class PlanningNode(Node):
         if success:
             self.is_navigating = True
             self.destination_reached = False
-            self.behavior_state = BehaviorState.LANE_FOLLOWING
-            self.lane_change_waypoints = []
-            self.lane_change_index = 0
+            
+            # Initialize Motion Planner with reference path
+            route = self.global_planner.get_route()
+            if route:
+                # Convert to ROS coordinates for the motion planner
+                rx = [wp.transform.location.x for wp, _ in route]
+                ry = [-wp.transform.location.y for wp, _ in route]
+                self.motion_planner.set_reference_path(rx, ry)
+                self.get_logger().info('Motion planner initialized with reference path')
+
             self.get_logger().info(f'Route computed to {description}')
             self._publish_global_route()
         else:
             self.get_logger().error(f'Failed to compute route to {description}')
     
+
     def obstacles_callback(self, msg: MarkerArray):
         """Process detected obstacles from perception."""
+        self.current_obstacles = []
+        
         if not msg.markers:
-            self.current_obstacle = None
             return
         
-        # Find closest obstacle in front
-        closest_obstacle = None
-        closest_dist = float('inf')
-        
         for marker in msg.markers:
-            # Obstacle position in ego frame (from marker position)
             x = marker.pose.position.x
             y = marker.pose.position.y
             z = marker.pose.position.z
             
-            # Only consider obstacles ahead
-            if x > 0:
-                dist = math.sqrt(x**2 + y**2 + z**2)
-                if dist < closest_dist:
-                    closest_dist = dist
-                    closest_obstacle = type('Obstacle', (), {
-                        'x': x, 'y': y, 'z': z,
-                        'distance': dist
-                    })()
-        
-        self.current_obstacle = closest_obstacle
+            dist = math.sqrt(x**2 + y**2 + z**2)
+            
+            # Store all obstacles (motion planner will filter by relevance)
+            self.current_obstacles.append(
+                ObstacleInfo(x=x, y=y, distance=dist)
+            )
     
     # ==================== Planning Loop ====================
     
     def planning_loop(self):
-        """Main planning loop."""
+        """Main planning loop - delegates to MotionPlanner."""
         if self.vehicle_location is None:
             return
         
@@ -272,10 +301,9 @@ class PlanningNode(Node):
         self._publish_status()
         
         if not self.is_navigating:
-            # Publish empty trajectory when not navigating
             self._publish_empty_trajectory()
             return
-        
+
         # Check if destination reached
         if self.global_planner.is_destination_reached(self.vehicle_location, threshold=5.0):
             self.get_logger().info('Destination reached!')
@@ -284,88 +312,73 @@ class PlanningNode(Node):
             self._publish_empty_trajectory()
             return
         
-        # Update behavior based on obstacles
-        self._update_behavior()
+        # 1. Update motion planner with current vehicle state (ROS coords)
+        vehicle_state = VehicleState(
+            x=self.vehicle_x,
+            y=self.vehicle_y,
+            yaw=self.vehicle_yaw,
+            speed=self.vehicle_speed
+        )
+        self.motion_planner.update_vehicle_state(vehicle_state, dt=0.1)
         
-        # Emergency stop check
-        if self.behavior_state == BehaviorState.EMERGENCY_STOP:
-            self.get_logger().warn('Emergency stop triggered')
-            self._publish_empty_trajectory()
-            return
+        # 2. Update behavior planner with Frenet state from motion planner
+        s, d, d_dot = self.motion_planner.get_frenet_state()
+        self.behavior_planner.update_frenet_state(d, d_dot)
         
-        # Advance global planner
+        # 3. Get lane availability from CARLA map (only place we use CARLA)
+        lane_availability = LaneAvailability(
+            left=self._can_change_lane('left'),
+            right=self._can_change_lane('right')
+        )
+        
+        # 4. Update behavior state machine
+        prev_state = self.behavior_planner.behavior_state
+        behavior_output = self.behavior_planner.update(
+            obstacles=self.current_obstacles,
+            lane_availability=lane_availability,
+            speed=self.vehicle_speed,
+            dt=0.1
+        )
+        
+        # Log state transitions for debugging
+        if behavior_output.state != prev_state:
+            debug = self.behavior_planner.get_debug_info()
+            self.get_logger().info(
+                f'Behavior: {prev_state.name} -> {behavior_output.state.name} | '
+                f'lane={debug["current_lane"]} -> {debug["target_lane"]} '
+                f'd={debug["current_d"]:.2f} cooldown={debug["cooldown"]:.1f}s '
+                f'obstacles={len(self.current_obstacles)}'
+            )
+        
+        # Advance global planner for status tracking
         self.global_planner.advance(self.vehicle_location)
         
-        # Get waypoints based on behavior
-        waypoints = self._get_waypoints_for_control()
+        # 5. Generate trajectory (motion planner handles stop trajectory too)
+        target_speed_ms = self.target_speed / 3.6
+        if behavior_output.state in [BehaviorState.LANE_CHANGING_LEFT, BehaviorState.LANE_CHANGING_RIGHT]:
+            target_speed_ms *= self.lane_change_speed_factor
+            
+        trajectory = self.motion_planner.generate_trajectory(
+            behavior=behavior_output,
+            speed=self.vehicle_speed,
+            target_speed=target_speed_ms
+        )
         
-        if not waypoints:
-            self.get_logger().warn('No waypoints available')
+        if not trajectory:
+            self.get_logger().warn('No trajectory generated')
             self._publish_empty_trajectory()
             return
         
-        # Determine effective target speed
-        if self.behavior_state in [BehaviorState.LANE_CHANGING_LEFT, 
-                                   BehaviorState.LANE_CHANGING_RIGHT]:
-            effective_speed = self.target_speed * self.lane_change_speed_factor
-        else:
-            effective_speed = self.target_speed
-        
-        # Publish trajectory
-        self._publish_trajectory(waypoints, effective_speed)
-    
-    def _update_behavior(self):
-        """Update behavior state based on obstacles."""
-        if self.behavior_state == BehaviorState.LANE_FOLLOWING:
-            if self.current_obstacle:
-                dist = self.current_obstacle.distance
-                is_center = self.current_obstacle.x > 0 and abs(self.current_obstacle.y) < 2.0
-                
-                if is_center and dist < self.lane_change_trigger_distance:
-                    self.behavior_state = BehaviorState.PREPARING_LANE_CHANGE
-                    self.get_logger().info(f'Obstacle at {dist:.1f}m - preparing lane change')
-        
-        elif self.behavior_state == BehaviorState.PREPARING_LANE_CHANGE:
-            # Try to generate lane change waypoints
-            can_left = self._can_change_lane('left')
-            can_right = self._can_change_lane('right')
-            
-            if can_left:
-                self.lane_change_waypoints = self._generate_lane_change_waypoints('left')
-                if self.lane_change_waypoints:
-                    self.lane_change_index = 0
-                    self.behavior_state = BehaviorState.LANE_CHANGING_LEFT
-                    self.get_logger().info('Executing lane change left')
-                else:
-                    self.behavior_state = BehaviorState.EMERGENCY_STOP
-            elif can_right:
-                self.lane_change_waypoints = self._generate_lane_change_waypoints('right')
-                if self.lane_change_waypoints:
-                    self.lane_change_index = 0
-                    self.behavior_state = BehaviorState.LANE_CHANGING_RIGHT
-                    self.get_logger().info('Executing lane change right')
-                else:
-                    self.behavior_state = BehaviorState.EMERGENCY_STOP
-            else:
-                self.behavior_state = BehaviorState.EMERGENCY_STOP
-                self.get_logger().warn('No lane available - emergency stop')
-        
-        elif self.behavior_state in [BehaviorState.LANE_CHANGING_LEFT, 
-                                     BehaviorState.LANE_CHANGING_RIGHT]:
-            if self.lane_change_index >= len(self.lane_change_waypoints):
-                self.behavior_state = BehaviorState.LANE_FOLLOWING
-                self.lane_change_waypoints = []
-                self.lane_change_index = 0
-                self.get_logger().info('Lane change complete')
-            else:
-                # Check if we've reached current waypoint
-                target_wp = self.lane_change_waypoints[self.lane_change_index]
-                dist = self.vehicle_location.distance(target_wp.transform.location)
-                if dist < 2.5:
-                    self.lane_change_index += 1
+        # 5. Publish trajectory
+        self._publish_trajectory(trajectory)
     
     def _can_change_lane(self, direction):
-        """Check if lane change is possible."""
+        """
+        Check if lane change is possible using CARLA map.
+        
+        This is the ONLY place we query CARLA in the planning loop.
+        The result is passed to the MotionPlanner as data.
+        """
         current_wp = self.carla_map.get_waypoint(self.vehicle_location)
         if direction == 'left':
             target_wp = current_wp.get_left_lane()
@@ -373,103 +386,33 @@ class PlanningNode(Node):
             target_wp = current_wp.get_right_lane()
         return target_wp is not None and target_wp.lane_type == carla.LaneType.Driving
     
-    def _generate_lane_change_waypoints(self, direction):
-        """Generate waypoints for lane change."""
-        current_wp = self.carla_map.get_waypoint(self.vehicle_location)
-        waypoints = []
-        
-        # Approach phase
-        wp = current_wp
-        for _ in range(3):
-            next_wps = wp.next(self.waypoint_spacing)
-            if next_wps:
-                waypoints.append(next_wps[0])
-                wp = next_wps[0]
-        
-        # Transition to new lane
-        if direction == 'left':
-            transition_wp = wp.get_left_lane()
-        else:
-            transition_wp = wp.get_right_lane()
-        
-        if transition_wp:
-            waypoints.append(transition_wp)
-            wp = transition_wp
-            for _ in range(25):
-                next_wps = wp.next(self.waypoint_spacing)
-                if next_wps:
-                    waypoints.append(next_wps[0])
-                    wp = next_wps[0]
-        
-        return waypoints
-    
-    def _get_waypoints_for_control(self):
-        """Get waypoints for controller based on current behavior."""
-        if self.behavior_state in [BehaviorState.LANE_CHANGING_LEFT, 
-                                   BehaviorState.LANE_CHANGING_RIGHT]:
-            return self._get_lane_change_waypoints()
-        else:
-            return self._get_lookahead_waypoints()
-    
-    def _get_lookahead_waypoints(self):
-        """Get waypoints from global route."""
-        upcoming = self.global_planner.get_upcoming_waypoints(self.lookahead_waypoints)
-        if not upcoming:
-            return []
-        return [wp for wp, _ in upcoming]
-    
-    def _get_lane_change_waypoints(self):
-        """Get waypoints during lane change."""
-        if not self.lane_change_waypoints or self.lane_change_index >= len(self.lane_change_waypoints):
-            current_wp = self.carla_map.get_waypoint(self.vehicle_location)
-            return self._extend_waypoints_from(current_wp, self.lookahead_waypoints)
-        
-        remaining = self.lane_change_waypoints[self.lane_change_index:]
-        
-        if len(remaining) < self.lookahead_waypoints:
-            last_wp = self.lane_change_waypoints[-1]
-            additional = self._extend_waypoints_from(last_wp, self.lookahead_waypoints - len(remaining))
-            return remaining + additional
-        
-        return remaining[:self.lookahead_waypoints]
-    
-    def _extend_waypoints_from(self, start_wp, count):
-        """Extend waypoints from a starting waypoint."""
-        waypoints = []
-        wp = start_wp
-        for _ in range(count):
-            next_wps = wp.next(self.waypoint_spacing)
-            if next_wps:
-                waypoints.append(next_wps[0])
-                wp = next_wps[0]
-            else:
-                break
-        return waypoints
-    
     # ==================== Publishers ====================
     
-    def _publish_trajectory(self, waypoints, target_speed):
-        """Publish trajectory as nav_msgs/Path."""
+    def _publish_trajectory(self, trajectory):
+        """Publish trajectory from MotionPlanner output."""
         path_msg = Path()
         path_msg.header.frame_id = 'map'
         path_msg.header.stamp = self.get_clock().now().to_msg()
         
-        for wp in waypoints:
+        points = []
+        for point in trajectory:
             pose = PoseStamped()
             pose.header = path_msg.header
+            pose.pose.position.x = point.x
+            pose.pose.position.y = point.y
+            pose.pose.position.z = 0.0
             
-            # Convert CARLA coordinates to ROS
-            pose.pose.position.x = wp.transform.location.x
-            pose.pose.position.y = -wp.transform.location.y  # Y-axis inversion
-            pose.pose.position.z = wp.transform.location.z
+            # Calculate yaw from path tangent for smoother orientation
+            if len(points) > 0:
+                prev_x, prev_y = points[-1]
+                path_yaw = math.atan2(point.y - prev_y, point.x - prev_x)
+            else:
+                path_yaw = point.yaw
+                
+            pose.pose.orientation.z = math.sin(path_yaw / 2)
+            pose.pose.orientation.w = math.cos(path_yaw / 2)
             
-            # Convert yaw to quaternion
-            yaw = math.radians(-wp.transform.rotation.yaw)  # Yaw inversion
-            pose.pose.orientation.x = 0.0
-            pose.pose.orientation.y = 0.0
-            pose.pose.orientation.z = math.sin(yaw / 2)
-            pose.pose.orientation.w = math.cos(yaw / 2)
-            
+            points.append((point.x, point.y))
             path_msg.poses.append(pose)
         
         self.trajectory_pub.publish(path_msg)
@@ -503,15 +446,24 @@ class PlanningNode(Node):
     
     def _publish_status(self):
         """Publish planning status."""
+        s, d, d_dot = self.motion_planner.get_frenet_state()
+        behavior_debug = self.behavior_planner.get_debug_info()
+        
         status = {
             'initialized': self.initialized,
             'is_navigating': self.is_navigating,
             'destination_reached': self.destination_reached,
-            'behavior_state': self.behavior_state.name,
+            'behavior_state': behavior_debug['state'],
+            'current_lane': behavior_debug['current_lane'],
+            'target_lane': behavior_debug['target_lane'],
+            'frenet_s': round(s, 2),
+            'frenet_d': round(d, 2),
+            'target_d': behavior_debug['target_d'],
+            'cooldown': behavior_debug['cooldown'],
             'progress': self.global_planner.get_progress() if self.global_planner else 0.0,
             'remaining_distance': self.global_planner.get_remaining_distance() if self.global_planner else 0.0,
             'target_speed': self.target_speed,
-            'obstacle_detected': self.current_obstacle is not None
+            'obstacle_count': len(self.current_obstacles)
         }
         
         status_msg = String()
