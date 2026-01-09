@@ -29,8 +29,6 @@ import atexit
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import carla
-from config.config import CARLA
-
 
 # Global list to track spawned actors for cleanup
 _spawned_actors = []
