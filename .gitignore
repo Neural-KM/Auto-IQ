@@ -1,6 +1,14 @@
 # Model Weights
 *.pt
 
+#
+.vscode/
+
+# build artifacts
+install/
+build/
+log/
+
 # Ignore dataset folders
 data/
 # Byte-compiled / optimized / DLL files
