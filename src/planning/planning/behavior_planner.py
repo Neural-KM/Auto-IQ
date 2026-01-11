@@ -33,6 +33,8 @@ class ObstacleInfo:
     x: float  # Forward distance (+ ahead, - behind)
     y: float  # Lateral distance (+ left, - right)
     distance: float
+    vx: float = 0.0  # Relative longitudinal velocity (+ approaching, - receding)
+    vy: float = 0.0  # Relative lateral velocity
 
 
 @dataclass
@@ -47,7 +49,11 @@ class BehaviorPlannerConfig:
     """Configuration for behavior planner."""
     lane_width: float = 3.5
     lane_change_time: float = 3.0  # seconds to complete lane change
-    base_trigger_distance: float = 35.0  # meters
+    # TTC-based triggering (replaces pure distance)
+    ttc_threshold: float = 4.0  # seconds - trigger lane change if TTC < this
+    ttc_critical: float = 2.0  # seconds - immediate action required
+    min_trigger_distance: float = 10.0  # meters - always trigger if closer than this
+    max_trigger_distance: float = 60.0  # meters - ignore obstacles beyond this
     safety_buffer: float = 5.0  # meters
     lane_threshold: float = 2.0  # lateral threshold for "in lane"
     lane_change_complete_threshold: float = 0.3  # meters (tighter than before)
@@ -56,8 +62,9 @@ class BehaviorPlannerConfig:
     prepare_timeout: float = 2.0  # max seconds in PREPARING state
     lane_change_cooldown: float = 3.0  # seconds before next lane change
     # Adjacent lane check
-    adjacent_lane_check_distance: float = 20.0  # meters ahead/behind
-    adjacent_lane_check_behind: float = 8.0  # meters behind to check
+    adjacent_lane_check_distance: float = 20.0  # meters ahead
+    adjacent_lane_check_behind: float = 8.0  # meters behind
+    adjacent_lane_ttc_threshold: float = 3.0  # seconds - lane must be clear for this TTC
 
 
 @dataclass
@@ -115,13 +122,65 @@ class BehaviorPlanner:
         # This handles cases where we've drifted or completed a lane change
         self.current_lane = round(current_d / self.config.lane_width)
     
-    def compute_trigger_distance(self, speed: float) -> float:
-        """Compute dynamic trigger distance based on speed."""
-        maneuver_distance = speed * self.config.lane_change_time
-        return max(
-            self.config.base_trigger_distance,
-            maneuver_distance + self.config.safety_buffer
-        )
+    def compute_ttc(self, obstacle: ObstacleInfo, ego_speed: float) -> float:
+        """
+        Compute Time-to-Collision with an obstacle.
+        
+        Args:
+            obstacle: Obstacle info with position and velocity
+            ego_speed: Ego vehicle speed in m/s
+            
+        Returns:
+            TTC in seconds. Returns float('inf') if no collision expected.
+        """
+        if obstacle.x <= 0:
+            # Obstacle behind us
+            # For now we expect the car behind to not ram into us
+            return float('inf')
+        
+        # Closing velocity = ego_speed - obstacle_speed_in_ego_direction
+        # obstacle.vx is obstacle's velocity projected onto ego's forward axis
+        # If obstacle.vx > 0, obstacle is moving forward (away from us if ahead)
+        # If obstacle.vx < 0, obstacle is moving backward (toward us)
+        # 
+        # closing_velocity > 0 means we're catching up to the obstacle
+        closing_velocity = ego_speed - obstacle.vx
+        
+        # If obstacle velocity not provided (vx=0), assume stationary
+        # closing_velocity = ego_speed (we're approaching stationary object)
+        
+        if closing_velocity <= 0.1:
+            # Not closing or gap is opening
+            return float('inf')
+        
+        ttc = obstacle.x / closing_velocity
+        return max(0.0, ttc)
+    
+    def is_obstacle_threatening(
+        self, 
+        obstacle: ObstacleInfo, 
+        ego_speed: float
+    ) -> Tuple[bool, float]:
+        """
+        Determine if obstacle is a threat using TTC.
+        
+        Returns:
+            (is_threat, ttc) tuple
+        """
+        # Distance-based bounds first
+        if obstacle.x > self.config.max_trigger_distance:
+            return False, float('inf')
+        
+        ttc = self.compute_ttc(obstacle, ego_speed)
+        
+        # Critical distance - always a threat
+        if obstacle.x < self.config.min_trigger_distance:
+            return True, ttc
+        
+        # TTC-based threat assessment
+        is_threat = ttc < self.config.ttc_threshold
+        
+        return is_threat, ttc
     
     def update(
         self, 
@@ -142,19 +201,17 @@ class BehaviorPlanner:
         Returns:
             BehaviorOutput with decisions for motion planner
         """
-        trigger_distance = self.compute_trigger_distance(speed)
-        
         # Decrement cooldown
         if self._cooldown_remaining > 0:
             self._cooldown_remaining -= dt
         
         # State machine
         if self.behavior_state == BehaviorState.LANE_FOLLOWING:
-            self._handle_lane_following(obstacles, trigger_distance)
+            self._handle_lane_following(obstacles, speed)
             
         elif self.behavior_state == BehaviorState.PREPARING_LANE_CHANGE:
             self._handle_preparing_lane_change(
-                obstacles, lane_availability, trigger_distance, dt
+                obstacles, lane_availability, speed, dt
             )
             
         elif self.behavior_state in [
@@ -182,23 +239,28 @@ class BehaviorPlanner:
     def _handle_lane_following(
         self, 
         obstacles: List[ObstacleInfo], 
-        trigger_distance: float
+        ego_speed: float
     ):
-        """Handle LANE_FOLLOWING state."""
+        """Handle LANE_FOLLOWING state with TTC-based detection."""
         # Only consider lane change if cooldown expired
         if self._cooldown_remaining > 0:
             self._consecutive_block_count = 0
             return
         
-        # Check for blocking obstacle in our target lane
-        blocking = self._find_blocking_obstacle(obstacles, trigger_distance)
+        # Check for threatening obstacle in our target lane
+        blocking, ttc = self._find_blocking_obstacle(obstacles, ego_speed)
         
         if blocking:
             self._consecutive_block_count += 1
             self._consecutive_clear_count = 0
             
-            # Require a few consecutive detections to avoid noise
-            if self._consecutive_block_count >= 3:
+            # Critical TTC = immediate action
+            if ttc < self.config.ttc_critical:
+                self.behavior_state = BehaviorState.PREPARING_LANE_CHANGE
+                self._prepare_elapsed = 0.0
+                self._consecutive_block_count = 0
+            # Normal TTC threshold - require confirmation
+            elif self._consecutive_block_count >= 3:
                 self.behavior_state = BehaviorState.PREPARING_LANE_CHANGE
                 self._prepare_elapsed = 0.0
                 self._consecutive_block_count = 0
@@ -210,7 +272,7 @@ class BehaviorPlanner:
         self,
         obstacles: List[ObstacleInfo],
         lane_availability: LaneAvailability,
-        trigger_distance: float,
+        ego_speed: float,
         dt: float
     ):
         """Handle PREPARING_LANE_CHANGE state with timeout."""
@@ -223,7 +285,7 @@ class BehaviorPlanner:
             return
         
         # Re-check if obstacle still there
-        blocking = self._find_blocking_obstacle(obstacles, trigger_distance)
+        blocking, ttc = self._find_blocking_obstacle(obstacles, ego_speed)
         
         if not blocking:
             # Obstacle cleared - return to lane following with hysteresis
@@ -236,10 +298,9 @@ class BehaviorPlanner:
         
         self._consecutive_clear_count = 0
         
-        # Check which lane is available AND clear
-        # FIX: Account for current ego position when checking adjacent lanes
-        left_clear = self._is_adjacent_lane_clear(obstacles, 'left')
-        right_clear = self._is_adjacent_lane_clear(obstacles, 'right')
+        # Check which lane is available AND clear (using TTC for adjacent lanes too)
+        left_clear = self._is_adjacent_lane_clear(obstacles, 'left', ego_speed)
+        right_clear = self._is_adjacent_lane_clear(obstacles, 'right', ego_speed)
         
         if lane_availability.left and left_clear:
             self._start_lane_change('left')
@@ -288,42 +349,51 @@ class BehaviorPlanner:
     def _find_blocking_obstacle(
         self, 
         obstacles: List[ObstacleInfo], 
-        trigger_distance: float
-    ) -> Optional[ObstacleInfo]:
+        ego_speed: float
+    ) -> Tuple[Optional[ObstacleInfo], float]:
         """
-        Find obstacle blocking our target lane.
+        Find obstacle blocking our target lane using TTC.
         
-        Accounts for current position vs target lane.
+        Returns:
+            (obstacle, ttc) - obstacle if threatening, else (None, inf)
         """
         # Lateral offset from current position to target lane center
         lateral_to_target = self.target_d - self.current_d
         
+        most_threatening: Optional[ObstacleInfo] = None
+        min_ttc = float('inf')
+        
         for obs in obstacles:
             if obs.x <= 0:  # Behind us
                 continue
-            if obs.x > trigger_distance:
+            if obs.x > self.config.max_trigger_distance:
                 continue
             
             # Check if obstacle is in path to target lane
             obs_relative_to_target = abs(obs.y - lateral_to_target)
             
             if obs_relative_to_target < self.config.lane_threshold:
-                return obs
+                # Obstacle is in our lane - check TTC
+                is_threat, ttc = self.is_obstacle_threatening(obs, ego_speed)
+                
+                if is_threat and ttc < min_ttc:
+                    min_ttc = ttc
+                    most_threatening = obs
         
-        return None
+        return most_threatening, min_ttc
     
     def _is_adjacent_lane_clear(
         self, 
         obstacles: List[ObstacleInfo], 
-        direction: str
+        direction: str,
+        ego_speed: float
     ) -> bool:
         """
-        Check if adjacent lane is clear for merging.
+        Check if adjacent lane is clear for merging using TTC.
         
-        FIX: Accounts for current ego lateral position.
+        Accounts for current ego lateral position and closing velocity.
         """
         # Target lane center relative to EGO (not reference path)
-        # This is the key fix - we check relative to where WE are
         if direction == 'left':
             target_lane_y = self.config.lane_width  # Left of ego
         else:
@@ -340,7 +410,25 @@ class BehaviorPlanner:
             lateral_offset = abs(obs.y - target_lane_y)
             
             if lateral_offset < self.config.lane_threshold:
-                return False
+                # Obstacle in target lane - check TTC
+                if obs.x > 0:
+                    # Ahead of us - check forward TTC
+                    _, ttc = self.is_obstacle_threatening(obs, ego_speed)
+                    if ttc < self.config.adjacent_lane_ttc_threshold:
+                        return False
+                else:
+                    # Behind us - check if it's catching up
+                    # If obstacle is behind (x < 0) and faster than us, it will catch up
+                    # closing_vel = obstacle_speed - ego_speed (from their perspective)
+                    # If obs.vx > ego_speed, they're faster and will catch us
+                    closing_from_behind = obs.vx - ego_speed
+                    if closing_from_behind > 1.0:  # Approaching from behind
+                        rear_ttc = abs(obs.x) / closing_from_behind
+                        if rear_ttc < self.config.adjacent_lane_ttc_threshold:
+                            return False
+                    # If not closing fast, distance check is enough
+                    elif abs(obs.x) < self.config.adjacent_lane_check_behind:
+                        return False
         
         return True
     

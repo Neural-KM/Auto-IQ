@@ -17,7 +17,8 @@ import cv2
 from typing import List, Optional, Dict, Any
 
 from perception.core.object_detector import ObjectDetector
-from perception.data_classes.obstacle import Obstacle
+from autoiq_msgs.msg import Obstacle
+import math
 
 
 class Perception:
@@ -415,25 +416,26 @@ class Perception:
                 center_z = (min_z + max_z) / 2.0
                 yaw = 0.0
 
-            obstacle = Obstacle(
-                id=obstacle_id,
-                obstacle_type=class_name,
-                x=center_x,
-                y=center_y,
-                z=center_z,
-                vx=0.0,
-                vy=0.0,
-                vz=0.0,
-                length=est_length,
-                width=est_width,
-                height=est_height,
-                yaw=yaw,
-            )
+            obstacle = Obstacle()
+            obstacle.id = obstacle_id
+            obstacle.type = class_name
+            obstacle.pose.position.x = center_x
+            obstacle.pose.position.y = center_y
+            obstacle.pose.position.z = center_z
+            obstacle.pose.orientation.z = math.sin(yaw / 2)
+            obstacle.pose.orientation.w = math.cos(yaw / 2)
+            obstacle.velocity.x = 0.0
+            obstacle.velocity.y = 0.0
+            obstacle.velocity.z = 0.0
+            obstacle.size.x = est_length
+            obstacle.size.y = est_width
+            obstacle.size.z = est_height
+            obstacle.confidence = 1.0
             obstacles.append(obstacle)
             obstacle_id += 1
         
         # Sort by distance
-        obstacles.sort(key=lambda o: (o.x**2 + o.y**2 + o.z**2)**0.5)
+        obstacles.sort(key=lambda o: (o.pose.position.x**2 + o.pose.position.y**2 + o.pose.position.z**2)**0.5)
         
         return obstacles
     

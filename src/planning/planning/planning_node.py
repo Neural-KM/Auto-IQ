@@ -9,10 +9,10 @@ Connects directly to CARLA for map access, receives vehicle state via ROS2 topic
 Subscribes:
 - /carla/ego_vehicle/ground_truth/odometry (nav_msgs/Odometry) - Vehicle state
 - /planning/goal_pose (geometry_msgs/PoseStamped) - Navigation goal
-- /perception/obstacles (visualization_msgs/MarkerArray) - Detected obstacles
+- /perception/obstacles (autoiq_msgs/ObstacleArray) - Detected obstacles
 
 Publishes:
-- /planning/trajectory (nav_msgs/Path) - Planned trajectory for control
+- /planning/trajectory (autoiq_msgs/Trajectory) - Planned trajectory for control
 - /planning/global_route (nav_msgs/Path) - Full global route for visualization
 - /planning/status (std_msgs/String) - Planning status
 """
@@ -26,7 +26,8 @@ from rclpy.node import Node
 from nav_msgs.msg import Path, Odometry
 from geometry_msgs.msg import PoseStamped, Point
 from std_msgs.msg import String, Int32
-from visualization_msgs.msg import MarkerArray
+
+from autoiq_msgs.msg import ObstacleArray, Trajectory, TrajectoryPoint
 
 from typing import List
 
@@ -72,7 +73,7 @@ class PlanningNode(Node):
         self.declare_parameter('carla_timeout', 10.0)
         
         # Planning parameters
-        self.declare_parameter('target_speed', 30.0)  # km/h
+        self.declare_parameter('target_speed', 40.0)  # km/h
         self.declare_parameter('lookahead_distance', 15.0)
         self.declare_parameter('waypoint_spacing', 2.0)
         self.declare_parameter('lookahead_waypoints', 40)
@@ -118,13 +119,15 @@ class PlanningNode(Node):
             sampling_resolution=self.sampling_resolution
         )
         
-        # Initialize Behavior Planner (state machine)
+        # Initialize Behavior Planner (state machine with TTC-based detection)
         behavior_config = BehaviorPlannerConfig(
             lane_width=3.5,
             lane_change_time=self.lane_change_time,
-            base_trigger_distance=self.lane_change_trigger_distance,
-            safety_buffer=5.0,
-            prepare_timeout=2.0,  # Timeout for PREPARING state
+            ttc_threshold=4.0,  # Trigger if TTC < 4 seconds
+            ttc_critical=2.0,   # Immediate action if TTC < 2 seconds
+            min_trigger_distance=10.0,
+            max_trigger_distance=60.0,
+            prepare_timeout=2.0,
             lane_change_cooldown=3.0,
         )
         self.behavior_planner = BehaviorPlanner(config=behavior_config)
@@ -178,11 +181,11 @@ class PlanningNode(Node):
         self.get_logger().info(f'Subscribing to obstacles on: {obstacle_topic}')
         
         self.obstacles_sub = self.create_subscription(
-            MarkerArray, obstacle_topic,
+            ObstacleArray, obstacle_topic,
             self.obstacles_callback, 10)
         
         # ==================== Publishers ====================
-        self.trajectory_pub = self.create_publisher(Path, '/planning/trajectory', 10)
+        self.trajectory_pub = self.create_publisher(Trajectory, '/planning/trajectory', 10)
         self.global_route_pub = self.create_publisher(Path, '/planning/global_route', 10)
         self.status_pub = self.create_publisher(String, '/planning/status', 10)
         
@@ -270,24 +273,32 @@ class PlanningNode(Node):
         else:
             self.get_logger().error(f'Failed to compute route to {description}')
     
-
-    def obstacles_callback(self, msg: MarkerArray):
-        """Process detected obstacles from perception."""
+    def obstacles_callback(self, msg: ObstacleArray):
+        """
+        Process detected obstacles from perception.
+        
+        Uses the new ObstacleArray message with explicit velocity fields.
+        """
         self.current_obstacles = []
         
-        if not msg.markers:
+        if not msg.obstacles:
             return
         
-        for marker in msg.markers:
-            x = marker.pose.position.x
-            y = marker.pose.position.y
-            z = marker.pose.position.z
+        for obstacle in msg.obstacles:
+            # Position (in ego frame)
+            x = obstacle.pose.position.x
+            y = obstacle.pose.position.y
+            z = obstacle.pose.position.z
             
             dist = math.sqrt(x**2 + y**2 + z**2)
             
-            # Store all obstacles (motion planner will filter by relevance)
+            # Velocity (in ego frame)
+            vx = obstacle.velocity.x  # Longitudinal velocity
+            vy = obstacle.velocity.y  # Lateral velocity
+            
+            # Store obstacle with velocity info
             self.current_obstacles.append(
-                ObstacleInfo(x=x, y=y, distance=dist)
+                ObstacleInfo(x=x, y=y, distance=dist, vx=vx, vy=vy)
             )
     
     # ==================== Planning Loop ====================
@@ -389,40 +400,73 @@ class PlanningNode(Node):
     # ==================== Publishers ====================
     
     def _publish_trajectory(self, trajectory):
-        """Publish trajectory from MotionPlanner output."""
-        path_msg = Path()
-        path_msg.header.frame_id = 'map'
-        path_msg.header.stamp = self.get_clock().now().to_msg()
+        """Publish trajectory as Trajectory message."""
+        # Create Trajectory message for control
+        traj_msg = Trajectory()
+        traj_msg.header.frame_id = 'map'
+        traj_msg.header.stamp = self.get_clock().now().to_msg()
         
-        points = []
-        for point in trajectory:
-            pose = PoseStamped()
-            pose.header = path_msg.header
-            pose.pose.position.x = point.x
-            pose.pose.position.y = point.y
-            pose.pose.position.z = 0.0
-            
-            # Calculate yaw from path tangent for smoother orientation
-            if len(points) > 0:
-                prev_x, prev_y = points[-1]
-                path_yaw = math.atan2(point.y - prev_y, point.x - prev_x)
-            else:
-                path_yaw = point.yaw
-                
-            pose.pose.orientation.z = math.sin(path_yaw / 2)
-            pose.pose.orientation.w = math.cos(path_yaw / 2)
-            
-            points.append((point.x, point.y))
-            path_msg.poses.append(pose)
+        # Set behavior state
+        behavior_state = self.behavior_planner.behavior_state
+        if behavior_state == BehaviorState.LANE_FOLLOWING:
+            traj_msg.behavior_state = Trajectory.LANE_FOLLOWING
+        elif behavior_state == BehaviorState.PREPARING_LANE_CHANGE:
+            traj_msg.behavior_state = Trajectory.PREPARING_LANE_CHANGE
+        elif behavior_state in (BehaviorState.LANE_CHANGING_LEFT, BehaviorState.LANE_CHANGING_RIGHT):
+            traj_msg.behavior_state = Trajectory.LANE_CHANGING
+        elif behavior_state == BehaviorState.EMERGENCY_STOP:
+            traj_msg.behavior_state = Trajectory.EMERGENCY_STOP
+        else:
+            traj_msg.behavior_state = Trajectory.DESTINATION_REACHED
         
-        self.trajectory_pub.publish(path_msg)
+        traj_msg.target_lane = self.behavior_planner.target_lane
+        
+        prev_x, prev_y = None, None
+        time_from_start = 0.0
+        
+        for i, point in enumerate(trajectory):
+            # Calculate time from start based on distance and speed
+            if prev_x is not None and point.speed > 0.1:
+                dist = math.sqrt((point.x - prev_x)**2 + (point.y - prev_y)**2)
+                time_from_start += dist / point.speed
+            
+            # Calculate curvature from path tangent
+            curvature = 0.0
+            if i > 0 and i < len(trajectory) - 1:
+                p0 = trajectory[i-1]
+                p1 = trajectory[i]
+                p2 = trajectory[i+1]
+                dx1 = p1.x - p0.x
+                dy1 = p1.y - p0.y
+                dx2 = p2.x - p1.x
+                dy2 = p2.y - p1.y
+                cross = dx1 * dy2 - dy1 * dx2
+                dist1 = math.sqrt(dx1**2 + dy1**2)
+                dist2 = math.sqrt(dx2**2 + dy2**2)
+                if dist1 > 0 and dist2 > 0:
+                    curvature = 2 * cross / (dist1 * dist2 * (dist1 + dist2))
+            
+            # Create TrajectoryPoint
+            traj_point = TrajectoryPoint()
+            traj_point.x = float(point.x)
+            traj_point.y = float(point.y)
+            traj_point.yaw = float(point.yaw)
+            traj_point.speed = float(point.speed)
+            traj_point.curvature = float(curvature)
+            traj_point.time_from_start = float(time_from_start)
+            traj_msg.points.append(traj_point)
+            
+            prev_x, prev_y = point.x, point.y
+        
+        self.trajectory_pub.publish(traj_msg)
     
     def _publish_empty_trajectory(self):
         """Publish empty trajectory (stop signal)."""
-        path_msg = Path()
-        path_msg.header.frame_id = 'map'
-        path_msg.header.stamp = self.get_clock().now().to_msg()
-        self.trajectory_pub.publish(path_msg)
+        traj_msg = Trajectory()
+        traj_msg.header.frame_id = 'map'
+        traj_msg.header.stamp = self.get_clock().now().to_msg()
+        traj_msg.behavior_state = Trajectory.EMERGENCY_STOP
+        self.trajectory_pub.publish(traj_msg)
     
     def _publish_global_route(self):
         """Publish full global route for visualization."""

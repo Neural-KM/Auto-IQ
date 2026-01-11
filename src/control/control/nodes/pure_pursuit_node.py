@@ -7,7 +7,7 @@ ROS2 node for vehicle control using Pure Pursuit (lateral) + PID (longitudinal).
 Subscribes to trajectory and odometry, publishes vehicle control commands.
 
 Subscribes:
-- /planning/trajectory (nav_msgs/Path) - Planned trajectory from planning node
+- /planning/trajectory (autoiq_msgs/Trajectory) - Planned trajectory from planning node
 - /carla/ego_vehicle/ground_truth/odometry (nav_msgs/Odometry) - Vehicle state
 
 Publishes:
@@ -21,9 +21,9 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 
-from nav_msgs.msg import Path, Odometry
+from nav_msgs.msg import Odometry
 from std_msgs.msg import String
-from autoiq_msgs.msg import VehicleControl
+from autoiq_msgs.msg import VehicleControl, Trajectory
 
 from control.utils.pid_controller import PIDController
 
@@ -48,7 +48,6 @@ class PurePursuitNode(Node):
         super().__init__('pure_pursuit_node')
         
         # ==================== Parameters ====================
-        self.declare_parameter('target_speed', 30.0)  # km/h
         self.declare_parameter('max_steering_diff', 0.1)
         self.declare_parameter('control_rate', 20.0)  # Hz
         
@@ -67,7 +66,6 @@ class PurePursuitNode(Node):
         self.declare_parameter('lookahead_ratio', 0.5)
         
         # Get parameters
-        self.target_speed = self.get_parameter('target_speed').value
         self.max_steering_diff = self.get_parameter('max_steering_diff').value
         control_rate = self.get_parameter('control_rate').value
         
@@ -96,6 +94,7 @@ class PurePursuitNode(Node):
         
         self.current_waypoints = None
         self.has_trajectory = False
+        self.current_behavior_state = Trajectory.LANE_FOLLOWING
         
         self.previous_steering = 0.0
         
@@ -105,7 +104,7 @@ class PurePursuitNode(Node):
         
         # ==================== Subscribers ====================
         self.trajectory_sub = self.create_subscription(
-            Path, '/planning/trajectory',
+            Trajectory, '/planning/trajectory',
             self.trajectory_callback, 10)
         
         self.odom_sub = self.create_subscription(
@@ -127,24 +126,27 @@ class PurePursuitNode(Node):
         self.get_logger().info(f'Pure Pursuit Node initialized ({control_rate}Hz)')
         self.get_logger().info(f'  Wheelbase: {self.wheelbase}m')
         self.get_logger().info(f'  Lookahead: {self.min_lookahead}-{self.max_lookahead}m')
-        self.get_logger().info(f'  Target speed: {self.target_speed} km/h')
     
     # ==================== Callbacks ====================
     
-    def trajectory_callback(self, msg: Path):
+    def trajectory_callback(self, msg: Trajectory):
         """Receive trajectory from planning node."""
-        if not msg.poses:
+        if not msg.points:
             self.has_trajectory = False
             self.current_waypoints = None
             return
         
-        # Convert Path to list of (x, y) waypoints
+        # Store behavior state
+        self.current_behavior_state = msg.behavior_state
+        
+        # Convert Trajectory to list of (x, y, v) waypoints
         # Note: Convert back from ROS to CARLA coordinates
         waypoints = []
-        for pose in msg.poses:
-            x = pose.pose.position.x
-            y = -pose.pose.position.y  # Y-axis inversion
-            waypoints.append((x, y))
+        for point in msg.points:
+            x = point.x
+            y = -point.y  # Y-axis inversion for CARLA
+            v = point.speed  # Target speed in m/s
+            waypoints.append((x, y, v))
         
         self.current_waypoints = waypoints
         self.has_trajectory = True
@@ -263,7 +265,14 @@ class PurePursuitNode(Node):
     def _compute_throttle_brake(self):
         """Compute throttle/brake using PID speed control."""
         current_speed_kmh = self.vehicle_speed * 3.6
-        error = self.target_speed - current_speed_kmh
+        
+        # Get target speed from lookahead waypoint
+        target_speed_kmh = 0.0
+        if self._current_lookahead_point and len(self._current_lookahead_point) > 2:
+            target_speed_ms = self._current_lookahead_point[2]
+            target_speed_kmh = target_speed_ms * 3.6
+            
+        error = target_speed_kmh - current_speed_kmh
         
         accel = self.pid.step(error)
         
@@ -318,12 +327,17 @@ class PurePursuitNode(Node):
     
     def _publish_status(self):
         """Publish control status."""
+        # Get current target speed from lookahead point
+        current_target_speed = 0.0
+        if self._current_lookahead_point and len(self._current_lookahead_point) > 2:
+            current_target_speed = self._current_lookahead_point[2] * 3.6  # Convert to km/h
+        
         status = {
             'controller': 'pure_pursuit',
             'has_trajectory': self.has_trajectory,
             'num_waypoints': len(self.current_waypoints) if self.current_waypoints else 0,
             'vehicle_speed_kmh': self.vehicle_speed * 3.6 if self.vehicle_speed else 0.0,
-            'target_speed_kmh': self.target_speed,
+            'target_speed_kmh': current_target_speed,
             'lookahead_distance': self._current_lookahead_distance,
             'steering': self.previous_steering
         }

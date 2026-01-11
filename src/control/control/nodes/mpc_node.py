@@ -7,7 +7,7 @@ ROS2 node for vehicle control using Model Predictive Control (MPC).
 Subscribes to trajectory and odometry, publishes vehicle control commands.
 
 Subscribes:
-- /planning/trajectory (nav_msgs/Path) - Planned trajectory from planning node
+- /planning/trajectory (autoiq_msgs/Trajectory) - Planned trajectory from planning node
 - /carla/ego_vehicle/ground_truth/odometry (nav_msgs/Odometry) - Vehicle state
 
 Publishes:
@@ -26,7 +26,7 @@ from rclpy.node import Node
 from nav_msgs.msg import Path, Odometry
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
-from autoiq_msgs.msg import VehicleControl
+from autoiq_msgs.msg import VehicleControl, Trajectory
 
 from control.controllers.mpc_controller import MPCController
 
@@ -51,7 +51,6 @@ class MPCNode(Node):
         super().__init__('mpc_node')
         
         # ==================== Parameters ====================
-        self.declare_parameter('target_speed', 30.0)  # km/h
         self.declare_parameter('mpc_horizon', 20)
         self.declare_parameter('mpc_dt', 0.05)
         self.declare_parameter('trajectory_mode', 0)  # 0: heuristic, 1: trapezoidal
@@ -59,7 +58,6 @@ class MPCNode(Node):
         self.declare_parameter('control_rate', 20.0)  # Hz
         
         # Get parameters
-        self.target_speed = self.get_parameter('target_speed').value
         mpc_horizon = self.get_parameter('mpc_horizon').value
         mpc_dt = self.get_parameter('mpc_dt').value
         trajectory_mode = self.get_parameter('trajectory_mode').value
@@ -72,7 +70,6 @@ class MPCNode(Node):
         self.mpc = MPCController(
             dt=mpc_dt, 
             horizon=mpc_horizon, 
-            target_speed=self.target_speed,
             trajectory_mode=trajectory_mode
         )
         
@@ -83,7 +80,9 @@ class MPCNode(Node):
         self.vehicle_speed = 0.0
         
         self.current_waypoints = None
+        self.current_target_speeds = []
         self.has_trajectory = False
+        self.current_behavior_state = Trajectory.LANE_FOLLOWING
         
         self.previous_steering = 0.0
         
@@ -93,7 +92,7 @@ class MPCNode(Node):
         
         # ==================== Subscribers ====================
         self.trajectory_sub = self.create_subscription(
-            Path, '/planning/trajectory',
+            Trajectory, '/planning/trajectory',
             self.trajectory_callback, 10)
         
         self.odom_sub = self.create_subscription(
@@ -118,27 +117,32 @@ class MPCNode(Node):
         self.control_timer = self.create_timer(control_period, self.control_loop)
         
         self.get_logger().info(f'MPC Node initialized ({control_rate}Hz)')
-        self.get_logger().info(f'  Target speed: {self.target_speed} km/h')
         self.get_logger().info(f'  Horizon: {mpc_horizon} steps, dt: {mpc_dt}s')
     
     # ==================== Callbacks ====================
     
-    def trajectory_callback(self, msg: Path):
+    def trajectory_callback(self, msg: Trajectory):
         """Receive trajectory from planning node."""
-        if not msg.poses:
+        if not msg.points:
             self.has_trajectory = False
             self.current_waypoints = None
             return
         
-        # Convert Path to list of (x, y) waypoints
+        # Store behavior state
+        self.current_behavior_state = msg.behavior_state
+        
+        # Convert Trajectory to list of (x, y) waypoints for MPC
         # Note: Convert back from ROS to CARLA coordinates
         waypoints = []
-        for pose in msg.poses:
-            x = pose.pose.position.x
-            y = -pose.pose.position.y  # Y-axis inversion
+        speeds = []
+        for point in msg.points:
+            x = point.x
+            y = -point.y  # Y-axis inversion for CARLA
             waypoints.append((x, y))
+            speeds.append(point.speed)
         
         self.current_waypoints = waypoints
+        self.current_target_speeds = speeds
         self.has_trajectory = True
         
         # Update MPC waypoints
@@ -201,8 +205,10 @@ class MPCNode(Node):
             self.vehicle_speed
         ])
         
-        # Convert target speed to m/s
-        target_speed_ms = self.target_speed / 3.6
+        # Get target speed from trajectory (use first waypoint's speed as reference)
+        target_speed_ms = 0.0
+        if self.current_target_speeds:
+            target_speed_ms = self.current_target_speeds[0]
         
         # Solve MPC optimization
         optimal_control = self.mpc.solve(current_state, target_speed_ms)
@@ -274,12 +280,17 @@ class MPCNode(Node):
     
     def _publish_status(self):
         """Publish control status."""
+        # Get current target speed from trajectory
+        current_target_speed_kmh = 0.0
+        if self.current_target_speeds:
+            current_target_speed_kmh = self.current_target_speeds[0] * 3.6  # Convert to km/h
+            
         status = {
             'controller': 'mpc',
             'has_trajectory': self.has_trajectory,
             'num_waypoints': len(self.current_waypoints) if self.current_waypoints else 0,
             'vehicle_speed_kmh': self.vehicle_speed * 3.6 if self.vehicle_speed else 0.0,
-            'target_speed_kmh': self.target_speed,
+            'target_speed_kmh': current_target_speed_kmh,
             'solve_time_ms': self._last_solve_time_ms,
             'steering': self.previous_steering
         }
