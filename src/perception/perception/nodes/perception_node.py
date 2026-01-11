@@ -22,7 +22,6 @@ Note: Lane detection publishes MarkerArray directly because lane polynomial fits
 require coordinate transformation that's tightly coupled to the detection logic.
 """
 
-import math
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -32,10 +31,10 @@ import struct
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
-from geometry_msgs.msg import Point, Vector3, Pose, Quaternion
+from geometry_msgs.msg import Point
 from builtin_interfaces.msg import Time
 
-from autoiq_msgs.msg import Obstacle, ObstacleArray
+from autoiq_msgs.msg import ObstacleArray
 
 import tf2_ros
 from tf2_ros import TransformException

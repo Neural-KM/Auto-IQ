@@ -12,7 +12,6 @@ Responsibilities:
 - Manage lane indices (not raw offsets)
 """
 
-import numpy as np
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from enum import Enum, auto

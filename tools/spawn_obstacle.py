@@ -58,7 +58,7 @@ import math
 import signal
 import atexit
 import yaml
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -82,7 +82,8 @@ def cleanup_actors():
             if actor:
                 actor.destroy()
                 print(f"Cleaned up actor {actor_id}")
-        except Exception:
+        except Exception as e:
+            print(f"Failed to clean up actor {actor_id}. Error: {e}")
             pass
     _spawned_actors.clear()
 
@@ -420,7 +421,8 @@ class ObstacleSpawner:
                 # Stationary - apply handbrake
                 try:
                     actor.apply_control(carla.VehicleControl(hand_brake=True))
-                except Exception:
+                except Exception as e:
+                    print(f"Warning: Could not apply handbrake to vehicle: {e}")
                     pass
         
         elif 'walker' in actor_type:
