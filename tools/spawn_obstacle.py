@@ -3,18 +3,51 @@
 Obstacle Spawner Tool
 =====================
 
-Spawns vehicles or static obstacles in CARLA for testing obstacle detection.
-Obstacles are automatically removed when the script exits (unless --persist).
+Spawns actors (vehicles, pedestrians, props) in CARLA for testing.
+Supports both absolute world coordinates and relative-to-ego positions.
 
-Usage:
-    python tools/spawn_obstacle.py                    # Spawn vehicle 20m ahead
-    python tools/spawn_obstacle.py --distance 30     # Spawn 30m ahead
-    python tools/spawn_obstacle.py --type pedestrian # Spawn pedestrian
-    python tools/spawn_obstacle.py --type cone       # Spawn traffic cone
-    python tools/spawn_obstacle.py --lane left       # Spawn in left lane
-    python tools/spawn_obstacle.py --persist         # Keep obstacle after script exits
-    python tools/spawn_obstacle.py --distance 20 --type car --yaw 45    # Spawn a car slanted 45 degrees
-    python tools/spawn_obstacle.py --distance 20 --type car --yaw -30 0 30  # Spawn three cars at -30°, 0°, +30°
+Usage Examples:
+    # Single obstacle 20m ahead of ego, stationary
+    python tools/spawn_obstacle.py --obstacles "vehicle:rel:20,0,0"
+    
+    # Multiple obstacles with different configs
+    python tools/spawn_obstacle.py --obstacles \
+        "vehicle:rel:20,0,0:autopilot" \
+        "vehicle:rel:30,3.5,0" \
+        "pedestrian:rel:25,-2,0"
+    
+    # Absolute world coordinates
+    python tools/spawn_obstacle.py --obstacles "vehicle:abs:100,50,0.5"
+    
+    # Using a config file
+    python tools/spawn_obstacle.py --config obstacles.yaml
+    
+Obstacle Format:
+    type:coord_mode:x,y,z[:options]
+    
+    type: vehicle, car, truck, motorcycle, pedestrian, cone, barrier, 
+          or any CARLA blueprint filter (e.g., vehicle.tesla.model3)
+    
+    coord_mode:
+        rel - Relative to ego (x=forward, y=left, z=up)
+        abs - Absolute world coordinates
+        lane - Lane-relative (x=distance ahead, y=lane offset as integer: -1=right, 0=center, +1=left)
+    
+    x,y,z: Position coordinates
+    
+    options (optional, colon-separated):
+        autopilot - Enable autopilot (vehicles only)
+        yaw=N - Yaw offset in degrees
+        speed=N - Initial speed in m/s (requires autopilot or physics)
+        color=R,G,B - Vehicle color (0-255 each)
+
+Examples:
+    vehicle:rel:20,0,0                    # Stationary car 20m ahead
+    vehicle:rel:30,3.5,0:autopilot        # Autopilot car 30m ahead, left lane
+    vehicle:lane:25,1,0:autopilot         # Autopilot car 25m ahead in left lane
+    pedestrian:rel:15,-2,0                # Pedestrian 15m ahead, 2m right
+    cone:rel:10,0,0                       # Traffic cone 10m ahead
+    vehicle.tesla.model3:rel:20,0,0       # Specific vehicle blueprint
 """
 
 import argparse
@@ -24,17 +57,17 @@ import time
 import math
 import signal
 import atexit
+import yaml
+from dataclasses import dataclass
+from typing import List, Optional, Dict, Any
 
-# Add parent directory to path (since we're in tools/)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import carla
-from config.config import CARLA
 
-
-# Global list to track spawned actors for cleanup
-_spawned_actors = []
-_world = None
+# Global tracking for cleanup
+_spawned_actors: List[int] = []
+_world: Optional[carla.World] = None
 
 
 def cleanup_actors():
@@ -50,6 +83,7 @@ def cleanup_actors():
                 actor.destroy()
                 print(f"Cleaned up actor {actor_id}")
         except Exception as e:
+            print(f"Failed to clean up actor {actor_id}. Error: {e}")
             pass
     _spawned_actors.clear()
 
@@ -59,6 +93,92 @@ def signal_handler(sig, frame):
     print("\nCleaning up obstacles...")
     cleanup_actors()
     sys.exit(0)
+
+
+@dataclass
+class ObstacleSpec:
+    """Specification for a single obstacle to spawn."""
+    actor_type: str  # vehicle, pedestrian, cone, or blueprint filter
+    coord_mode: str  # 'rel', 'abs', or 'lane'
+    x: float
+    y: float
+    z: float = 0.0
+    autopilot: bool = False
+    yaw_offset: float = 0.0
+    speed: float = 0.0
+    color: Optional[tuple] = None
+    
+    @classmethod
+    def from_string(cls, spec_str: str) -> 'ObstacleSpec':
+        """
+        Parse obstacle spec from string format.
+        
+        Format: type:coord_mode:x,y,z[:options]
+        Options: autopilot, yaw=N, speed=N, color=R,G,B
+        """
+        parts = spec_str.strip().split(':')
+        
+        if len(parts) < 3:
+            raise ValueError(f"Invalid obstacle spec: {spec_str}. "
+                           f"Expected format: type:coord_mode:x,y,z[:options]")
+        
+        actor_type = parts[0].lower()
+        coord_mode = parts[1].lower()
+        
+        if coord_mode not in ['rel', 'abs', 'lane']:
+            raise ValueError(f"Invalid coord_mode: {coord_mode}. Must be 'rel', 'abs', or 'lane'")
+        
+        # Parse coordinates
+        coords = parts[2].split(',')
+        if len(coords) < 2:
+            raise ValueError(f"Invalid coordinates: {parts[2]}. Expected x,y or x,y,z")
+        
+        x = float(coords[0])
+        y = float(coords[1])
+        z = float(coords[2]) if len(coords) > 2 else 0.0
+        
+        # Parse options
+        autopilot = False
+        yaw_offset = 0.0
+        speed = 0.0
+        color = None
+        
+        for opt in parts[3:]:
+            opt = opt.strip().lower()
+            if opt == 'autopilot':
+                autopilot = True
+            elif opt.startswith('yaw='):
+                yaw_offset = float(opt.split('=')[1])
+            elif opt.startswith('speed='):
+                speed = float(opt.split('=')[1])
+            elif opt.startswith('color='):
+                rgb = opt.split('=')[1].split(',')
+                color = (int(rgb[0]), int(rgb[1]), int(rgb[2]))
+        
+        return cls(
+            actor_type=actor_type,
+            coord_mode=coord_mode,
+            x=x, y=y, z=z,
+            autopilot=autopilot,
+            yaw_offset=yaw_offset,
+            speed=speed,
+            color=color
+        )
+    
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> 'ObstacleSpec':
+        """Parse obstacle spec from dictionary (YAML config)."""
+        return cls(
+            actor_type=d.get('type', 'vehicle'),
+            coord_mode=d.get('coord_mode', 'rel'),
+            x=float(d.get('x', 20)),
+            y=float(d.get('y', 0)),
+            z=float(d.get('z', 0)),
+            autopilot=d.get('autopilot', False),
+            yaw_offset=float(d.get('yaw', 0)),
+            speed=float(d.get('speed', 0)),
+            color=tuple(d['color']) if 'color' in d else None
+        )
 
 
 class ObstacleSpawner:
@@ -73,349 +193,397 @@ class ObstacleSpawner:
         _world = self.world
         self.blueprint_library = self.world.get_blueprint_library()
         self.map = self.world.get_map()
+        self.ego_vehicle = None
         
-    def get_ego_vehicle(self):
+    def get_ego_vehicle(self) -> Optional[carla.Actor]:
         """Find the ego vehicle."""
+        if self.ego_vehicle is not None:
+            return self.ego_vehicle
+            
         vehicles = self.world.get_actors().filter('vehicle.*')
-        for vehicle in vehicles:
-            if 'tesla' in vehicle.type_id.lower():
-                return vehicle
-        # If no Tesla, return any vehicle with 'hero' role or first vehicle
+        
+        # First look for 'hero' role
         for vehicle in vehicles:
             if vehicle.attributes.get('role_name') == 'hero':
+                self.ego_vehicle = vehicle
                 return vehicle
+        
+        # Fallback to Tesla or first vehicle
+        for vehicle in vehicles:
+            if 'tesla' in vehicle.type_id.lower():
+                self.ego_vehicle = vehicle
+                return vehicle
+        
         if len(vehicles) > 0:
-            return vehicles[0]
+            self.ego_vehicle = vehicles[0]
+            return self.ego_vehicle
+            
         return None
     
-    def get_spawn_transform(self, ego_vehicle, distance=20.0, lane_offset='center'):
+    def compute_spawn_transform(self, spec: ObstacleSpec) -> Optional[carla.Transform]:
         """
-        Calculate spawn location ahead of ego vehicle using waypoints.
+        Compute world transform from obstacle specification.
         
-        This follows the road ahead rather than just using forward vector,
-        so it works correctly on curves.
-        
-        Args:
-            ego_vehicle: The reference vehicle
-            distance: Distance ahead in meters
-            lane_offset: 'left', 'right', or 'center'
+        Relative coordinates (rel):
+            x = forward distance from ego
+            y = left distance from ego (positive = left, negative = right)
+            z = height offset
             
-        Returns:
-            carla.Transform for spawning
+        Lane coordinates (lane):
+            x = forward distance along road
+            y = lane offset as integer (-1 = right lane, 0 = current, +1 = left lane)
+            z = ignored (uses road height)
+            
+        Absolute coordinates (abs):
+            x, y, z = world coordinates
         """
-        ego_location = ego_vehicle.get_location()
+        if spec.coord_mode == 'abs':
+            # Absolute world coordinates
+            return carla.Transform(
+                carla.Location(x=spec.x, y=spec.y, z=spec.z + 0.5),
+                carla.Rotation(yaw=spec.yaw_offset)
+            )
         
-        # Get current waypoint
-        current_wp = self.map.get_waypoint(ego_location)
-        if current_wp is None:
-            print("Warning: Could not get waypoint for ego vehicle")
-            return self._fallback_transform(ego_vehicle, distance, lane_offset)
+        ego = self.get_ego_vehicle()
+        if ego is None:
+            print("ERROR: No ego vehicle found for relative spawn")
+            return None
         
-        # Follow waypoints ahead for the specified distance
-        waypoints = current_wp.next(distance)
-        
-        if not waypoints:
-            print("Warning: Could not find waypoints ahead")
-            return self._fallback_transform(ego_vehicle, distance, lane_offset)
-        
-        # Use the first waypoint (straight ahead)
-        target_wp = waypoints[0]
-        
-        # Apply lane offset if needed
-        if lane_offset == 'left':
-            left_wp = target_wp.get_left_lane()
-            if left_wp and left_wp.lane_type == carla.LaneType.Driving:
-                target_wp = left_wp
-            else:
-                print("Warning: No left lane available, using center")
-        elif lane_offset == 'right':
-            right_wp = target_wp.get_right_lane()
-            if right_wp and right_wp.lane_type == carla.LaneType.Driving:
-                target_wp = right_wp
-            else:
-                print("Warning: No right lane available, using center")
-        
-        spawn_transform = target_wp.transform
-        spawn_transform.location.z += 0.5  # Lift slightly above ground
-        
-        return spawn_transform
-    
-    def _fallback_transform(self, ego_vehicle, distance, lane_offset):
-        """Fallback spawn calculation using simple forward vector."""
-        ego_transform = ego_vehicle.get_transform()
+        ego_transform = ego.get_transform()
         ego_location = ego_transform.location
-        ego_rotation = ego_transform.rotation
+        ego_yaw = ego_transform.rotation.yaw
+        yaw_rad = math.radians(ego_yaw)
         
-        yaw_rad = math.radians(ego_rotation.yaw)
-        forward_x = math.cos(yaw_rad)
-        forward_y = math.sin(yaw_rad)
-        
-        spawn_x = ego_location.x + forward_x * distance
-        spawn_y = ego_location.y + forward_y * distance
-        spawn_z = ego_location.z + 0.5
-        
-        if lane_offset == 'left':
-            spawn_x -= forward_y * 3.5
-            spawn_y += forward_x * 3.5
-        elif lane_offset == 'right':
-            spawn_x += forward_y * 3.5
-            spawn_y -= forward_x * 3.5
-        
-        return carla.Transform(
-            carla.Location(x=spawn_x, y=spawn_y, z=spawn_z),
-            carla.Rotation(yaw=ego_rotation.yaw)
-        )
-    
-    def spawn_vehicle(self, transform, vehicle_type='random'):
-        """
-        Spawn a vehicle obstacle.
-        
-        Args:
-            transform: Where to spawn
-            vehicle_type: 'random', 'car', 'truck', 'motorcycle', or specific blueprint
+        if spec.coord_mode == 'rel':
+            # Relative to ego: x=forward, y=left (ROS convention)
+            # Transform to CARLA world coordinates
+            # Forward vector
+            forward_x = math.cos(yaw_rad)
+            forward_y = math.sin(yaw_rad)
+            # Left vector (perpendicular)
+            left_x = -math.sin(yaw_rad)
+            left_y = math.cos(yaw_rad)
             
-        Returns:
-            Spawned actor or None
-        """
-        import random
+            # Compute world position
+            world_x = ego_location.x + spec.x * forward_x + spec.y * left_x
+            world_y = ego_location.y + spec.x * forward_y + spec.y * left_y
+            world_z = ego_location.z + spec.z + 0.5
+            
+            spawn_yaw = ego_yaw + spec.yaw_offset
+            
+            return carla.Transform(
+                carla.Location(x=world_x, y=world_y, z=world_z),
+                carla.Rotation(yaw=spawn_yaw)
+            )
         
-        if vehicle_type == 'random':
-            blueprints = list(self.blueprint_library.filter('vehicle.*'))
-            blueprints = [bp for bp in blueprints if 'bike' not in bp.id and 'motorcycle' not in bp.id]
-        elif vehicle_type == 'car':
-            blueprints = list(self.blueprint_library.filter('vehicle.audi.*')) + \
-                        list(self.blueprint_library.filter('vehicle.bmw.*')) + \
-                        list(self.blueprint_library.filter('vehicle.dodge.*')) + \
-                        list(self.blueprint_library.filter('vehicle.mercedes.*'))
-        elif vehicle_type == 'truck':
-            blueprints = list(self.blueprint_library.filter('vehicle.carlamotors.*'))
-        elif vehicle_type == 'motorcycle':
-            blueprints = list(self.blueprint_library.filter('vehicle.harley*')) + \
-                        list(self.blueprint_library.filter('vehicle.kawasaki*')) + \
-                        list(self.blueprint_library.filter('vehicle.yamaha*'))
-        else:
-            blueprints = list(self.blueprint_library.filter(vehicle_type))
+        elif spec.coord_mode == 'lane':
+            # Lane-relative: use waypoints
+            current_wp = self.map.get_waypoint(ego_location)
+            if current_wp is None:
+                print("Warning: Could not get waypoint, falling back to relative")
+                spec.coord_mode = 'rel'
+                return self.compute_spawn_transform(spec)
+            
+            # Get waypoint at specified distance ahead
+            waypoints = current_wp.next(spec.x)
+            if not waypoints:
+                print("Warning: No waypoints ahead, falling back to relative")
+                spec.coord_mode = 'rel'
+                return self.compute_spawn_transform(spec)
+            
+            target_wp = waypoints[0]
+            
+            # Apply lane offset (y = lane index)
+            lane_offset = int(spec.y)
+            for _ in range(abs(lane_offset)):
+                if lane_offset > 0:  # Left
+                    new_wp = target_wp.get_left_lane()
+                else:  # Right
+                    new_wp = target_wp.get_right_lane()
+                
+                if new_wp and new_wp.lane_type == carla.LaneType.Driving:
+                    target_wp = new_wp
+                else:
+                    print(f"Warning: Lane offset {lane_offset} not fully available")
+                    break
+            
+            spawn_transform = target_wp.transform
+            spawn_transform.location.z += 0.5
+            spawn_transform.rotation.yaw += spec.yaw_offset
+            
+            return spawn_transform
         
-        if not blueprints:
-            # Fallback to any vehicle
-            blueprints = list(self.blueprint_library.filter('vehicle.*'))
-            blueprints = [bp for bp in blueprints if 'bike' not in bp.id]
-        
-        if not blueprints:
-            print(f"No blueprints found for vehicle type: {vehicle_type}")
-            return None
-        
-        blueprint = random.choice(blueprints)
-        
-        if blueprint.has_attribute('color'):
-            colors = blueprint.get_attribute('color').recommended_values
-            blueprint.set_attribute('color', random.choice(colors))
-        
-        # Try spawning with slight adjustments if needed
-        for z_offset in [0, 0.5, 1.0]:
-            try:
-                spawn_transform = carla.Transform(
-                    carla.Location(
-                        x=transform.location.x,
-                        y=transform.location.y,
-                        z=transform.location.z + z_offset
-                    ),
-                    transform.rotation
-                )
-                actor = self.world.spawn_actor(blueprint, spawn_transform)
-                _spawned_actors.append(actor.id)
-                print(f"Spawned vehicle: {blueprint.id}")
-                return actor
-            except Exception as e:
-                continue
-        
-        print(f"Failed to spawn vehicle at location")
         return None
     
-    def spawn_pedestrian(self, transform):
-        """Spawn a pedestrian obstacle."""
+    def get_blueprint(self, actor_type: str) -> Optional[carla.ActorBlueprint]:
+        """Get appropriate blueprint for actor type."""
         import random
         
-        blueprints = list(self.blueprint_library.filter('walker.pedestrian.*'))
-        if not blueprints:
-            print("No pedestrian blueprints found")
-            return None
-        
-        blueprint = random.choice(blueprints)
-        
-        # Try multiple positions
-        for z_offset in [0.5, 1.0, 1.5]:
-            try:
-                spawn_transform = carla.Transform(
-                    carla.Location(
-                        x=transform.location.x,
-                        y=transform.location.y,
-                        z=transform.location.z + z_offset
-                    ),
-                    transform.rotation
-                )
-                actor = self.world.spawn_actor(blueprint, spawn_transform)
-                _spawned_actors.append(actor.id)
-                print(f"Spawned pedestrian: {blueprint.id}")
-                return actor
-            except:
-                continue
-        
-        print("Failed to spawn pedestrian")
-        return None
-    
-    def spawn_static_prop(self, transform, prop_type='cone'):
-        """Spawn a static prop obstacle."""
-        import random
-        
-        prop_filters = {
+        # Handle common aliases
+        type_mappings = {
+            'vehicle': 'vehicle.*',
+            'car': 'vehicle.audi.*',
+            'truck': 'vehicle.carlamotors.*',
+            'motorcycle': 'vehicle.harley*',
+            'pedestrian': 'walker.pedestrian.*',
             'cone': 'static.prop.constructioncone',
             'barrier': 'static.prop.streetbarrier',
             'box': 'static.prop.box*',
-            'trash': 'static.prop.trashbag',
         }
         
-        filter_str = prop_filters.get(prop_type, prop_type)
+        filter_str = type_mappings.get(actor_type, actor_type)
         blueprints = list(self.blueprint_library.filter(filter_str))
         
+        # For generic 'vehicle', exclude bikes for stability
+        if actor_type == 'vehicle':
+            blueprints = [bp for bp in blueprints 
+                         if 'bike' not in bp.id and 'motorcycle' not in bp.id]
+        
         if not blueprints:
-            print(f"Prop type '{prop_type}' not found")
+            print(f"No blueprints found for: {actor_type}")
             return None
         
-        blueprint = random.choice(blueprints)
-        transform.location.z = 0.1
-        
-        try:
-            actor = self.world.spawn_actor(blueprint, transform)
-            _spawned_actors.append(actor.id)
-            print(f"Spawned prop: {blueprint.id}")
-            return actor
-        except Exception as e:
-            print(f"Failed to spawn prop: {e}")
-            return None
+        return random.choice(blueprints)
     
-    def spawn_multiple_cones(self, ego_vehicle, start_distance=15, count=5, spacing=3):
-        """Spawn a line of traffic cones ahead."""
-        print(f"Spawning {count} cones starting at {start_distance}m...")
+    def spawn_actor(self, spec: ObstacleSpec) -> Optional[carla.Actor]:
+        """
+        Spawn an actor based on specification.
         
-        for i in range(count):
-            distance = start_distance + i * spacing
-            transform = self.get_spawn_transform(ego_vehicle, distance, 'center')
-            self.spawn_static_prop(transform, 'cone')
-            time.sleep(0.1)
+        Returns spawned actor or None on failure.
+        """
+        import random
+        
+        transform = self.compute_spawn_transform(spec)
+        if transform is None:
+            return None
+        
+        blueprint = self.get_blueprint(spec.actor_type)
+        if blueprint is None:
+            return None
+        
+        # Apply color if specified
+        if spec.color and blueprint.has_attribute('color'):
+            r, g, b = spec.color
+            blueprint.set_attribute('color', f'{r},{g},{b}')
+        elif blueprint.has_attribute('color'):
+            colors = blueprint.get_attribute('color').recommended_values
+            blueprint.set_attribute('color', random.choice(colors))
+        
+        # Try spawning with height adjustments
+        for z_offset in [0, 0.5, 1.0, 1.5]:
+            try:
+                spawn_transform = carla.Transform(
+                    carla.Location(
+                        x=transform.location.x,
+                        y=transform.location.y,
+                        z=transform.location.z + z_offset
+                    ),
+                    transform.rotation
+                )
+                actor = self.world.spawn_actor(blueprint, spawn_transform)
+                _spawned_actors.append(actor.id)
+                
+                # Configure actor behavior
+                self._configure_actor(actor, spec)
+                
+                print(f"Spawned {spec.actor_type}: {blueprint.id} at "
+                      f"({spawn_transform.location.x:.1f}, {spawn_transform.location.y:.1f})"
+                      f"{' [autopilot]' if spec.autopilot else ' [stationary]'}")
+                return actor
+                
+            except Exception as e:
+                continue
+        
+        print(f"Failed to spawn {spec.actor_type}")
+        return None
+    
+    def _configure_actor(self, actor: carla.Actor, spec: ObstacleSpec):
+        """Configure actor after spawning (autopilot, speed, etc.)."""
+        actor_type = actor.type_id
+        
+        if 'vehicle' in actor_type:
+            if spec.autopilot:
+                # Enable autopilot
+                actor.set_autopilot(True)
+                
+                # Set initial speed if specified
+                if spec.speed > 0:
+                    # Get forward vector
+                    transform = actor.get_transform()
+                    yaw_rad = math.radians(transform.rotation.yaw)
+                    velocity = carla.Vector3D(
+                        x=spec.speed * math.cos(yaw_rad),
+                        y=spec.speed * math.sin(yaw_rad),
+                        z=0
+                    )
+                    actor.set_target_velocity(velocity)
+            else:
+                # Stationary - apply handbrake
+                try:
+                    actor.apply_control(carla.VehicleControl(hand_brake=True))
+                except Exception as e:
+                    print(f"Warning: Could not apply handbrake to vehicle: {e}")
+                    pass
+        
+        elif 'walker' in actor_type:
+            if spec.autopilot or spec.speed > 0:
+                # For pedestrians with autopilot, spawn AI controller
+                try:
+                    walker_bp = self.blueprint_library.find('controller.ai.walker')
+                    controller = self.world.spawn_actor(walker_bp, carla.Transform(), actor)
+                    _spawned_actors.append(controller.id)
+                    controller.start()
+                    controller.set_max_speed(spec.speed if spec.speed > 0 else 1.4)
+                    # Walk to a point ahead
+                    controller.go_to_location(
+                        self.world.get_random_location_from_navigation()
+                    )
+                except Exception as e:
+                    print(f"Warning: Could not spawn pedestrian controller: {e}")
+
+
+def load_config(config_path: str) -> List[ObstacleSpec]:
+    """Load obstacle specifications from YAML config file."""
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    
+    obstacles = []
+    for obs_dict in config.get('obstacles', []):
+        obstacles.append(ObstacleSpec.from_dict(obs_dict))
+    
+    return obstacles
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Spawn test obstacles in CARLA')
+    parser = argparse.ArgumentParser(
+        description='Spawn test obstacles in CARLA',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Obstacle Format: type:coord_mode:x,y,z[:options]
+
+Examples:
+  vehicle:rel:20,0,0                 Stationary car 20m ahead
+  vehicle:rel:30,3.5,0:autopilot     Autopilot car in left lane
+  vehicle:lane:25,1,0:autopilot      Autopilot car in left lane (using waypoints)
+  pedestrian:rel:15,-2,0             Pedestrian 15m ahead, 2m right
+  cone:rel:10,0,0                    Traffic cone 10m ahead
+  vehicle:abs:100,50,1               Vehicle at world coords (100, 50, 1)
+  vehicle:rel:20,0,0:yaw=45          Vehicle angled 45 degrees
+  vehicle:rel:20,0,0:speed=10:autopilot  Autopilot at 10 m/s
+        """
+    )
+    
     parser.add_argument('--host', default='127.0.0.1', help='CARLA host')
     parser.add_argument('--port', type=int, default=2000, help='CARLA port')
-    parser.add_argument('--distance', type=float, nargs='+', default=[20.0], help='Distance(s) ahead (meters)')
-    parser.add_argument('--type', choices=['vehicle', 'car', 'truck', 'motorcycle', 
-                                           'pedestrian', 'cone', 'barrier', 'cones'],
-                       default='vehicle', help='Type of obstacle')
-    parser.add_argument('--lane', choices=['left', 'center', 'right'], nargs='+',
-                       default=['center'], help='Which lane(s) to spawn in')
-    parser.add_argument('--persist', action='store_true', 
-                       help='Keep obstacle after script exits (default: auto-remove)')
-    parser.add_argument('--duration', type=float, default=30.0,
-                       help='How long to keep obstacle (seconds, default: 30)')
-    parser.add_argument('--yaw', type=float, nargs='+', default=[0.0],
-                       help='Yaw offset(s) in degrees to apply to spawn heading (default: 0 = straight)')
+    
+    parser.add_argument('--obstacles', '-o', nargs='+', type=str,
+                       help='Obstacle specs (type:coord_mode:x,y,z[:options])')
+    
+    parser.add_argument('--config', '-c', type=str,
+                       help='YAML config file with obstacle list')
+    
+    parser.add_argument('--persist', action='store_true',
+                       help='Keep obstacles after script exits')
+    
+    parser.add_argument('--duration', type=float, default=60.0,
+                       help='How long to keep obstacles (seconds, default: 60)')
+    
+    # Quick shortcuts for common scenarios
+    parser.add_argument('--ahead', type=float, metavar='DIST',
+                       help='Quick: spawn stationary vehicle DIST meters ahead')
+    
+    parser.add_argument('--autopilot-ahead', type=float, metavar='DIST',
+                       help='Quick: spawn autopilot vehicle DIST meters ahead')
     
     args = parser.parse_args()
     
-    # Register cleanup handlers (unless --persist)
+    # Build obstacle list
+    obstacles: List[ObstacleSpec] = []
+    
+    # From --obstacles argument
+    if args.obstacles:
+        for spec_str in args.obstacles:
+            try:
+                obstacles.append(ObstacleSpec.from_string(spec_str))
+            except ValueError as e:
+                print(f"Error parsing obstacle spec: {e}")
+                return 1
+    
+    # From config file
+    if args.config:
+        try:
+            obstacles.extend(load_config(args.config))
+        except Exception as e:
+            print(f"Error loading config: {e}")
+            return 1
+    
+    # Quick shortcuts
+    if args.ahead:
+        obstacles.append(ObstacleSpec(
+            actor_type='vehicle',
+            coord_mode='rel',
+            x=args.ahead, y=0, z=0,
+            autopilot=False
+        ))
+    
+    if args.autopilot_ahead:
+        obstacles.append(ObstacleSpec(
+            actor_type='vehicle',
+            coord_mode='rel',
+            x=args.autopilot_ahead, y=0, z=0,
+            autopilot=True
+        ))
+    
+    # Default if nothing specified
+    if not obstacles:
+        print("No obstacles specified. Use --obstacles, --config, --ahead, or --autopilot-ahead")
+        print("Example: python tools/spawn_obstacle.py --obstacles 'vehicle:rel:20,0,0'")
+        parser.print_help()
+        return 1
+    
+    # Register cleanup handlers
     if not args.persist:
         atexit.register(cleanup_actors)
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
     
     print("Connecting to CARLA...")
-    spawner = ObstacleSpawner(args.host, args.port)
+    try:
+        spawner = ObstacleSpawner(args.host, args.port)
+    except Exception as e:
+        print(f"Failed to connect to CARLA: {e}")
+        return 1
     
-    # Find ego vehicle
+    # Find ego vehicle for relative spawns
     ego = spawner.get_ego_vehicle()
-    if not ego:
-        print("ERROR: No ego vehicle found! Start main.py first.")
-        return
+    if ego:
+        print(f"Found ego vehicle: {ego.type_id}")
+        ego_loc = ego.get_location()
+        print(f"Ego location: ({ego_loc.x:.1f}, {ego_loc.y:.1f}, {ego_loc.z:.1f})")
+    else:
+        # Check if any obstacles need ego
+        needs_ego = any(o.coord_mode in ['rel', 'lane'] for o in obstacles)
+        if needs_ego:
+            print("ERROR: No ego vehicle found! Required for relative spawning.")
+            return 1
     
-    print(f"Found ego vehicle: {ego.type_id}")
-    ego_loc = ego.get_location()
-    print(f"Ego location: ({ego_loc.x:.1f}, {ego_loc.y:.1f}, {ego_loc.z:.1f})")
-    
+    # Spawn all obstacles
     spawned_count = 0
-    
-    for dist in args.distance:
-        for lane in args.lane:
-            # Get spawn location
-            transform = spawner.get_spawn_transform(ego, dist, lane)
-            print(f"Spawn location ({dist}m, {lane}): ({transform.location.x:.1f}, {transform.location.y:.1f}, {transform.location.z:.1f})")
-            
-            # Calculate actual distance
-            actual_dist = ego_loc.distance(transform.location)
-            print(f"Actual distance from ego: {actual_dist:.1f}m")
-            
-            actor = None
-            # For each requested yaw offset, spawn an actor (allows multiple slanted spawns)
-            for yaw_offset in args.yaw:
-                # Build spawn transform with yaw offset applied
-                spawn_yaw = transform.rotation.yaw + float(yaw_offset)
-                spawn_t = carla.Transform(
-                    carla.Location(x=transform.location.x, y=transform.location.y, z=transform.location.z),
-                    carla.Rotation(pitch=transform.rotation.pitch, yaw=spawn_yaw, roll=transform.rotation.roll)
-                )
-
-                if args.type == 'vehicle' or args.type == 'car':
-                    actor = spawner.spawn_vehicle(spawn_t, 'car')
-                    if actor:
-                        try:
-                            actor.apply_control(carla.VehicleControl(hand_brake=True))
-                        except Exception:
-                            pass
-                        print(f"Vehicle set to stationary (handbrake on) at yaw offset {yaw_offset}°")
-
-                elif args.type == 'truck':
-                    actor = spawner.spawn_vehicle(spawn_t, 'truck')
-                    if actor:
-                        try:
-                            actor.apply_control(carla.VehicleControl(hand_brake=True))
-                        except Exception:
-                            pass
-
-                elif args.type == 'motorcycle':
-                    actor = spawner.spawn_vehicle(spawn_t, 'motorcycle')
-                    if actor:
-                        try:
-                            actor.apply_control(carla.VehicleControl(hand_brake=True))
-                        except Exception:
-                            pass
-
-                elif args.type == 'pedestrian':
-                    actor = spawner.spawn_pedestrian(spawn_t)
-
-                elif args.type == 'cone':
-                    actor = spawner.spawn_static_prop(spawn_t, 'cone')
-
-                elif args.type == 'barrier':
-                    actor = spawner.spawn_static_prop(spawn_t, 'barrier')
-
-                elif args.type == 'cones':
-                    spawner.spawn_multiple_cones(ego, dist, count=5)
-                    actor = True
-
-                if actor:
-                    spawned_count += 1
-                else:
-                    print(f"Failed to spawn obstacle at {dist}m in {lane} lane with yaw {yaw_offset}°.")
+    for spec in obstacles:
+        actor = spawner.spawn_actor(spec)
+        if actor:
+            spawned_count += 1
     
     if spawned_count == 0:
         print("\nFailed to spawn any obstacles.")
-        return
+        return 1
+    
+    print(f"\n{spawned_count}/{len(obstacles)} obstacles spawned successfully.")
     
     if args.persist:
-        print(f"\n{spawned_count} obstacles spawned and will PERSIST until manually removed.")
+        print("Obstacles will PERSIST until manually removed or CARLA restarts.")
     else:
-        print(f"\n{spawned_count} obstacles spawned! Will be removed in {args.duration}s or on Ctrl+C...")
+        print(f"Will be removed in {args.duration}s or on Ctrl+C...")
         try:
             time.sleep(args.duration)
         except KeyboardInterrupt:
@@ -423,7 +591,9 @@ def main():
         print("Removing obstacles...")
         cleanup_actors()
         print("Done.")
+    
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

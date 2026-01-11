@@ -13,13 +13,15 @@ Initialization Requirements (must all be received before processing starts):
 4. CARLA connection (for ground truth obstacles)
 
 Publishes:
-- /perception/obstacles (MarkerArray with 3D bounding boxes) - detected obstacles from YOLO + LiDAR
-- /perception/ground_truth/obstacles (MarkerArray) - ground truth from CARLA
-- /perception/lanes (MarkerArray with lane lines)
+- /perception/obstacles (ObstacleArray) - detected obstacles from YOLO + LiDAR
+- /perception/ground_truth/obstacles (ObstacleArray) - ground truth from CARLA
+- /perception/lanes (MarkerArray) - lane lines (visualization-only, polynomial fits)
 - /perception/debug/* (debug images)
+
+Note: Lane detection publishes MarkerArray directly because lane polynomial fits
+require coordinate transformation that's tightly coupled to the detection logic.
 """
 
-import math
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -29,8 +31,10 @@ import struct
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
-from geometry_msgs.msg import Point, Vector3
+from geometry_msgs.msg import Point
 from builtin_interfaces.msg import Time
+
+from autoiq_msgs.msg import ObstacleArray
 
 import tf2_ros
 from tf2_ros import TransformException
@@ -38,8 +42,8 @@ from tf2_ros import TransformException
 from perception.core.perception import Perception
 from perception.core.lane_detector import LaneDetector
 from perception.data_classes.lane import LaneDetection
-from perception.data_classes.obstacle import Obstacle
 from perception.tools.ground_truth_perception import GroundTruthPerception
+from geometry_msgs.msg import Point
 
 import carla
 
@@ -178,12 +182,12 @@ class PerceptionNode(Node):
                 self.lidar_callback, sensor_qos)
         
         # ==================== Publishers ====================
-        # Ground truth obstacles from CARLA
+        # Ground truth obstacles from CARLA (ObstacleArray for planning)
         self.ground_truth_pub = self.create_publisher(
-            MarkerArray, '/perception/ground_truth/obstacles', 10)
+            ObstacleArray, '/perception/ground_truth/obstacles', 10)
         
-        # Detected obstacles from YOLO + LiDAR
-        self.obstacles_pub = self.create_publisher(MarkerArray, '/perception/obstacles', 10)
+        # Detected obstacles from YOLO + LiDAR (ObstacleArray for planning)
+        self.obstacles_pub = self.create_publisher(ObstacleArray, '/perception/obstacles', 10)
         self.lanes_pub = self.create_publisher(MarkerArray, '/perception/lanes', 10)
         
         if self.enable_debug_viz:
@@ -370,7 +374,7 @@ class PerceptionNode(Node):
                 lidar_points=self.latest_lidar,
                 radius=self.obstacle_radius
             )
-        self._publish_obstacle_markers(obstacles)
+        self._publish_obstacles(obstacles)
         
         if self.enable_debug_viz:
             annotated = self.perception.get_annotated_image()
@@ -419,72 +423,18 @@ class PerceptionNode(Node):
     
     # ==================== Publishers ====================
     
-    def _publish_obstacle_markers(self, obstacles: list[Obstacle]):
-        """Publish 3D bounding box markers for obstacles."""
-        marker_array = MarkerArray()
+    def _publish_obstacles(self, obstacles: list):
+        """Publish obstacles as ObstacleArray message."""
+        obstacle_array = ObstacleArray()
+        obstacle_array.header.frame_id = 'ego_vehicle'
+        obstacle_array.header.stamp = self.get_clock().now().to_msg()
         
-        # Use timestamp 0 to tell RViz to use the latest available TF
-        # This avoids "extrapolation into future" errors when clocks differ slightly
-        timestamp = Time(sec=0, nanosec=0)
+        for obs in obstacles:
+            # Obstacles are already Obstacle messages, just update header
+            obs.header = obstacle_array.header
+            obstacle_array.obstacles.append(obs)
         
-        # Clear previous markers
-        clear_marker = Marker()
-        clear_marker.header.frame_id = 'ego_vehicle'
-        clear_marker.header.stamp = timestamp
-        clear_marker.ns = 'obstacles'
-        clear_marker.id = 0
-        clear_marker.action = Marker.DELETEALL
-        marker_array.markers.append(clear_marker)
-        
-        for i, obs in enumerate(obstacles):
-            marker = Marker()
-            marker.header.frame_id = 'ego_vehicle'
-            marker.header.stamp = timestamp
-            marker.ns = 'obstacles'
-            marker.id = i + 1
-            marker.type = Marker.CUBE
-            marker.action = Marker.ADD
-            
-            marker.pose.position.x = obs.x
-            marker.pose.position.y = obs.y
-            marker.pose.position.z = obs.z
-            
-            marker.pose.orientation.x = 0.0
-            marker.pose.orientation.y = 0.0
-            marker.pose.orientation.z = math.sin(obs.yaw / 2)
-            marker.pose.orientation.w = math.cos(obs.yaw / 2)
-            
-            marker.scale = Vector3(x=obs.length, y=obs.width, z=obs.height)
-            
-            if obs.obstacle_type == 'vehicle':
-                marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.5)
-            else:
-                marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.5)
-            
-            marker.lifetime.nanosec = 200000000
-            marker_array.markers.append(marker)
-            
-            # Text label
-            text_marker = Marker()
-            text_marker.header.frame_id = 'ego_vehicle'
-            text_marker.header.stamp = timestamp
-            text_marker.ns = 'obstacle_labels'
-            text_marker.id = i + 1
-            text_marker.type = Marker.TEXT_VIEW_FACING
-            text_marker.action = Marker.ADD
-            
-            text_marker.pose.position.x = obs.x
-            text_marker.pose.position.y = obs.y
-            text_marker.pose.position.z = obs.z + obs.height / 2 + 0.5
-            
-            distance = (obs.x**2 + obs.y**2)**0.5
-            text_marker.text = f"{obs.obstacle_type}: {distance:.1f}m"
-            text_marker.scale.z = 0.5
-            text_marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=0.5)
-            text_marker.lifetime.nanosec = 200000000
-            marker_array.markers.append(text_marker)
-        
-        self.obstacles_pub.publish(marker_array)
+        self.obstacles_pub.publish(obstacle_array)
     
     def _publish_lane_markers(self, result: LaneDetection):
         """Publish lane markers."""
@@ -591,7 +541,7 @@ class PerceptionNode(Node):
         return False
     
     def _publish_ground_truth_obstacles(self):
-        """Publish ground truth obstacles (always runs)."""
+        """Publish ground truth obstacles as ObstacleArray."""
         self.get_logger().info('Publishing ground truth obstacles', once=True)
         if self.carla_world is None:
             self.get_logger().warn('No CARLA connection, cannot publish ground truth obstacles')
@@ -605,68 +555,26 @@ class PerceptionNode(Node):
         
         # Detect obstacles using GroundTruthPerception class
         obstacles = self.ground_truth_perception.detect_obstacles()
-        if not obstacles:
-            # Publish empty marker array to clear previous markers
-            marker_array = MarkerArray()
-            clear_marker = Marker()
-            clear_marker.header.frame_id = 'ego_vehicle'
-            clear_marker.header.stamp = Time(sec=0, nanosec=0)
-            clear_marker.ns = 'ground_truth_obstacles'
-            clear_marker.id = 0
-            clear_marker.action = Marker.DELETEALL
-            marker_array.markers.append(clear_marker)
-            self.ground_truth_pub.publish(marker_array)
-            return
         
-        # Create marker array for ground truth topic
-        gt_marker_array = self._create_obstacle_marker_array(obstacles, 'ground_truth_obstacles')
-        self.ground_truth_pub.publish(gt_marker_array)
+        # Create ObstacleArray message
+        obstacle_array = self._create_obstacle_array(obstacles)
+        self.ground_truth_pub.publish(obstacle_array)
     
-    def _create_obstacle_marker_array(self, obstacles: list, namespace: str) -> MarkerArray:
-        """Create a MarkerArray from obstacles."""
-        marker_array = MarkerArray()
-        timestamp = Time(sec=0, nanosec=0)
+    def _create_obstacle_array(self, obstacles: list) -> ObstacleArray:
+        """Create an ObstacleArray message from obstacle list."""
+        obstacle_array = ObstacleArray()
+        obstacle_array.header.frame_id = 'ego_vehicle'
+        obstacle_array.header.stamp = self.get_clock().now().to_msg()
         
-        # Clear previous markers
-        clear_marker = Marker()
-        clear_marker.header.frame_id = 'ego_vehicle'
-        clear_marker.header.stamp = timestamp
-        clear_marker.ns = namespace
-        clear_marker.id = 0
-        clear_marker.action = Marker.DELETEALL
-        marker_array.markers.append(clear_marker)
+        if not obstacles:
+            return obstacle_array
         
-        for i, obs in enumerate(obstacles):
-            marker = Marker()
-            marker.header.frame_id = 'ego_vehicle'
-            marker.header.stamp = timestamp
-            marker.ns = namespace
-            marker.id = i + 1
-            marker.type = Marker.CUBE
-            marker.action = Marker.ADD
-            
-            marker.pose.position.x = obs.x
-            marker.pose.position.y = obs.y
-            marker.pose.position.z = obs.z
-            
-            marker.pose.orientation.x = 0.0
-            marker.pose.orientation.y = 0.0
-            marker.pose.orientation.z = math.sin(obs.yaw / 2)
-            marker.pose.orientation.w = math.cos(obs.yaw / 2)
-            
-            marker.scale.x = obs.length
-            marker.scale.y = obs.width
-            marker.scale.z = obs.height
-            
-            # Color based on type
-            if obs.obstacle_type == 'vehicle':
-                marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.7)
-            else:
-                marker.color = ColorRGBA(r=1.0, g=0.5, b=0.0, a=0.7)
-            
-            marker_array.markers.append(marker)
+        for obs in obstacles:
+            # Obstacles are already Obstacle messages, just update header
+            obs.header = obstacle_array.header
+            obstacle_array.obstacles.append(obs)
         
-        return marker_array
+        return obstacle_array
 
 
 def main(args=None):

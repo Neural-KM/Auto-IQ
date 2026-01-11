@@ -3,7 +3,7 @@
 import math
 from typing import List
 
-from perception.data_classes.obstacle import Obstacle
+from autoiq_msgs.msg import Obstacle
 
 
 class GroundTruthPerception:
@@ -21,7 +21,7 @@ class GroundTruthPerception:
             radius: Detection radius in meters.
             
         Returns:
-            List of Obstacle dataclass instances, sorted by distance.
+            List of Obstacle ROS messages, sorted by distance.
         """
         if not self.vehicle or not self.vehicle.is_alive:
             return []
@@ -79,25 +79,26 @@ class GroundTruthPerception:
                 # Compute relative yaw (obstacle heading relative to ego heading)
                 obstacle_yaw = math.radians(actor_transform.rotation.yaw)
                 ego_yaw = math.radians(ego_transform.rotation.yaw)
-                relative_yaw = obstacle_yaw - ego_yaw
+                relative_yaw = -(obstacle_yaw - ego_yaw)  # Flip yaw for right-handed convention
                 
-                obstacle = Obstacle(
-                    id=actor.id,
-                    obstacle_type=obstacle_type,
-                    x=bbox_center_relative.x,
-                    y=-bbox_center_relative.y,  # Flip Y: CARLA left-handed -> ROS right-handed
-                    z=bbox_center_relative.z,
-                    vx=vx_rel,
-                    vy=-vy_rel,  # Flip Y velocity as well
-                    vz=vz_rel,
-                    length=dims_x,
-                    width=dims_y,
-                    height=dims_z,
-                    yaw=-relative_yaw,  # Flip yaw for right-handed convention
-                )
+                obstacle = Obstacle()
+                obstacle.id = actor.id
+                obstacle.type = obstacle_type
+                obstacle.pose.position.x = float(bbox_center_relative.x)
+                obstacle.pose.position.y = float(-bbox_center_relative.y)  # Flip Y: CARLA left-handed -> ROS right-handed
+                obstacle.pose.position.z = float(bbox_center_relative.z)
+                obstacle.pose.orientation.z = math.sin(relative_yaw / 2)
+                obstacle.pose.orientation.w = math.cos(relative_yaw / 2)
+                obstacle.velocity.x = float(vx_rel)
+                obstacle.velocity.y = float(-vy_rel)  # Flip Y velocity as well
+                obstacle.velocity.z = float(vz_rel)
+                obstacle.size.x = float(dims_x)
+                obstacle.size.y = float(dims_y)
+                obstacle.size.z = float(dims_z)
+                obstacle.confidence = 1.0
                 obstacles.append(obstacle)
                 
         # Sort by distance (computed from position)
-        obstacles.sort(key=lambda o: (o.x**2 + o.y**2 + o.z**2)**0.5)
+        obstacles.sort(key=lambda o: (o.pose.position.x**2 + o.pose.position.y**2 + o.pose.position.z**2)**0.5)
         
         return obstacles
