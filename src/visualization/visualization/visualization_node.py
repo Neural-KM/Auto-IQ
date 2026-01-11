@@ -32,7 +32,7 @@ from rclpy.node import Node
 from nav_msgs.msg import Path, Odometry
 from visualization_msgs.msg import MarkerArray, Marker
 from std_msgs.msg import ColorRGBA
-from geometry_msgs.msg import Point, PoseStamped
+from geometry_msgs.msg import PoseStamped
 
 from autoiq_msgs.msg import ObstacleArray, Trajectory
 
