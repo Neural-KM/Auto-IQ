@@ -14,7 +14,7 @@ import time
 from lark import logger
 import numpy as np
 import cv2
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict
 
 from perception.core.object_detector import ObjectDetector
 from autoiq_msgs.msg import Obstacle

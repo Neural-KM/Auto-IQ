@@ -29,6 +29,10 @@ from std_msgs.msg import String, Int32
 
 from autoiq_msgs.msg import ObstacleArray, Trajectory, TrajectoryPoint
 
+# Import common types and converters
+from autoiq_common.types import VehicleState
+from autoiq_common.converters import vehicle_state_from_odometry
+
 from typing import List
 
 import carla
@@ -41,19 +45,11 @@ from planning.behavior_planner import (
     ObstacleInfo,
     LaneAvailability,
 )
+
 from planning.motion_planner import (
     MotionPlanner, 
     MotionPlannerConfig,
-    VehicleState,
 )
-
-
-def quaternion_to_yaw(q):
-    """Convert quaternion to yaw angle in radians."""
-    siny_cosp = 2 * (q.w * q.z + q.x * q.y)
-    cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
-    return math.atan2(siny_cosp, cosy_cosp)
-
 
 class PlanningNode(Node):
     """
@@ -145,21 +141,19 @@ class PlanningNode(Node):
         self.initialized = True
         self.is_navigating = False
         self.destination_reached = False
-        self._destination = None  # Current destination for replanning
+        self._destination_carla = None  # Current destination in CARLA coordinates
         
-        # Vehicle state (from odometry) - stored as ROS coordinates
-        self.vehicle_x = 0.0
-        self.vehicle_y = 0.0
-        self.vehicle_yaw = 0.0
-        self.vehicle_speed = 0.0
+        # Vehicle state (from odometry) - stored as VehicleState dataclass
+        self.vehicle_state: VehicleState = VehicleState()
         
-        # CARLA-format location (for map queries only)
-        self.vehicle_location = None
+        # CARLA-format location (for map queries only, Y-flipped)
+        self.vehicle_location_carla = None
         
         # Obstacle detection (from perception) - list of all obstacles
         self.current_obstacles: List[ObstacleInfo] = []
         
         # ==================== Subscribers ====================
+        # Subscribe to odometry (convert to VehicleState in callback)
         self.odom_sub = self.create_subscription(
             Odometry, '/carla/ego_vehicle/ground_truth/odometry',
             self.odom_callback, 10)
@@ -197,42 +191,43 @@ class PlanningNode(Node):
     # ==================== Callbacks ====================
 
     def odom_callback(self, msg: Odometry):
-        """Update vehicle state from odometry."""
-        pos = msg.pose.pose.position
-        quat = msg.pose.pose.orientation
-        vel = msg.twist.twist.linear
+        """
+        Update vehicle state from odometry.
         
-        # Store ROS coordinates
-        self.vehicle_x = pos.x
-        self.vehicle_y = pos.y
-        self.vehicle_yaw = quaternion_to_yaw(quat)
-        self.vehicle_speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+        Converts Odometry message to VehicleState dataclass.
         
-        # Also store CARLA-format location for map queries
-        self.vehicle_location = carla.Location(
-            x=pos.x,
-            y=-pos.y,  # Y-axis inversion for CARLA
-            z=pos.z
+        Args:
+            msg: Odometry message from CARLA
+        """
+        # Convert Odometry to VehicleState
+        state = vehicle_state_from_odometry(msg)
+        self.vehicle_state = state
+        
+        # Also store CARLA-format location for map queries (Y-flipped)
+        self.vehicle_location_carla = carla.Location(
+            x=state.x,
+            y=-state.y,  # Y-axis inversion for CARLA
+            z=0.0
         )
     
     def goal_callback(self, msg: PoseStamped):
         """Set navigation goal from PoseStamped."""
-        if self.vehicle_location is None:
+        if self.vehicle_location_carla is None:
             self.get_logger().warn('Cannot set goal - no vehicle position')
             return
         
-        # Convert goal to CARLA location
-        goal_location = carla.Location(
+        # Convert goal to CARLA location (Y-flipped)
+        goal_location_carla = carla.Location(
             x=msg.pose.position.x,
             y=-msg.pose.position.y,  # Y-axis inversion
             z=msg.pose.position.z
         )
         
-        self._set_destination(goal_location, 'goal pose')
+        self._set_destination(goal_location_carla, 'goal pose')
     
     def goal_index_callback(self, msg: Int32):
         """Set navigation goal using spawn point index."""
-        if self.vehicle_location is None:
+        if self.vehicle_location_carla is None:
             self.get_logger().warn('Cannot set goal - no vehicle position')
             return
         
@@ -243,16 +238,16 @@ class PlanningNode(Node):
             self.get_logger().error(f'Invalid spawn index {spawn_index}. Valid range: 0-{len(spawn_points)-1}')
             return
         
-        goal_location = spawn_points[spawn_index].location
-        self._set_destination(goal_location, f'spawn point {spawn_index}')
+        goal_location_carla = spawn_points[spawn_index].location
+        self._set_destination(goal_location_carla, f'spawn point {spawn_index}')
     
-    def _set_destination(self, goal_location: carla.Location, description: str):
+    def _set_destination(self, goal_location_carla: carla.Location, description: str):
         """Set navigation destination and compute route."""
-        self._destination = goal_location  # Store for replanning
+        self._destination_carla = goal_location_carla  # Store for replanning
         
         success = self.global_planner.set_destination(
-            self.vehicle_location,
-            goal_location
+            self.vehicle_location_carla,
+            goal_location_carla
         )
         
         if success:
@@ -305,7 +300,7 @@ class PlanningNode(Node):
     
     def planning_loop(self):
         """Main planning loop - delegates to MotionPlanner."""
-        if self.vehicle_location is None:
+        if self.vehicle_location_carla is None:
             return
         
         # Publish status
@@ -316,21 +311,15 @@ class PlanningNode(Node):
             return
 
         # Check if destination reached
-        if self.global_planner.is_destination_reached(self.vehicle_location, threshold=5.0):
+        if self.global_planner.is_destination_reached(self.vehicle_location_carla, threshold=5.0):
             self.get_logger().info('Destination reached!')
             self.is_navigating = False
             self.destination_reached = True
             self._publish_empty_trajectory()
             return
         
-        # 1. Update motion planner with current vehicle state (ROS coords)
-        vehicle_state = VehicleState(
-            x=self.vehicle_x,
-            y=self.vehicle_y,
-            yaw=self.vehicle_yaw,
-            speed=self.vehicle_speed
-        )
-        self.motion_planner.update_vehicle_state(vehicle_state, dt=0.1)
+        # 1. Update motion planner with current vehicle state (already a VehicleState)
+        self.motion_planner.update_vehicle_state(self.vehicle_state, dt=0.1)
         
         # 2. Update behavior planner with Frenet state from motion planner
         s, d, d_dot = self.motion_planner.get_frenet_state()
@@ -347,7 +336,7 @@ class PlanningNode(Node):
         behavior_output = self.behavior_planner.update(
             obstacles=self.current_obstacles,
             lane_availability=lane_availability,
-            speed=self.vehicle_speed,
+            speed=self.vehicle_state.speed,
             dt=0.1
         )
         
@@ -362,7 +351,7 @@ class PlanningNode(Node):
             )
         
         # Advance global planner for status tracking
-        self.global_planner.advance(self.vehicle_location)
+        self.global_planner.advance(self.vehicle_location_carla)
         
         # 5. Generate trajectory (motion planner handles stop trajectory too)
         target_speed_ms = self.target_speed / 3.6
@@ -371,7 +360,7 @@ class PlanningNode(Node):
             
         trajectory = self.motion_planner.generate_trajectory(
             behavior=behavior_output,
-            speed=self.vehicle_speed,
+            speed=self.vehicle_state.speed,
             target_speed=target_speed_ms
         )
         
@@ -390,7 +379,7 @@ class PlanningNode(Node):
         This is the ONLY place we query CARLA in the planning loop.
         The result is passed to the MotionPlanner as data.
         """
-        current_wp = self.carla_map.get_waypoint(self.vehicle_location)
+        current_wp = self.carla_map.get_waypoint(self.vehicle_location_carla)
         if direction == 'left':
             target_wp = current_wp.get_left_lane()
         else:

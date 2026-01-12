@@ -19,6 +19,9 @@ import numpy as np
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
+# Import common types from autoiq_common
+from autoiq_common.types import VehicleState, TrajectoryPoint
+
 from planning.frenet_utils import (
     WaypointConverter, 
     QuinticPolynomial, 
@@ -27,24 +30,7 @@ from planning.frenet_utils import (
 from planning.behavior_planner import BehaviorState, BehaviorOutput
 
 
-@dataclass
-class VehicleState:
-    """Vehicle state in ROS coordinates (x forward, y left)."""
-    x: float
-    y: float
-    yaw: float  # radians
-    speed: float  # m/s
-
-
-@dataclass
-class TrajectoryPoint:
-    """Single point in the trajectory."""
-    x: float
-    y: float
-    yaw: float
-    s: float  # Longitudinal position
-    d: float  # Lateral offset
-    speed: float  # Target speed at this point
+# VehicleState and TrajectoryPoint are now imported from autoiq_common.types
 
 
 @dataclass

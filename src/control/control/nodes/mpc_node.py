@@ -26,16 +26,14 @@ from rclpy.node import Node
 from nav_msgs.msg import Path, Odometry
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
-from autoiq_msgs.msg import VehicleControl, Trajectory
+from autoiq_msgs.msg import VehicleControl, Trajectory as TrajectoryMsg
+
+# Import common types and converters
+from autoiq_common.types import VehicleState, Trajectory
+from autoiq_common.converters import vehicle_state_from_odometry, trajectory_from_ros
+from autoiq_common.utils import yaw_to_quaternion
 
 from control.controllers.mpc_controller import MPCController
-
-
-def quaternion_to_yaw(q):
-    """Convert quaternion to yaw angle in radians."""
-    siny_cosp = 2 * (q.w * q.z + q.x * q.y)
-    cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
-    return math.atan2(siny_cosp, cosy_cosp)
 
 
 class MPCNode(Node):
@@ -74,15 +72,13 @@ class MPCNode(Node):
         )
         
         # ==================== State ====================
-        self.vehicle_x = None
-        self.vehicle_y = None
-        self.vehicle_yaw = None
-        self.vehicle_speed = 0.0
+        # Vehicle state (stored as VehicleState in ROS coordinates)
+        self.vehicle_state: VehicleState = None
         
-        self.current_waypoints = None
+        self.current_waypoints = None  # Stored in CARLA coordinates for MPC
         self.current_target_speeds = []
         self.has_trajectory = False
-        self.current_behavior_state = Trajectory.LANE_FOLLOWING
+        self.current_behavior_state = TrajectoryMsg.LANE_FOLLOWING
         
         self.previous_steering = 0.0
         
@@ -92,7 +88,7 @@ class MPCNode(Node):
         
         # ==================== Subscribers ====================
         self.trajectory_sub = self.create_subscription(
-            Trajectory, '/planning/trajectory',
+            TrajectoryMsg, '/planning/trajectory',
             self.trajectory_callback, 10)
         
         self.odom_sub = self.create_subscription(
@@ -121,24 +117,26 @@ class MPCNode(Node):
     
     # ==================== Callbacks ====================
     
-    def trajectory_callback(self, msg: Trajectory):
-        """Receive trajectory from planning node."""
-        if not msg.points:
+    def trajectory_callback(self, msg: TrajectoryMsg):
+        """
+        Receive trajectory from planning node.
+        
+        Converts TrajectoryMsg to Trajectory dataclass.
+        All coordinates are in ROS right-handed system.
+        """
+        traj = trajectory_from_ros(msg)
+        
+        if not traj.points:
             self.has_trajectory = False
             self.current_waypoints = None
             return
         
-        # Store behavior state
-        self.current_behavior_state = msg.behavior_state
-        
         # Convert Trajectory to list of (x, y) waypoints for MPC
-        # Note: Convert back from ROS to CARLA coordinates
+        # All in ROS coordinates (right-handed)
         waypoints = []
         speeds = []
-        for point in msg.points:
-            x = point.x
-            y = -point.y  # Y-axis inversion for CARLA
-            waypoints.append((x, y))
+        for point in traj.points:
+            waypoints.append((point.x, point.y))
             speeds.append(point.speed)
         
         self.current_waypoints = waypoints
@@ -149,27 +147,20 @@ class MPCNode(Node):
         self.mpc.set_waypoints(waypoints)
     
     def odom_callback(self, msg: Odometry):
-        """Update vehicle state from odometry."""
-        pos = msg.pose.pose.position
-        quat = msg.pose.pose.orientation
-        vel = msg.twist.twist.linear
+        """
+        Update vehicle state from odometry.
         
-        # Convert to CARLA coordinates
-        self.vehicle_x = pos.x
-        self.vehicle_y = -pos.y  # Y-axis inversion
-        
-        yaw_rad = quaternion_to_yaw(quat)
-        self.vehicle_yaw = -yaw_rad  # Yaw inversion for CARLA
-        
-        # Speed in m/s
-        self.vehicle_speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+        Converts Odometry message to VehicleState dataclass.
+        Stores ROS coordinates directly; converts to CARLA only when needed.
+        """
+        self.vehicle_state = vehicle_state_from_odometry(msg)
     
     # ==================== Control Loop ====================
     
     def control_loop(self):
         """Main control loop."""
         # Check if we have valid state
-        if self.vehicle_x is None or self.vehicle_y is None:
+        if self.vehicle_state is None:
             return
         
         # Publish status
@@ -197,12 +188,12 @@ class MPCNode(Node):
         """Run MPC control step."""
         t_start = time.time()
         
-        # Build current state vector [x, y, psi, v]
+        # Build current state vector [x, y, psi, v] in ROS coordinates
         current_state = np.array([
-            self.vehicle_x, 
-            self.vehicle_y, 
-            self.vehicle_yaw, 
-            self.vehicle_speed
+            self.vehicle_state.x, 
+            self.vehicle_state.y,
+            self.vehicle_state.yaw,
+            self.vehicle_state.speed
         ])
         
         # Get target speed from trajectory (use first waypoint's speed as reference)
@@ -289,7 +280,7 @@ class MPCNode(Node):
             'controller': 'mpc',
             'has_trajectory': self.has_trajectory,
             'num_waypoints': len(self.current_waypoints) if self.current_waypoints else 0,
-            'vehicle_speed_kmh': self.vehicle_speed * 3.6 if self.vehicle_speed else 0.0,
+            'vehicle_speed_kmh': self.vehicle_state.speed * 3.6 if self.vehicle_state else 0.0,
             'target_speed_kmh': current_target_speed_kmh,
             'solve_time_ms': self._last_solve_time_ms,
             'steering': self.previous_steering
@@ -314,18 +305,14 @@ class MPCNode(Node):
             pose = PoseStamped()
             pose.header = path_msg.header
             
-            # State is [x, y, yaw, speed] in CARLA coordinates
-            # Convert to ROS coordinates
+            # State is [x, y, yaw, speed] already in ROS coordinates
             pose.pose.position.x = state[0]
-            pose.pose.position.y = -state[1]  # Y-axis inversion for ROS
+            pose.pose.position.y = state[1]
             pose.pose.position.z = 0.0
             
             # Convert yaw to quaternion
-            yaw = -state[2]  # Yaw inversion for ROS
-            pose.pose.orientation.x = 0.0
-            pose.pose.orientation.y = 0.0
-            pose.pose.orientation.z = math.sin(yaw / 2)
-            pose.pose.orientation.w = math.cos(yaw / 2)
+            yaw = state[2]
+            pose.pose.orientation = yaw_to_quaternion(yaw)
             
             path_msg.poses.append(pose)
         
