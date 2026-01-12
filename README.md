@@ -9,16 +9,21 @@ pip install -r requirements.txt
 
 ## Quick Start (ROS2)
 
-1. **Start CARLA simulator**
+1. **Install CARLA Python bindings**
+   ```bash
+   pip install ~/CARLA_0.9.16/PythonAPI/carla/dist/carla-0.9.16-cp312-cp312-linux_x86_64.whl
+   ```
 
-2. **Build the workspace**
+2. **Start CARLA simulator**
+
+3. **Build the workspace**
    ```bash
    cd ~/Auto-IQ
    colcon build
    source install/setup.bash
    ```
 
-3. **Launch the full stack**
+4. **Launch the full stack**
    ```bash
    ros2 launch autoiq_bridge autoiq.launch.py
    ```
