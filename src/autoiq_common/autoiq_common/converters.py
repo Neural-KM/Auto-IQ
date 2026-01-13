@@ -10,7 +10,6 @@ Convention:
 """
 
 import math
-from typing import List
 
 # Import pure Python types
 from autoiq_common.types import (
@@ -29,8 +28,7 @@ from autoiq_msgs.msg import (
     ObstacleArray as ObstacleArrayMsg,
 )
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Pose, Vector3, Quaternion, PoseStamped
-from std_msgs.msg import Header
+from geometry_msgs.msg import PoseStamped
 
 # Import utility functions
 from autoiq_common.utils import quaternion_to_yaw, yaw_to_quaternion

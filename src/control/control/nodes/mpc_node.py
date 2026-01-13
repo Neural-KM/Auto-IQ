@@ -75,7 +75,7 @@ class MPCNode(Node):
         # Vehicle state (stored as VehicleState in ROS coordinates)
         self.vehicle_state: VehicleState = None
         
-        self.current_waypoints = None  # Stored in CARLA coordinates for MPC
+        self.current_waypoints = None  # List of (x, y) in ROS coordinates
         self.current_target_speeds = []
         self.has_trajectory = False
         self.current_behavior_state = TrajectoryMsg.LANE_FOLLOWING

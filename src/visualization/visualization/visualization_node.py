@@ -23,7 +23,6 @@ Connects to CARLA for debug drawing (optional).
 """
 
 import math
-import numpy as np
 from dataclasses import replace
 from typing import List, Tuple
 
@@ -236,7 +235,7 @@ class VisualizationNode(Node):
             return []
         
         result = []
-        vx, vy, vyaw = self.vehicle_state.x, self.vehicle_state.y, self.vehicle_state.yaw or 0.0
+        vx, vy, vyaw = self.vehicle_state.x, self.vehicle_state.y, self.vehicle_state.yaw
         c, s = math.cos(vyaw), math.sin(vyaw)
         
         for obs in obstacle_array.obstacles:

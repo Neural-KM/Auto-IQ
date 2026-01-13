@@ -9,8 +9,7 @@ Use converters.py to convert between these types and ROS messages.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
-
+from typing import List
 
 @dataclass
 class VehicleState:
