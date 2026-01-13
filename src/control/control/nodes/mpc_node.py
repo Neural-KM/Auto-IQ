@@ -29,7 +29,7 @@ from std_msgs.msg import String
 from autoiq_msgs.msg import VehicleControl, Trajectory as TrajectoryMsg
 
 # Import common types and converters
-from autoiq_common.types import VehicleState, Trajectory
+from autoiq_common.types import VehicleState
 from autoiq_common.converters import vehicle_state_from_odometry, trajectory_from_ros
 from autoiq_common.utils import yaw_to_quaternion
 
