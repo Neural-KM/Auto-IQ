@@ -141,13 +141,13 @@ class PlanningNode(Node):
         self.initialized = True
         self.is_navigating = False
         self.destination_reached = False
-        self._destination_carla = None  # Current destination in CARLA coordinates
+        self._destination_carla: carla.Location = None  # Destination in CARLA left-handed coords (Y-flipped from ROS)
         
         # Vehicle state (from odometry) - stored as VehicleState dataclass
         self.vehicle_state: VehicleState = VehicleState()
         
-        # CARLA-format location (for map queries only, Y-flipped)
-        self.vehicle_location_carla = None
+        # Vehicle position in CARLA left-handed coords (Y-flipped from ROS) for map queries
+        self.vehicle_location_carla: carla.Location = None
         
         # Obstacle detection (from perception) - list of all obstacles
         self.current_obstacles: List[ObstacleInfo] = []
@@ -211,7 +211,11 @@ class PlanningNode(Node):
         )
     
     def goal_callback(self, msg: PoseStamped):
-        """Set navigation goal from PoseStamped."""
+        """
+        Set navigation goal from PoseStamped (ROS coordinates).
+        
+        Converts from ROS right-handed to CARLA left-handed coordinates.
+        """
         if self.vehicle_location_carla is None:
             self.get_logger().warn('Cannot set goal - no vehicle position')
             return
@@ -226,7 +230,11 @@ class PlanningNode(Node):
         self._set_destination(goal_location_carla, 'goal pose')
     
     def goal_index_callback(self, msg: Int32):
-        """Set navigation goal using spawn point index."""
+        """
+        Set navigation goal using CARLA spawn point index.
+        
+        Spawn points are already in CARLA left-handed coordinates.
+        """
         if self.vehicle_location_carla is None:
             self.get_logger().warn('Cannot set goal - no vehicle position')
             return
@@ -242,8 +250,14 @@ class PlanningNode(Node):
         self._set_destination(goal_location_carla, f'spawn point {spawn_index}')
     
     def _set_destination(self, goal_location_carla: carla.Location, description: str):
-        """Set navigation destination and compute route."""
-        self._destination_carla = goal_location_carla  # Store for replanning
+        """
+        Set navigation destination and compute route.
+        
+        Args:
+            goal_location_carla: Destination in CARLA left-handed coordinates
+            description: Human-readable description for logging
+        """
+        self._destination_carla = goal_location_carla  # Store for potential replanning
         
         success = self.global_planner.set_destination(
             self.vehicle_location_carla,
