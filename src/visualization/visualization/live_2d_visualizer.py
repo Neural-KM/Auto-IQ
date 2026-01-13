@@ -47,7 +47,7 @@ class Live2DVisualizerROS:
         self._vehicle_speed = 0.0
         self._trajectory = None  # List of (x, y)
         self._global_route = None  # List of (x, y)
-        self._predicted = None  # List of (x, y, yaw, speed)
+        self._predicted_trajectory = None  # List of (x, y, yaw, speed)
         self._obstacles = []  # List of dicts with x, y, yaw, length, width, type
         
         # Plot handles
@@ -56,7 +56,7 @@ class Live2DVisualizerROS:
         self._vehicle_patch = None
         self._trajectory_line = None
         self._global_route_line = None
-        self._predicted_line = None
+        self._predicted_trajectory_line = None
         self._obstacle_patches = []
     
     def start(self) -> bool:
@@ -82,7 +82,7 @@ class Live2DVisualizerROS:
         self._ax = self._fig.add_subplot(111)
         self._fig.canvas = FigureCanvasAgg(self._fig)
         
-        self._ax.set_aspect('equal', adjustable='datalim')
+        self._ax.set_aspect('equal', adjustable='box')
         self._ax.grid(True, alpha=0.3)
         self._ax.set_xlabel('X (m)')
         self._ax.set_ylabel('Y (m)')
@@ -93,7 +93,7 @@ class Live2DVisualizerROS:
                                                   linewidth=1.5, alpha=0.5, label='Global Route')
         self._trajectory_line, = self._ax.plot([], [], '-', color='cyan', 
                                                 linewidth=2, label='Trajectory')
-        self._predicted_line, = self._ax.plot([], [], '-', color='orange', 
+        self._predicted_trajectory_line, = self._ax.plot([], [], '-', color='orange', 
                                                linewidth=2, label='MPC Predicted')
         self._vehicle_patch = Polygon([[0, 0], [0, 0], [0, 0]], color='blue', alpha=0.8)
         self._ax.add_patch(self._vehicle_patch)
@@ -119,7 +119,7 @@ class Live2DVisualizerROS:
             speed = self._vehicle_speed
             trajectory = self._trajectory.copy() if self._trajectory else None
             global_route = self._global_route.copy() if self._global_route else None
-            predicted = self._predicted.copy() if self._predicted else None
+            predicted_trajectory = self._predicted_trajectory.copy() if self._predicted_trajectory else None
             obstacles = self._obstacles.copy()
         
         xs, ys = [], []
@@ -143,13 +143,13 @@ class Live2DVisualizerROS:
             self._trajectory_line.set_data([], [])
         
         # Draw predicted trajectory
-        if predicted and len(predicted) > 1:
-            pred = np.array(predicted)
-            self._predicted_line.set_data(pred[:, 0], pred[:, 1])
+        if predicted_trajectory and len(predicted_trajectory) > 1:
+            pred = np.array(predicted_trajectory)
+            self._predicted_trajectory_line.set_data(pred[:, 0], pred[:, 1])
             xs.extend(pred[:, 0].tolist())
             ys.extend(pred[:, 1].tolist())
         else:
-            self._predicted_line.set_data([], [])
+            self._predicted_trajectory_line.set_data([], [])
         
         # Remove old obstacle patches
         for patch in self._obstacle_patches:
@@ -257,10 +257,10 @@ class Live2DVisualizerROS:
         with self._lock:
             self._global_route = list(waypoints) if waypoints else None
     
-    def update_predicted(self, states: List[Tuple[float, float, float, float]]):
+    def update_predicted_trajectory(self, states: List[Tuple[float, float, float, float]]):
         """Update MPC predicted trajectory."""
         with self._lock:
-            self._predicted = list(states) if states else None
+            self._predicted_trajectory = list(states) if states else None
     
     def update_obstacles(self, obstacles: List[dict]):
         """

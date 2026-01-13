@@ -70,8 +70,8 @@ class VisualizationNode(Node):
         self.declare_parameter('draw_lifetime', 0.15)  # seconds
         
         # Comma-separated list of objects to draw in CARLA debug view
-        # Options: trajectory, global_route, predicted, ground_truth_obstacles, detected_obstacles, speed
-        self.declare_parameter('carla_debug_draw', 'trajectory,global_route,predicted,speed')
+        # Options: trajectory, global_route, predicted_traj, ground_truth_obstacles, detected_obstacles, speed
+        self.declare_parameter('carla_debug_draw', 'trajectory,global_route,predicted_traj,speed')
         
         carla_host = self.get_parameter('carla_host').value
         carla_port = self.get_parameter('carla_port').value
@@ -110,14 +110,13 @@ class VisualizationNode(Node):
             self.get_logger().info('2D matplotlib visualization enabled')
         
         # ==================== Data Storage ====================
-        # Vehicle state (ROS coordinates - right-handed)
         self.vehicle_state: VehicleState = None
         self.target_speed = 0.0
         
-        # Paths (ROS coordinates)
+        # Paths
         self.trajectory = []  # List of (x, y)
         self.global_route = []  # List of (x, y, z)
-        self.predicted = []  # List of (x, y, yaw, speed)
+        self.predicted_trajectory = []  # List of (x, y, yaw, speed)
         self.current_waypoint = None  # Tuple of (x, y, z) or None
         
         # Obstacles (ROS world coordinates)
@@ -237,7 +236,7 @@ class VisualizationNode(Node):
             
             # Speed not available in Path, use 0
             states.append((x, y, yaw, 0.0))
-        self.predicted = states
+        self.predicted_trajectory = states
     
     def _transform_obstacles_to_world(self, obstacle_array: ObstacleArray) -> List[Obstacle]:
         """
@@ -438,8 +437,8 @@ class VisualizationNode(Node):
             self.carla_drawer.draw_trajectory(traj_carla, lifetime=lt)
         
         # Draw MPC predicted trajectory (flip Y and yaw for CARLA)
-        if 'predicted' in items and self.predicted:
-            pred_carla = [(x, -y, -yaw, speed) for x, y, yaw, speed in self.predicted]
+        if 'predicted_traj' in items and self.predicted_trajectory:
+            pred_carla = [(x, -y, -yaw, speed) for x, y, yaw, speed in self.predicted_trajectory]
             self.carla_drawer.draw_predicted_trajectory(pred_carla, lifetime=lt)
         
         # Draw speed indicator (flip Y for CARLA)
@@ -491,9 +490,9 @@ class VisualizationNode(Node):
             route_2d = [(p[0], p[1]) for p in self.global_route]
             self.viz_2d.update_global_route(route_2d)
         
-        # Update predicted
-        if self.predicted:
-            self.viz_2d.update_predicted(self.predicted)
+        # Update predicted trajectory
+        if self.predicted_trajectory:
+            self.viz_2d.update_predicted_trajectory(self.predicted_trajectory)
         
         # Update obstacles - combine both lists for 2D viz
         all_obstacles = []

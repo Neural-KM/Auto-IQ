@@ -72,10 +72,8 @@ class MPCNode(Node):
         )
         
         # ==================== State ====================
-        # Vehicle state (stored as VehicleState in ROS coordinates)
         self.vehicle_state: VehicleState = None
-        
-        self.current_waypoints = None  # List of (x, y) in ROS coordinates
+        self.current_waypoints = None
         self.current_target_speeds = []
         self.has_trajectory = False
         self.current_behavior_state = TrajectoryMsg.LANE_FOLLOWING
@@ -118,12 +116,7 @@ class MPCNode(Node):
     # ==================== Callbacks ====================
     
     def trajectory_callback(self, msg: TrajectoryMsg):
-        """
-        Receive trajectory from planning node.
-        
-        Converts TrajectoryMsg to Trajectory dataclass.
-        All coordinates are in ROS right-handed system.
-        """
+        """Receive trajectory from planning node."""
         traj = trajectory_from_ros(msg)
         
         if not traj.points:
@@ -132,7 +125,6 @@ class MPCNode(Node):
             return
         
         # Convert Trajectory to list of (x, y) waypoints for MPC
-        # All in ROS coordinates (right-handed)
         waypoints = []
         speeds = []
         for point in traj.points:
@@ -147,12 +139,7 @@ class MPCNode(Node):
         self.mpc.set_waypoints(waypoints)
     
     def odom_callback(self, msg: Odometry):
-        """
-        Update vehicle state from odometry.
-        
-        Converts Odometry message to VehicleState dataclass.
-        Stores ROS coordinates directly; converts to CARLA only when needed.
-        """
+        """Update vehicle state from odometry."""
         self.vehicle_state = vehicle_state_from_odometry(msg)
     
     # ==================== Control Loop ====================
@@ -188,7 +175,7 @@ class MPCNode(Node):
         """Run MPC control step."""
         t_start = time.time()
         
-        # Build current state vector [x, y, psi, v] in ROS coordinates
+        # Build current state vector [x, y, psi, v]
         current_state = np.array([
             self.vehicle_state.x, 
             self.vehicle_state.y,
@@ -304,8 +291,6 @@ class MPCNode(Node):
         for state in predicted:
             pose = PoseStamped()
             pose.header = path_msg.header
-            
-            # State is [x, y, yaw, speed] already in ROS coordinates
             pose.pose.position.x = state[0]
             pose.pose.position.y = state[1]
             pose.pose.position.z = 0.0
