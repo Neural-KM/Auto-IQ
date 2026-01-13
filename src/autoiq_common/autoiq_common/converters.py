@@ -44,11 +44,12 @@ def vehicle_state_from_odometry(msg: Odometry) -> VehicleState:
         msg: Odometry message
         
     Returns:
-        VehicleState dataclass
+        VehicleState dataclass with full kinematic state
     """
     pos = msg.pose.pose.position
     quat = msg.pose.pose.orientation
     vel = msg.twist.twist.linear
+    angular = msg.twist.twist.angular
     
     yaw = quaternion_to_yaw(quat)
     speed = math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)
@@ -56,8 +57,15 @@ def vehicle_state_from_odometry(msg: Odometry) -> VehicleState:
     return VehicleState(
         x=pos.x,
         y=pos.y,
+        z=pos.z,
         yaw=yaw,
         speed=speed,
+        vx=vel.x,
+        vy=vel.y,
+        vz=vel.z,
+        angular_x=angular.x,
+        angular_y=angular.y,
+        angular_z=angular.z,
     )
 
 
