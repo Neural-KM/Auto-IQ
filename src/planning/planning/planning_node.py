@@ -24,7 +24,7 @@ import rclpy
 from rclpy.node import Node
 
 from nav_msgs.msg import Path, Odometry
-from geometry_msgs.msg import PoseStamped, Point
+from geometry_msgs.msg import PoseStamped, Point, PointStamped
 from std_msgs.msg import String, Int32
 
 from autoiq_msgs.msg import ObstacleArray, Trajectory, TrajectoryPoint
@@ -181,6 +181,7 @@ class PlanningNode(Node):
         # ==================== Publishers ====================
         self.trajectory_pub = self.create_publisher(Trajectory, '/planning/trajectory', 10)
         self.global_route_pub = self.create_publisher(Path, '/planning/global_route', 10)
+        self.current_waypoint_pub = self.create_publisher(PointStamped, '/planning/current_waypoint', 10)
         self.status_pub = self.create_publisher(String, '/planning/status', 10)
         
         # ==================== Timer ====================
@@ -207,7 +208,7 @@ class PlanningNode(Node):
         self.vehicle_location_carla = carla.Location(
             x=state.x,
             y=-state.y,  # Y-axis inversion for CARLA
-            z=0.0
+            z=state.z    # Use actual vehicle height for proper waypoint matching
         )
     
     def goal_callback(self, msg: PoseStamped):
@@ -367,6 +368,9 @@ class PlanningNode(Node):
         # Advance global planner for status tracking
         self.global_planner.advance(self.vehicle_location_carla)
         
+        # Publish current waypoint for visualization
+        self._publish_current_waypoint()
+        
         # 5. Generate trajectory (motion planner handles stop trajectory too)
         target_speed_ms = self.target_speed / 3.6
         if behavior_output.state in [BehaviorState.LANE_CHANGING_LEFT, BehaviorState.LANE_CHANGING_RIGHT]:
@@ -490,6 +494,22 @@ class PlanningNode(Node):
             path_msg.poses.append(pose)
         
         self.global_route_pub.publish(path_msg)
+    
+    def _publish_current_waypoint(self):
+        """Publish current waypoint position for visualization."""
+        wp, _ = self.global_planner.get_next_waypoint()
+        if wp is None:
+            return
+        
+        msg = PointStamped()
+        msg.header.frame_id = 'map'
+        msg.header.stamp = self.get_clock().now().to_msg()
+        # Convert from CARLA (left-handed) to ROS (right-handed)
+        msg.point.x = wp.transform.location.x
+        msg.point.y = -wp.transform.location.y  # Y-axis inversion
+        msg.point.z = wp.transform.location.z
+        
+        self.current_waypoint_pub.publish(msg)
     
     def _publish_status(self):
         """Publish planning status."""

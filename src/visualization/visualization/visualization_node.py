@@ -32,7 +32,7 @@ from rclpy.node import Node
 from nav_msgs.msg import Path, Odometry
 from visualization_msgs.msg import MarkerArray, Marker
 from std_msgs.msg import ColorRGBA
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, PointStamped
 
 from autoiq_msgs.msg import ObstacleArray as ObstacleArrayMsg, Trajectory as TrajectoryMsg
 
@@ -118,6 +118,7 @@ class VisualizationNode(Node):
         self.trajectory = []  # List of (x, y)
         self.global_route = []  # List of (x, y, z)
         self.predicted = []  # List of (x, y, yaw, speed)
+        self.current_waypoint = None  # Tuple of (x, y, z) or None
         
         # Obstacles (ROS world coordinates)
         self.ground_truth_obstacles: List[Obstacle] = []  # List of Obstacle dataclasses
@@ -132,6 +133,9 @@ class VisualizationNode(Node):
         # Publish trajectory as Path for RViz
         self.trajectory_viz_pub = self.create_publisher(
             Path, '/visualization/trajectory', 10)
+        # Publish current waypoint marker for RViz
+        self.current_waypoint_marker_pub = self.create_publisher(
+            Marker, '/visualization/current_waypoint', 10)
         
         # ==================== Subscribers ====================
         self.odom_sub = self.create_subscription(
@@ -159,6 +163,10 @@ class VisualizationNode(Node):
             ObstacleArrayMsg, '/perception/obstacles',
             self.detected_obstacles_callback, 10)
         self.get_logger().info('Subscribed to detected obstacles')
+        
+        self.current_waypoint_sub = self.create_subscription(
+            PointStamped, '/planning/current_waypoint',
+            self.current_waypoint_callback, 10)
         
         # ==================== Visualization Timer ====================
         viz_period = 1.0 / viz_rate
@@ -205,6 +213,16 @@ class VisualizationNode(Node):
             z = pose.pose.position.z
             waypoints.append((x, y, z))
         self.global_route = waypoints
+    
+    def current_waypoint_callback(self, msg: PointStamped):
+        """Receive current waypoint from planning node."""
+        self.current_waypoint = (
+            msg.point.x,
+            msg.point.y,
+            msg.point.z
+        )
+        # Publish marker for RViz
+        self._publish_current_waypoint_marker()
     
     def predicted_callback(self, msg: Path):
         """Receive MPC predicted trajectory from control node."""
@@ -357,6 +375,37 @@ class VisualizationNode(Node):
             path_msg.poses.append(pose)
         
         self.trajectory_viz_pub.publish(path_msg)
+    
+    def _publish_current_waypoint_marker(self):
+        """Publish current waypoint as a sphere marker for RViz."""
+        if self.current_waypoint is None:
+            return
+        
+        marker = Marker()
+        marker.header.frame_id = 'map'
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'current_waypoint'
+        marker.id = 0
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        
+        # Position in ROS world coordinates
+        marker.pose.position.x = self.current_waypoint[0]
+        marker.pose.position.y = self.current_waypoint[1]
+        marker.pose.position.z = self.current_waypoint[2] + 1.0  # Lift above road
+        
+        marker.pose.orientation.w = 1.0
+        
+        # Make it a visible sphere
+        marker.scale.x = 2.0
+        marker.scale.y = 2.0
+        marker.scale.z = 2.0
+        
+        # Bright magenta color for visibility
+        marker.color = ColorRGBA(r=1.0, g=0.0, b=1.0, a=0.9)
+        marker.lifetime.nanosec = 200000000  # 200ms
+        
+        self.current_waypoint_marker_pub.publish(marker)
     
     # ==================== Visualization Loop ====================
     
