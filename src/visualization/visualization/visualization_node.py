@@ -23,7 +23,7 @@ Connects to CARLA for debug drawing (optional).
 """
 
 import math
-import numpy as np
+from dataclasses import replace
 from typing import List, Tuple
 
 import rclpy
@@ -34,20 +34,21 @@ from visualization_msgs.msg import MarkerArray, Marker
 from std_msgs.msg import ColorRGBA
 from geometry_msgs.msg import PoseStamped
 
-from autoiq_msgs.msg import ObstacleArray, Trajectory
+from autoiq_msgs.msg import ObstacleArray as ObstacleArrayMsg, Trajectory as TrajectoryMsg
+
+# Import common types and converters
+from autoiq_common.types import VehicleState, Trajectory, ObstacleArray, Obstacle
+from autoiq_common.converters import (
+    vehicle_state_from_odometry,
+    trajectory_from_ros,
+    obstacle_array_from_ros,
+)
+from autoiq_common.utils import quaternion_to_yaw
 
 import carla
 
 from visualization.carla_drawer import CarlaDrawer
 from visualization.live_2d_visualizer import Live2DVisualizerROS
-
-
-def quaternion_to_yaw(q) -> float:
-    """Convert quaternion to yaw angle in radians."""
-    siny_cosp = 2 * (q.w * q.z + q.x * q.y)
-    cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
-    return math.atan2(siny_cosp, cosy_cosp)
-
 
 class VisualizationNode(Node):
     """
@@ -110,10 +111,7 @@ class VisualizationNode(Node):
         
         # ==================== Data Storage ====================
         # Vehicle state (ROS coordinates - right-handed)
-        self.vehicle_x = None
-        self.vehicle_y = None
-        self.vehicle_yaw = None
-        self.vehicle_speed = 0.0
+        self.vehicle_state: VehicleState = None
         self.target_speed = 0.0
         
         # Paths (ROS coordinates)
@@ -122,8 +120,8 @@ class VisualizationNode(Node):
         self.predicted = []  # List of (x, y, yaw, speed)
         
         # Obstacles (ROS world coordinates)
-        self.ground_truth_obstacles = []  # List of dicts
-        self.detected_obstacles = []  # List of dicts
+        self.ground_truth_obstacles: List[Obstacle] = []  # List of Obstacle dataclasses
+        self.detected_obstacles: List[Obstacle] = []  # List of Obstacle dataclasses
         
         # ==================== Publishers for RViz ====================
         # Publish MarkerArrays for obstacles visualization
@@ -141,7 +139,7 @@ class VisualizationNode(Node):
             self.odom_callback, 10)
         
         self.trajectory_sub = self.create_subscription(
-            Trajectory, '/planning/trajectory',
+            TrajectoryMsg, '/planning/trajectory',
             self.trajectory_callback, 10)
         
         self.global_route_sub = self.create_subscription(
@@ -152,14 +150,13 @@ class VisualizationNode(Node):
             Path, '/control/predicted_trajectory',
             self.predicted_callback, 10)
         
-        # Subscribe to obstacle topics - needed for both CARLA and RViz visualization
         self.gt_obstacles_sub = self.create_subscription(
-            ObstacleArray, '/perception/ground_truth/obstacles',
+            ObstacleArrayMsg, '/perception/ground_truth/obstacles',
             self.ground_truth_obstacles_callback, 10)
         self.get_logger().info('Subscribed to ground truth obstacles')
         
         self.detected_obstacles_sub = self.create_subscription(
-            ObstacleArray, '/perception/obstacles',
+            ObstacleArrayMsg, '/perception/obstacles',
             self.detected_obstacles_callback, 10)
         self.get_logger().info('Subscribed to detected obstacles')
         
@@ -172,31 +169,32 @@ class VisualizationNode(Node):
     # ==================== Callbacks ====================
     
     def odom_callback(self, msg: Odometry):
-        """Update vehicle state from odometry."""
-        pos = msg.pose.pose.position
-        quat = msg.pose.pose.orientation
-        vel = msg.twist.twist.linear
+        """
+        Update vehicle state from odometry.
         
-        # Store ROS coordinates (right-handed)
-        self.vehicle_x = pos.x
-        self.vehicle_y = pos.y
-        self.vehicle_yaw = quaternion_to_yaw(quat)
-        self.vehicle_speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+        Converts Odometry message to VehicleState dataclass.
+        """
+        self.vehicle_state = vehicle_state_from_odometry(msg)
     
-    def trajectory_callback(self, msg: Trajectory):
-        """Receive local trajectory from planning node and publish as Path for RViz."""
+    def trajectory_callback(self, msg: TrajectoryMsg):
+        """
+        Receive local trajectory from planning node.
+        
+        Converts TrajectoryMsg to Trajectory dataclass.
+        """
+        traj = trajectory_from_ros(msg)
         waypoints = []
         
         # Extract target speed from first point (if available)
-        if msg.points:
-            self.target_speed = msg.points[0].speed
+        if traj.points:
+            self.target_speed = traj.points[0].speed
             
-        for point in msg.points:
+        for point in traj.points:
             waypoints.append((point.x, point.y))
         self.trajectory = waypoints
         
         # Publish as Path for RViz visualization
-        self._publish_trajectory_path(msg)
+        self._publish_trajectory_path(traj)
     
     def global_route_callback(self, msg: Path):
         """Receive global route from planning node."""
@@ -223,60 +221,37 @@ class VisualizationNode(Node):
             states.append((x, y, yaw, 0.0))
         self.predicted = states
     
-    def _parse_obstacle_array(self, msg: ObstacleArray) -> List[dict]:
+    def _transform_obstacles_to_world(self, obstacle_array: ObstacleArray) -> List[Obstacle]:
         """
-        Parse ObstacleArray message into list of obstacle dicts.
+        Transform obstacles from ego frame to world frame.
         
-        Converts from ego frame to world frame (ROS coordinates) for visualization.
+        Args:
+            obstacle_array: ObstacleArray dataclass (obstacles in ego frame)
+            
+        Returns:
+            List of Obstacle dataclasses in world frame
         """
-        if self.vehicle_x is None:
+        if self.vehicle_state is None:
             return []
         
-        obstacles = []
-        vx, vy, vyaw = self.vehicle_x, self.vehicle_y, self.vehicle_yaw or 0.0
+        result = []
+        vx, vy, vyaw = self.vehicle_state.x, self.vehicle_state.y, self.vehicle_state.yaw
         c, s = math.cos(vyaw), math.sin(vyaw)
         
-        for obstacle in msg.obstacles:
+        for obs in obstacle_array.obstacles:
             # Obstacle position is in ego frame (x=forward, y=left in ROS)
-            ox_ego = obstacle.pose.position.x
-            oy_ego = obstacle.pose.position.y
-            
             # Transform to world coordinates (ROS frame)
-            ox_world = vx + ox_ego * c - oy_ego * s
-            oy_world = vy + ox_ego * s + oy_ego * c
+            world_x = vx + obs.x * c - obs.y * s
+            world_y = vy + obs.x * s + obs.y * c
+            world_yaw = vyaw + obs.yaw
             
-            # Get obstacle yaw (relative + ego)
-            obs_quat = obstacle.pose.orientation
-            obs_yaw_rel = quaternion_to_yaw(obs_quat)
-            obs_yaw_world = vyaw + obs_yaw_rel
-            
-            # Get dimensions from size
-            length = obstacle.size.x
-            width = obstacle.size.y
-            height = obstacle.size.z
-            
-            # Get type from message
-            obs_type = obstacle.type
-            
-            # Get velocity
-            obs_vx = obstacle.velocity.x
-            obs_vy = obstacle.velocity.y
-            
-            obstacles.append({
-                'x': ox_world,
-                'y': oy_world,
-                'yaw': obs_yaw_world,
-                'length': length,
-                'width': width,
-                'height': height,
-                'type': obs_type,
-                'vx': obs_vx,
-                'vy': obs_vy,
-            })
+            # Create new Obstacle with world coordinates
+            world_obs = replace(obs, x=world_x, y=world_y, yaw=world_yaw)
+            result.append(world_obs)
         
-        return obstacles
+        return result
     
-    def _obstacles_to_marker_array(self, obstacles: List[dict], namespace: str, 
+    def _obstacles_to_marker_array(self, obstacles: List[Obstacle], namespace: str, 
                                     color: Tuple[float, float, float]) -> MarkerArray:
         """Convert obstacle list to MarkerArray for RViz."""
         marker_array = MarkerArray()
@@ -299,19 +274,19 @@ class VisualizationNode(Node):
             marker.type = Marker.CUBE
             marker.action = Marker.ADD
             
-            # Obstacles are now in ROS world coordinates, use directly
-            marker.pose.position.x = obs['x']
-            marker.pose.position.y = obs['y']
-            marker.pose.position.z = obs.get('height', 1.8) / 2
+            # Obstacles are in ROS world coordinates, use directly
+            marker.pose.position.x = obs.x
+            marker.pose.position.y = obs.y
+            marker.pose.position.z = obs.height / 2
             
             marker.pose.orientation.x = 0.0
             marker.pose.orientation.y = 0.0
-            marker.pose.orientation.z = math.sin(obs['yaw'] / 2)
-            marker.pose.orientation.w = math.cos(obs['yaw'] / 2)
+            marker.pose.orientation.z = math.sin(obs.yaw / 2)
+            marker.pose.orientation.w = math.cos(obs.yaw / 2)
             
-            marker.scale.x = obs['length']
-            marker.scale.y = obs['width']
-            marker.scale.z = obs['height']
+            marker.scale.x = obs.length
+            marker.scale.y = obs.width
+            marker.scale.z = obs.height
             
             marker.color = ColorRGBA(r=color[0], g=color[1], b=color[2], a=0.7)
             marker.lifetime.nanosec = 200000000
@@ -325,10 +300,10 @@ class VisualizationNode(Node):
             text_marker.id = i + 1
             text_marker.type = Marker.TEXT_VIEW_FACING
             text_marker.action = Marker.ADD
-            text_marker.pose.position.x = marker.pose.position.x
-            text_marker.pose.position.y = marker.pose.position.y
-            text_marker.pose.position.z = marker.pose.position.z + obs['height'] / 2 + 0.5
-            text_marker.text = f"{obs['type']}"
+            text_marker.pose.position.x = obs.x
+            text_marker.pose.position.y = obs.y
+            text_marker.pose.position.z = obs.height + 0.5
+            text_marker.text = f"{obs.type}"
             text_marker.scale.z = 0.5
             text_marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=0.9)
             text_marker.lifetime.nanosec = 200000000
@@ -336,32 +311,41 @@ class VisualizationNode(Node):
         
         return marker_array
     
-    def ground_truth_obstacles_callback(self, msg: ObstacleArray):
-        """Receive ground truth obstacles and convert to markers."""
-        self.ground_truth_obstacles = self._parse_obstacle_array(msg)
+    def ground_truth_obstacles_callback(self, msg: ObstacleArrayMsg):
+        """
+        Receive ground truth obstacles and convert to markers.
+        
+        Converts ObstacleArrayMsg to ObstacleArray dataclass.
+        """
+        obstacle_array = obstacle_array_from_ros(msg)
+        self.ground_truth_obstacles = self._transform_obstacles_to_world(obstacle_array)
         
         # Publish MarkerArray for RViz
         marker_array = self._obstacles_to_marker_array(
             self.ground_truth_obstacles, 'ground_truth_obstacles', (0.0, 1.0, 0.0))
         self.gt_obstacles_marker_pub.publish(marker_array)
     
-    def detected_obstacles_callback(self, msg: ObstacleArray):
-        """Receive detected obstacles and convert to markers."""
-        self.get_logger().info('Received detected obstacles')
-        self.detected_obstacles = self._parse_obstacle_array(msg)
+    def detected_obstacles_callback(self, msg: ObstacleArrayMsg):
+        """
+        Receive detected obstacles and convert to markers.
+        
+        Converts ObstacleArrayMsg to ObstacleArray dataclass.
+        """
+        obstacle_array = obstacle_array_from_ros(msg)
+        self.detected_obstacles = self._transform_obstacles_to_world(obstacle_array)
         
         # Publish MarkerArray for RViz
         marker_array = self._obstacles_to_marker_array(
             self.detected_obstacles, 'detected_obstacles', (1.0, 1.0, 0.0))
         self.detected_obstacles_marker_pub.publish(marker_array)
     
-    def _publish_trajectory_path(self, msg: Trajectory):
-        """Convert Trajectory message to Path for RViz visualization."""
+    def _publish_trajectory_path(self, traj: Trajectory):
+        """Convert Trajectory dataclass to Path for RViz visualization."""
         path_msg = Path()
         path_msg.header.frame_id = 'map'
         path_msg.header.stamp = self.get_clock().now().to_msg()
         
-        for point in msg.points:
+        for point in traj.points:
             pose = PoseStamped()
             pose.header = path_msg.header
             pose.pose.position.x = point.x
@@ -378,7 +362,7 @@ class VisualizationNode(Node):
     
     def visualization_loop(self):
         """Main visualization loop - draws in CARLA and updates 2D viz."""
-        if self.vehicle_x is None:
+        if self.vehicle_state is None:
             return
         
         # ==================== CARLA Debug Drawing ====================
@@ -410,10 +394,10 @@ class VisualizationNode(Node):
             self.carla_drawer.draw_predicted_trajectory(pred_carla, lifetime=lt)
         
         # Draw speed indicator (flip Y for CARLA)
-        if 'speed' in items and self.vehicle_x is not None:
+        if 'speed' in items and self.vehicle_state is not None:
             self.carla_drawer.draw_speed_indicator(
-                self.vehicle_x, -self.vehicle_y,
-                self.vehicle_speed * 3.6,  # Convert to km/h
+                self.vehicle_state.x, -self.vehicle_state.y,
+                self.vehicle_state.speed * 3.6,  # Convert to km/h
                 self.target_speed * 3.6,   # Target speed from trajectory
                 lifetime=lt
             )
@@ -422,9 +406,9 @@ class VisualizationNode(Node):
         if 'ground_truth_obstacles' in items:
             for obs in self.ground_truth_obstacles:
                 self.carla_drawer.draw_obstacle_box(
-                    obs['x'], -obs['y'], -obs['yaw'],
-                    obs['length'], obs['width'], obs.get('height', 1.8),
-                    is_vehicle=(obs['type'] == 'vehicle'),
+                    obs.x, -obs.y, -obs.yaw,
+                    obs.length, obs.width, obs.height,
+                    is_vehicle=(obs.type == 'vehicle'),
                     lifetime=lt,
                     color=(0, 255, 0)  # Green for ground truth
                 )
@@ -433,9 +417,9 @@ class VisualizationNode(Node):
         if 'detected_obstacles' in items:
             for obs in self.detected_obstacles:
                 self.carla_drawer.draw_obstacle_box(
-                    obs['x'], -obs['y'], -obs['yaw'],
-                    obs['length'], obs['width'], obs.get('height', 1.8),
-                    is_vehicle=(obs['type'] == 'vehicle'),
+                    obs.x, -obs.y, -obs.yaw,
+                    obs.length, obs.width, obs.height,
+                    is_vehicle=(obs.type == 'vehicle'),
                     lifetime=lt,
                     color=(255, 255, 0)  # Yellow for detected
                 )
@@ -443,10 +427,10 @@ class VisualizationNode(Node):
     def _update_2d_viz(self):
         """Update 2D matplotlib visualizer."""
         # Update vehicle
-        if self.vehicle_x is not None:
+        if self.vehicle_state is not None:
             self.viz_2d.update_vehicle(
-                self.vehicle_x, self.vehicle_y, 
-                self.vehicle_yaw or 0.0, self.vehicle_speed
+                self.vehicle_state.x, self.vehicle_state.y, 
+                self.vehicle_state.yaw or 0.0, self.vehicle_state.speed
             )
         
         # Update trajectory
@@ -462,20 +446,17 @@ class VisualizationNode(Node):
         if self.predicted:
             self.viz_2d.update_predicted(self.predicted)
         
-        # Update obstacles - combine both lists for 2D viz with type tag
+        # Update obstacles - combine both lists for 2D viz
         all_obstacles = []
         if 'ground_truth_obstacles' in self.carla_draw_items:
-            for obs in self.ground_truth_obstacles:
-                obs_copy = obs.copy()
-                obs_copy['source'] = 'ground_truth'
-                all_obstacles.append(obs_copy)
+            all_obstacles.extend(self.ground_truth_obstacles)
         if 'detected_obstacles' in self.carla_draw_items:
-            for obs in self.detected_obstacles:
-                obs_copy = obs.copy()
-                obs_copy['source'] = 'detected'
-                all_obstacles.append(obs_copy)
+            all_obstacles.extend(self.detected_obstacles)
         if all_obstacles:
-            self.viz_2d.update_obstacles(all_obstacles)
+            # Convert to dicts for 2D viz (legacy interface)
+            obs_dicts = [{'x': o.x, 'y': o.y, 'yaw': o.yaw, 'length': o.length, 
+                          'width': o.width, 'type': o.type} for o in all_obstacles]
+            self.viz_2d.update_obstacles(obs_dicts)
     
     def destroy_node(self):
         """Cleanup on shutdown."""

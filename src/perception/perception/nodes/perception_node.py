@@ -43,7 +43,6 @@ from perception.core.perception import Perception
 from perception.core.lane_detector import LaneDetector
 from perception.data_classes.lane import LaneDetection
 from perception.tools.ground_truth_perception import GroundTruthPerception
-from geometry_msgs.msg import Point
 
 import carla
 

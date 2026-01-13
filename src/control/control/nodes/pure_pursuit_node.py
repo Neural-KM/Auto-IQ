@@ -26,13 +26,7 @@ from std_msgs.msg import String
 from autoiq_msgs.msg import VehicleControl, Trajectory
 
 from control.utils.pid_controller import PIDController
-
-
-def quaternion_to_yaw(q):
-    """Convert quaternion to yaw angle in radians."""
-    siny_cosp = 2 * (q.w * q.z + q.x * q.y)
-    cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
-    return math.atan2(siny_cosp, cosy_cosp)
+from autoiq_common.utils import quaternion_to_yaw
 
 
 class PurePursuitNode(Node):

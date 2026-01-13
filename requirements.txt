@@ -7,3 +7,6 @@ ultralytics
 torch
 torchvision
 networkx
+empy
+catkin_pkg
+lark
