@@ -32,9 +32,10 @@ from rclpy.node import Node
 from nav_msgs.msg import Path, Odometry
 from visualization_msgs.msg import MarkerArray, Marker
 from std_msgs.msg import ColorRGBA
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, PointStamped
 
 from autoiq_msgs.msg import ObstacleArray as ObstacleArrayMsg, Trajectory as TrajectoryMsg
+from autoiq_msgs.msg import VehicleControl
 
 # Import common types and converters
 from autoiq_common.types import VehicleState, Trajectory, ObstacleArray, Obstacle
@@ -70,8 +71,8 @@ class VisualizationNode(Node):
         self.declare_parameter('draw_lifetime', 0.15)  # seconds
         
         # Comma-separated list of objects to draw in CARLA debug view
-        # Options: trajectory, global_route, predicted, ground_truth_obstacles, detected_obstacles, speed
-        self.declare_parameter('carla_debug_draw', 'trajectory,global_route,predicted,speed')
+        # Options: trajectory, global_route, predicted_traj, ground_truth_obstacles, detected_obstacles, speed, control
+        self.declare_parameter('carla_debug_draw', 'trajectory,global_route,predicted_traj,speed,control')
         
         carla_host = self.get_parameter('carla_host').value
         carla_port = self.get_parameter('carla_port').value
@@ -110,14 +111,19 @@ class VisualizationNode(Node):
             self.get_logger().info('2D matplotlib visualization enabled')
         
         # ==================== Data Storage ====================
-        # Vehicle state (ROS coordinates - right-handed)
         self.vehicle_state: VehicleState = None
         self.target_speed = 0.0
         
-        # Paths (ROS coordinates)
+        # Vehicle control (steer, throttle, brake)
+        self.current_steer = 0.0
+        self.current_throttle = 0.0
+        self.current_brake = 0.0
+        
+        # Paths
         self.trajectory = []  # List of (x, y)
         self.global_route = []  # List of (x, y, z)
-        self.predicted = []  # List of (x, y, yaw, speed)
+        self.predicted_trajectory = []  # List of (x, y, yaw, speed)
+        self.current_waypoint = None  # Tuple of (x, y, z) or None
         
         # Obstacles (ROS world coordinates)
         self.ground_truth_obstacles: List[Obstacle] = []  # List of Obstacle dataclasses
@@ -132,6 +138,9 @@ class VisualizationNode(Node):
         # Publish trajectory as Path for RViz
         self.trajectory_viz_pub = self.create_publisher(
             Path, '/visualization/trajectory', 10)
+        # Publish current waypoint marker for RViz
+        self.current_waypoint_marker_pub = self.create_publisher(
+            Marker, '/visualization/current_waypoint', 10)
         
         # ==================== Subscribers ====================
         self.odom_sub = self.create_subscription(
@@ -159,6 +168,15 @@ class VisualizationNode(Node):
             ObstacleArrayMsg, '/perception/obstacles',
             self.detected_obstacles_callback, 10)
         self.get_logger().info('Subscribed to detected obstacles')
+        
+        self.current_waypoint_sub = self.create_subscription(
+            PointStamped, '/planning/current_waypoint',
+            self.current_waypoint_callback, 10)
+        
+        self.control_sub = self.create_subscription(
+            VehicleControl, '/carla/ego_vehicle/control',
+            self.control_callback, 10)
+        self.get_logger().info('Subscribed to vehicle control')
         
         # ==================== Visualization Timer ====================
         viz_period = 1.0 / viz_rate
@@ -206,6 +224,16 @@ class VisualizationNode(Node):
             waypoints.append((x, y, z))
         self.global_route = waypoints
     
+    def current_waypoint_callback(self, msg: PointStamped):
+        """Receive current waypoint from planning node."""
+        self.current_waypoint = (
+            msg.point.x,
+            msg.point.y,
+            msg.point.z
+        )
+        # Publish marker for RViz
+        self._publish_current_waypoint_marker()
+    
     def predicted_callback(self, msg: Path):
         """Receive MPC predicted trajectory from control node."""
         states = []
@@ -219,7 +247,13 @@ class VisualizationNode(Node):
             
             # Speed not available in Path, use 0
             states.append((x, y, yaw, 0.0))
-        self.predicted = states
+        self.predicted_trajectory = states
+    
+    def control_callback(self, msg: VehicleControl):
+        """Receive vehicle control command from control node."""
+        self.current_steer = msg.steer
+        self.current_throttle = msg.throttle
+        self.current_brake = msg.brake
     
     def _transform_obstacles_to_world(self, obstacle_array: ObstacleArray) -> List[Obstacle]:
         """
@@ -358,6 +392,37 @@ class VisualizationNode(Node):
         
         self.trajectory_viz_pub.publish(path_msg)
     
+    def _publish_current_waypoint_marker(self):
+        """Publish current waypoint as a sphere marker for RViz."""
+        if self.current_waypoint is None:
+            return
+        
+        marker = Marker()
+        marker.header.frame_id = 'map'
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'current_waypoint'
+        marker.id = 0
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        
+        # Position in ROS world coordinates
+        marker.pose.position.x = self.current_waypoint[0]
+        marker.pose.position.y = self.current_waypoint[1]
+        marker.pose.position.z = self.current_waypoint[2] + 1.0  # Lift above road
+        
+        marker.pose.orientation.w = 1.0
+        
+        # Make it a visible sphere
+        marker.scale.x = 2.0
+        marker.scale.y = 2.0
+        marker.scale.z = 2.0
+        
+        # Bright magenta color for visibility
+        marker.color = ColorRGBA(r=1.0, g=0.0, b=1.0, a=0.9)
+        marker.lifetime.nanosec = 200000000  # 200ms
+        
+        self.current_waypoint_marker_pub.publish(marker)
+    
     # ==================== Visualization Loop ====================
     
     def visualization_loop(self):
@@ -389,8 +454,8 @@ class VisualizationNode(Node):
             self.carla_drawer.draw_trajectory(traj_carla, lifetime=lt)
         
         # Draw MPC predicted trajectory (flip Y and yaw for CARLA)
-        if 'predicted' in items and self.predicted:
-            pred_carla = [(x, -y, -yaw, speed) for x, y, yaw, speed in self.predicted]
+        if 'predicted_traj' in items and self.predicted_trajectory:
+            pred_carla = [(x, -y, -yaw, speed) for x, y, yaw, speed in self.predicted_trajectory]
             self.carla_drawer.draw_predicted_trajectory(pred_carla, lifetime=lt)
         
         # Draw speed indicator (flip Y for CARLA)
@@ -442,9 +507,9 @@ class VisualizationNode(Node):
             route_2d = [(p[0], p[1]) for p in self.global_route]
             self.viz_2d.update_global_route(route_2d)
         
-        # Update predicted
-        if self.predicted:
-            self.viz_2d.update_predicted(self.predicted)
+        # Update predicted trajectory
+        if self.predicted_trajectory:
+            self.viz_2d.update_predicted_trajectory(self.predicted_trajectory)
         
         # Update obstacles - combine both lists for 2D viz
         all_obstacles = []

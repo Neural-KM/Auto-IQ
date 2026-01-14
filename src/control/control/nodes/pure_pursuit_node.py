@@ -26,7 +26,8 @@ from std_msgs.msg import String
 from autoiq_msgs.msg import VehicleControl, Trajectory
 
 from control.utils.pid_controller import PIDController
-from autoiq_common.utils import quaternion_to_yaw
+from autoiq_common.types import VehicleState
+from autoiq_common.converters import vehicle_state_from_odometry
 
 
 class PurePursuitNode(Node):
@@ -81,10 +82,7 @@ class PurePursuitNode(Node):
         self.pid = PIDController(pid_kp, pid_ki, pid_kd, 1.0/control_rate, output_limits)
         
         # ==================== State ====================
-        self.vehicle_x = None
-        self.vehicle_y = None
-        self.vehicle_yaw = None
-        self.vehicle_speed = 0.0
+        self.vehicle_state: VehicleState = None
         
         self.current_waypoints = None
         self.has_trajectory = False
@@ -134,39 +132,23 @@ class PurePursuitNode(Node):
         self.current_behavior_state = msg.behavior_state
         
         # Convert Trajectory to list of (x, y, v) waypoints
-        # Note: Convert back from ROS to CARLA coordinates
         waypoints = []
         for point in msg.points:
-            x = point.x
-            y = -point.y  # Y-axis inversion for CARLA
-            v = point.speed  # Target speed in m/s
-            waypoints.append((x, y, v))
+            waypoints.append((point.x, point.y, point.speed))
         
         self.current_waypoints = waypoints
         self.has_trajectory = True
     
     def odom_callback(self, msg: Odometry):
         """Update vehicle state from odometry."""
-        pos = msg.pose.pose.position
-        quat = msg.pose.pose.orientation
-        vel = msg.twist.twist.linear
-        
-        # Convert to CARLA coordinates
-        self.vehicle_x = pos.x
-        self.vehicle_y = -pos.y  # Y-axis inversion
-        
-        yaw_rad = quaternion_to_yaw(quat)
-        self.vehicle_yaw = -yaw_rad  # Yaw inversion for CARLA
-        
-        # Speed in m/s
-        self.vehicle_speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+        self.vehicle_state = vehicle_state_from_odometry(msg)
     
     # ==================== Control Loop ====================
     
     def control_loop(self):
         """Main control loop."""
         # Check if we have valid state
-        if self.vehicle_x is None or self.vehicle_y is None:
+        if self.vehicle_state is None:
             return
         
         # Publish status
@@ -196,7 +178,7 @@ class PurePursuitNode(Node):
             return 0.0
         
         # Compute adaptive lookahead distance based on speed
-        lookahead = self.min_lookahead + self.lookahead_ratio * self.vehicle_speed
+        lookahead = self.min_lookahead + self.lookahead_ratio * self.vehicle_state.speed
         lookahead = np.clip(lookahead, self.min_lookahead, self.max_lookahead)
         self._current_lookahead_distance = lookahead
         
@@ -208,9 +190,9 @@ class PurePursuitNode(Node):
         
         self._current_lookahead_point = lookahead_point
         
-        # Vector from vehicle to lookahead point
-        dx = lookahead_point[0] - self.vehicle_x
-        dy = lookahead_point[1] - self.vehicle_y
+        # Vector from vehicle to lookahead point (in world frame)
+        dx = lookahead_point[0] - self.vehicle_state.x
+        dy = lookahead_point[1] - self.vehicle_state.y
         ld = math.sqrt(dx**2 + dy**2)
         
         # Prevent division by zero
@@ -219,10 +201,10 @@ class PurePursuitNode(Node):
         
         ld = max(ld, self.min_lookahead)
         
-        # Transform to vehicle frame (rotate by -yaw)
-        cos_yaw = math.cos(-self.vehicle_yaw)
-        sin_yaw = math.sin(-self.vehicle_yaw)
-        local_y = dx * sin_yaw + dy * cos_yaw
+        # Transform to vehicle frame
+        cos_yaw = math.cos(self.vehicle_state.yaw)
+        sin_yaw = math.sin(self.vehicle_state.yaw)
+        local_y = -dx * sin_yaw + dy * cos_yaw
         
         # Pure pursuit formula: curvature = 2 * y / L^2
         curvature = 2.0 * local_y / (ld * ld)
@@ -230,8 +212,8 @@ class PurePursuitNode(Node):
         # Steering angle from curvature: delta = atan(L * curvature)
         steering_angle = math.atan(self.wheelbase * curvature)
         
-        # Normalize to [-1, 1] range
-        max_steering_angle = math.radians(35.0)  # ~35 degrees max
+        # Normalize to [-1, 1]
+        max_steering_angle = math.radians(35.0)
         steering = steering_angle / max_steering_angle
         
         return np.clip(steering, -self.max_steering, self.max_steering)
@@ -244,8 +226,8 @@ class PurePursuitNode(Node):
         # Find first waypoint beyond lookahead distance
         for wp in self.current_waypoints:
             dist = math.sqrt(
-                (wp[0] - self.vehicle_x)**2 + 
-                (wp[1] - self.vehicle_y)**2
+                (wp[0] - self.vehicle_state.x)**2 + 
+                (wp[1] - self.vehicle_state.y)**2
             )
             if dist >= lookahead_distance:
                 return wp
@@ -258,7 +240,7 @@ class PurePursuitNode(Node):
     
     def _compute_throttle_brake(self):
         """Compute throttle/brake using PID speed control."""
-        current_speed_kmh = self.vehicle_speed * 3.6
+        current_speed_kmh = self.vehicle_state.speed * 3.6
         
         # Get target speed from lookahead waypoint
         target_speed_kmh = 0.0
@@ -330,7 +312,7 @@ class PurePursuitNode(Node):
             'controller': 'pure_pursuit',
             'has_trajectory': self.has_trajectory,
             'num_waypoints': len(self.current_waypoints) if self.current_waypoints else 0,
-            'vehicle_speed_kmh': self.vehicle_speed * 3.6 if self.vehicle_speed else 0.0,
+            'vehicle_speed_kmh': self.vehicle_state.speed * 3.6 if self.vehicle_state else 0.0,
             'target_speed_kmh': current_target_speed,
             'lookahead_distance': self._current_lookahead_distance,
             'steering': self.previous_steering

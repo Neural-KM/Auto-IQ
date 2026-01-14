@@ -505,15 +505,11 @@ class CarlaBridgeNode(Node):
     # ==================== Control ====================
     
     def control_callback(self, msg: VehicleControl):
-        """
-        Handle vehicle control commands.
-        
-        Converts VehicleControl message to CARLA VehicleControl.
-        """
+        """Handle vehicle control commands."""
         with self.control_lock:
             self.current_control.throttle = max(0.0, min(1.0, msg.throttle))
             self.current_control.brake = max(0.0, min(1.0, msg.brake))
-            self.current_control.steer = max(-1.0, min(1.0, msg.steer))
+            self.current_control.steer = max(-1.0, min(1.0, -msg.steer))
             self.current_control.hand_brake = msg.hand_brake
             self.current_control.reverse = msg.reverse
             self.current_control.manual_gear_shift = msg.manual_gear_shift

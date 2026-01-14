@@ -267,11 +267,22 @@ class WaypointConverter:
     def _xy_to_frenet_spline(self, x, y):
         """Project point onto spline using search + Newton refinement."""
         # Coarse search: sample spline and find closest
+        # Only search within +-10 meters of previous s if available
+        total_length = self.spline.get_total_length()
+        search_radius = 10.0  # meters
+        
+        if self._prev_s is not None:
+            s_min = max(0, self._prev_s - search_radius)
+            s_max = min(total_length, self._prev_s + search_radius)
+        else:
+            s_min = 0
+            s_max = total_length
+        
         n_samples = min(100, len(self.wx) * 2)
-        s_samples = np.linspace(0, self.spline.get_total_length(), n_samples)
+        s_samples = np.linspace(s_min, s_max, n_samples)
         
         min_dist = float('inf')
-        best_s = 0
+        best_s = s_min
         
         for s_test in s_samples:
             px, py = self.spline.calc_position(s_test)

@@ -33,7 +33,16 @@ class Live2DVisualizerROS:
     
     All data is set via update methods (called from ROS callbacks).
     The visualizer runs its own thread for rendering.
+    
+    Supports interactive zoom controls:
+    - '+' / '=' : Zoom in (smaller view window, more detail)
+    - '-' / '_' : Zoom out (larger view window, less detail)
+    - '0' : Reset to auto-fit mode (shows all data)
+    - 'v' : Vehicle-centered mode (follows vehicle with current zoom)
     """
+    
+    # Zoom levels in meters (half-width of view window)
+    ZOOM_LEVELS = [10, 15, 20, 30, 50, 75, 100, 150, 200, 300, 500]
     
     def __init__(self, title: str = "Auto-IQ Live 2D Visualizer", refresh_hz: float = 10.0):
         self.title = title
@@ -47,8 +56,13 @@ class Live2DVisualizerROS:
         self._vehicle_speed = 0.0
         self._trajectory = None  # List of (x, y)
         self._global_route = None  # List of (x, y)
-        self._predicted = None  # List of (x, y, yaw, speed)
+        self._predicted_trajectory = None  # List of (x, y, yaw, speed)
         self._obstacles = []  # List of dicts with x, y, yaw, length, width, type
+        
+        # Zoom control
+        self._zoom_index = 3  # Default to 30m half-width
+        self._auto_fit_mode = False  # Start in vehicle-centered mode
+        self._vehicle_centered = True  # Follow vehicle
         
         # Plot handles
         self._fig = None
@@ -56,7 +70,7 @@ class Live2DVisualizerROS:
         self._vehicle_patch = None
         self._trajectory_line = None
         self._global_route_line = None
-        self._predicted_line = None
+        self._predicted_trajectory_line = None
         self._obstacle_patches = []
     
     def start(self) -> bool:
@@ -82,7 +96,7 @@ class Live2DVisualizerROS:
         self._ax = self._fig.add_subplot(111)
         self._fig.canvas = FigureCanvasAgg(self._fig)
         
-        self._ax.set_aspect('equal', adjustable='datalim')
+        self._ax.set_aspect('equal', adjustable='box')
         self._ax.grid(True, alpha=0.3)
         self._ax.set_xlabel('X (m)')
         self._ax.set_ylabel('Y (m)')
@@ -93,7 +107,7 @@ class Live2DVisualizerROS:
                                                   linewidth=1.5, alpha=0.5, label='Global Route')
         self._trajectory_line, = self._ax.plot([], [], '-', color='cyan', 
                                                 linewidth=2, label='Trajectory')
-        self._predicted_line, = self._ax.plot([], [], '-', color='orange', 
+        self._predicted_trajectory_line, = self._ax.plot([], [], '-', color='orange', 
                                                linewidth=2, label='MPC Predicted')
         self._vehicle_patch = Polygon([[0, 0], [0, 0], [0, 0]], color='blue', alpha=0.8)
         self._ax.add_patch(self._vehicle_patch)
@@ -119,8 +133,11 @@ class Live2DVisualizerROS:
             speed = self._vehicle_speed
             trajectory = self._trajectory.copy() if self._trajectory else None
             global_route = self._global_route.copy() if self._global_route else None
-            predicted = self._predicted.copy() if self._predicted else None
+            predicted_trajectory = self._predicted_trajectory.copy() if self._predicted_trajectory else None
             obstacles = self._obstacles.copy()
+            zoom_idx = self._zoom_index
+            auto_fit = self._auto_fit_mode
+            vehicle_centered = self._vehicle_centered
         
         xs, ys = [], []
         
@@ -143,13 +160,13 @@ class Live2DVisualizerROS:
             self._trajectory_line.set_data([], [])
         
         # Draw predicted trajectory
-        if predicted and len(predicted) > 1:
-            pred = np.array(predicted)
-            self._predicted_line.set_data(pred[:, 0], pred[:, 1])
+        if predicted_trajectory and len(predicted_trajectory) > 1:
+            pred = np.array(predicted_trajectory)
+            self._predicted_trajectory_line.set_data(pred[:, 0], pred[:, 1])
             xs.extend(pred[:, 0].tolist())
             ys.extend(pred[:, 1].tolist())
         else:
-            self._predicted_line.set_data([], [])
+            self._predicted_trajectory_line.set_data([], [])
         
         # Remove old obstacle patches
         for patch in self._obstacle_patches:
@@ -178,23 +195,44 @@ class Live2DVisualizerROS:
         else:
             self._vehicle_patch.set_xy([[0, 0], [0, 0], [0, 0]])
         
-        # Update plot bounds
-        if xs and ys:
+        # Update plot bounds based on zoom mode
+        if auto_fit and xs and ys:
+            # Auto-fit mode: show all data with margin
+            margin = 20
+            self._ax.set_xlim(min(xs) - margin, max(xs) + margin)
+            self._ax.set_ylim(min(ys) - margin, max(ys) + margin)
+        elif vehicle_centered and vehicle is not None:
+            # Vehicle-centered mode: fixed zoom around vehicle
+            zoom_half_width = self.ZOOM_LEVELS[zoom_idx]
+            vx, vy, _ = vehicle
+            self._ax.set_xlim(vx - zoom_half_width, vx + zoom_half_width)
+            self._ax.set_ylim(vy - zoom_half_width, vy + zoom_half_width)
+        elif xs and ys:
+            # Fallback to auto-fit
             margin = 20
             self._ax.set_xlim(min(xs) - margin, max(xs) + margin)
             self._ax.set_ylim(min(ys) - margin, max(ys) + margin)
         
-        # Update title with speed
-        if vehicle is not None:
-            self._ax.set_title(f"{self.title} | Speed: {speed * 3.6:.1f} km/h")
+        # Build zoom status string
+        if auto_fit:
+            zoom_str = "Auto-fit"
+        else:
+            zoom_str = f"Zoom: {self.ZOOM_LEVELS[zoom_idx]}m"
         
-        # Render to OpenCV window
+        # Update title with speed and zoom info
+        if vehicle is not None:
+            self._ax.set_title(f"{self.title} | Speed: {speed * 3.6:.1f} km/h | {zoom_str}\n[+/-] Zoom  [0] Auto-fit  [V] Vehicle-centered")
+        
+        # Render to OpenCV window and handle keyboard
         try:
             self._fig.canvas.draw()
             buf = np.asarray(self._fig.canvas.buffer_rgba())
             img = cv2.cvtColor(buf, cv2.COLOR_RGBA2BGR)
             cv2.imshow(self.title, img)
-            cv2.waitKey(1)
+            
+            # Handle keyboard input for zoom control
+            key = cv2.waitKey(1) & 0xFF
+            self._handle_key(key)
         except Exception:
             pass
     
@@ -239,6 +277,44 @@ class Live2DVisualizerROS:
         
         return pts
     
+    def _handle_key(self, key: int):
+        """
+        Handle keyboard input for zoom control.
+        
+        Keys:
+            '+' / '=' : Zoom in (smaller view window)
+            '-' / '_' : Zoom out (larger view window)
+            '0'       : Reset to auto-fit mode
+            'v' / 'V' : Toggle vehicle-centered mode
+        """
+        if key == 255:  # No key pressed
+            return
+        
+        with self._lock:
+            # Zoom in: '+' or '='
+            if key in [ord('+'), ord('=')]:
+                if self._zoom_index > 0:
+                    self._zoom_index -= 1
+                    self._auto_fit_mode = False
+                    self._vehicle_centered = True
+            
+            # Zoom out: '-' or '_'
+            elif key in [ord('-'), ord('_')]:
+                if self._zoom_index < len(self.ZOOM_LEVELS) - 1:
+                    self._zoom_index += 1
+                    self._auto_fit_mode = False
+                    self._vehicle_centered = True
+            
+            # Auto-fit mode: '0'
+            elif key == ord('0'):
+                self._auto_fit_mode = True
+                self._vehicle_centered = False
+            
+            # Vehicle-centered mode: 'v' or 'V'
+            elif key in [ord('v'), ord('V')]:
+                self._auto_fit_mode = False
+                self._vehicle_centered = True
+    
     # ==================== Update Methods (called from ROS callbacks) ====================
     
     def update_vehicle(self, x: float, y: float, yaw: float, speed: float):
@@ -257,10 +333,10 @@ class Live2DVisualizerROS:
         with self._lock:
             self._global_route = list(waypoints) if waypoints else None
     
-    def update_predicted(self, states: List[Tuple[float, float, float, float]]):
+    def update_predicted_trajectory(self, states: List[Tuple[float, float, float, float]]):
         """Update MPC predicted trajectory."""
         with self._lock:
-            self._predicted = list(states) if states else None
+            self._predicted_trajectory = list(states) if states else None
     
     def update_obstacles(self, obstacles: List[dict]):
         """

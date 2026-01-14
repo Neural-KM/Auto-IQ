@@ -51,7 +51,7 @@ class MPCNode(Node):
         # ==================== Parameters ====================
         self.declare_parameter('mpc_horizon', 20)
         self.declare_parameter('mpc_dt', 0.05)
-        self.declare_parameter('trajectory_mode', 0)  # 0: heuristic, 1: trapezoidal
+        self.declare_parameter('trajectory_mode', 1)  # 0: heuristic, 1: trapezoidal
         self.declare_parameter('max_steering_diff', 0.1)
         self.declare_parameter('control_rate', 20.0)  # Hz
         
@@ -72,10 +72,8 @@ class MPCNode(Node):
         )
         
         # ==================== State ====================
-        # Vehicle state (stored as VehicleState in ROS coordinates)
         self.vehicle_state: VehicleState = None
-        
-        self.current_waypoints = None  # List of (x, y) in ROS coordinates
+        self.current_waypoints = None
         self.current_target_speeds = []
         self.has_trajectory = False
         self.current_behavior_state = TrajectoryMsg.LANE_FOLLOWING
@@ -118,12 +116,7 @@ class MPCNode(Node):
     # ==================== Callbacks ====================
     
     def trajectory_callback(self, msg: TrajectoryMsg):
-        """
-        Receive trajectory from planning node.
-        
-        Converts TrajectoryMsg to Trajectory dataclass.
-        All coordinates are in ROS right-handed system.
-        """
+        """Receive trajectory from planning node."""
         traj = trajectory_from_ros(msg)
         
         if not traj.points:
@@ -132,7 +125,6 @@ class MPCNode(Node):
             return
         
         # Convert Trajectory to list of (x, y) waypoints for MPC
-        # All in ROS coordinates (right-handed)
         waypoints = []
         speeds = []
         for point in traj.points:
@@ -147,13 +139,22 @@ class MPCNode(Node):
         self.mpc.set_waypoints(waypoints)
     
     def odom_callback(self, msg: Odometry):
-        """
-        Update vehicle state from odometry.
-        
-        Converts Odometry message to VehicleState dataclass.
-        Stores ROS coordinates directly; converts to CARLA only when needed.
-        """
+        """Update vehicle state from odometry."""
         self.vehicle_state = vehicle_state_from_odometry(msg)
+    
+    # ==================== Target Speed Selection ====================
+    
+    def _get_target_speed_from_trajectory(self) -> float:
+        """
+        Get target speed from trajectory using maximum velocity.
+        
+        Returns:
+            Target speed in m/s (maximum speed from trajectory)
+        """
+        if not self.current_target_speeds:
+            return 0.0
+        
+        return max(self.current_target_speeds)
     
     # ==================== Control Loop ====================
     
@@ -178,9 +179,6 @@ class MPCNode(Node):
         # Publish predicted trajectory for visualization
         self._publish_predicted_trajectory()
         
-        # Apply steering smoothing
-        steering = self._smooth_steering(steering)
-        
         # Publish control
         self._publish_control(steering, throttle, brake)
     
@@ -188,7 +186,7 @@ class MPCNode(Node):
         """Run MPC control step."""
         t_start = time.time()
         
-        # Build current state vector [x, y, psi, v] in ROS coordinates
+        # Build current state vector [x, y, psi, v]
         current_state = np.array([
             self.vehicle_state.x, 
             self.vehicle_state.y,
@@ -196,13 +194,18 @@ class MPCNode(Node):
             self.vehicle_state.speed
         ])
         
-        # Get target speed from trajectory (use first waypoint's speed as reference)
-        target_speed_ms = 0.0
-        if self.current_target_speeds:
-            target_speed_ms = self.current_target_speeds[0]
+        # Get target speed using smart selection from trajectory
+        target_speed_ms = self._get_target_speed_from_trajectory()
+        
+        # Generate reference trajectory
+        reference = self.mpc.generate_reference(current_state, target_speed_ms)
+        
+        if reference is None:
+            self.get_logger().warn('MPC reference generation failed - using previous steering with brake')
+            return self.previous_steering, 0.0, 1.0
         
         # Solve MPC optimization
-        optimal_control = self.mpc.solve(current_state, target_speed_ms)
+        optimal_control = self.mpc.solve(current_state, reference)
         
         self._last_solve_time_ms = (time.time() - t_start) * 1000
         
@@ -229,15 +232,6 @@ class MPCNode(Node):
         
         return float(steering), float(throttle), float(brake)
     
-    def _smooth_steering(self, steering):
-        """Apply steering smoothing to prevent jerky movements."""
-        if steering > self.previous_steering + self.max_steering_diff:
-            steering = self.previous_steering + self.max_steering_diff
-        elif steering < self.previous_steering - self.max_steering_diff:
-            steering = self.previous_steering - self.max_steering_diff
-        
-        self.previous_steering = steering
-        return steering
     
     # ==================== Publishers ====================
     
@@ -271,10 +265,9 @@ class MPCNode(Node):
     
     def _publish_status(self):
         """Publish control status."""
-        # Get current target speed from trajectory
-        current_target_speed_kmh = 0.0
-        if self.current_target_speeds:
-            current_target_speed_kmh = self.current_target_speeds[0] * 3.6  # Convert to km/h
+        # Get current target speed using smart selection
+        target_speed_ms = self._get_target_speed_from_trajectory()
+        current_target_speed_kmh = target_speed_ms * 3.6  # Convert to km/h
             
         status = {
             'controller': 'mpc',
@@ -304,8 +297,6 @@ class MPCNode(Node):
         for state in predicted:
             pose = PoseStamped()
             pose.header = path_msg.header
-            
-            # State is [x, y, yaw, speed] already in ROS coordinates
             pose.pose.position.x = state[0]
             pose.pose.position.y = state[1]
             pose.pose.position.z = 0.0

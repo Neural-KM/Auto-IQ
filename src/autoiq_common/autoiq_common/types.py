@@ -19,13 +19,27 @@ class VehicleState:
     Attributes:
         x: X position in world frame (meters)
         y: Y position in world frame (meters)
+        z: Z position in world frame (meters)
         yaw: Heading angle in radians (0 = +X axis, counter-clockwise positive)
-        speed: Scalar speed (m/s)
+        speed: Scalar speed magnitude (m/s)
+        vx: Linear velocity in X direction (m/s)
+        vy: Linear velocity in Y direction (m/s)
+        vz: Linear velocity in Z direction (m/s)
+        angular_x: Angular velocity around X axis (rad/s, roll rate)
+        angular_y: Angular velocity around Y axis (rad/s, pitch rate)
+        angular_z: Angular velocity around Z axis (rad/s, yaw rate)
     """
     x: float = 0.0
     y: float = 0.0
+    z: float = 0.0
     yaw: float = 0.0
     speed: float = 0.0
+    vx: float = 0.0
+    vy: float = 0.0
+    vz: float = 0.0
+    angular_x: float = 0.0
+    angular_y: float = 0.0
+    angular_z: float = 0.0
 
 
 @dataclass
