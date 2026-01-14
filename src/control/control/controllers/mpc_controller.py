@@ -44,7 +44,6 @@ class MPCController:
         Args:
             dt: Control timestep (seconds)
             horizon: Prediction horizon (number of steps)
-            target_speed: Target speed in km/h
             trajectory_mode: 0 for heuristic (curvature-based), 1 for trapezoidal (forward-backward)
         """
         

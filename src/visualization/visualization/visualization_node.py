@@ -467,16 +467,6 @@ class VisualizationNode(Node):
                 lifetime=lt
             )
         
-        # Draw control info (steer, throttle, brake) - flip Y for CARLA
-        if 'control' in items and self.vehicle_state is not None:
-            self.carla_drawer.draw_control_info(
-                self.vehicle_state.x, -self.vehicle_state.y,
-                self.current_steer,
-                self.current_throttle,
-                self.current_brake,
-                lifetime=lt
-            )
-        
         # Ground truth obstacles (green boxes, flip Y and yaw for CARLA)
         if 'ground_truth_obstacles' in items:
             for obs in self.ground_truth_obstacles:

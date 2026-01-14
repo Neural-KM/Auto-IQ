@@ -221,7 +221,7 @@ class Live2DVisualizerROS:
         
         # Update title with speed and zoom info
         if vehicle is not None:
-            self._ax.set_title(f"{self.title} | Speed: {speed * 3.6:.1f} km/h | {zoom_str}\n[+/-] Zoom  [0] Auto-fit  [V] Vehicle-center")
+            self._ax.set_title(f"{self.title} | Speed: {speed * 3.6:.1f} km/h | {zoom_str}\n[+/-] Zoom  [0] Auto-fit  [V] Vehicle-centered")
         
         # Render to OpenCV window and handle keyboard
         try:
@@ -233,7 +233,6 @@ class Live2DVisualizerROS:
             # Handle keyboard input for zoom control
             key = cv2.waitKey(1) & 0xFF
             self._handle_key(key)
-            cv2.waitKey(1)
         except Exception:
             pass
     
