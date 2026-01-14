@@ -35,6 +35,7 @@ from std_msgs.msg import ColorRGBA
 from geometry_msgs.msg import PoseStamped, PointStamped
 
 from autoiq_msgs.msg import ObstacleArray as ObstacleArrayMsg, Trajectory as TrajectoryMsg
+from autoiq_msgs.msg import VehicleControl
 
 # Import common types and converters
 from autoiq_common.types import VehicleState, Trajectory, ObstacleArray, Obstacle
@@ -70,8 +71,8 @@ class VisualizationNode(Node):
         self.declare_parameter('draw_lifetime', 0.15)  # seconds
         
         # Comma-separated list of objects to draw in CARLA debug view
-        # Options: trajectory, global_route, predicted_traj, ground_truth_obstacles, detected_obstacles, speed
-        self.declare_parameter('carla_debug_draw', 'trajectory,global_route,predicted_traj,speed')
+        # Options: trajectory, global_route, predicted_traj, ground_truth_obstacles, detected_obstacles, speed, control
+        self.declare_parameter('carla_debug_draw', 'trajectory,global_route,predicted_traj,speed,control')
         
         carla_host = self.get_parameter('carla_host').value
         carla_port = self.get_parameter('carla_port').value
@@ -112,6 +113,11 @@ class VisualizationNode(Node):
         # ==================== Data Storage ====================
         self.vehicle_state: VehicleState = None
         self.target_speed = 0.0
+        
+        # Vehicle control (steer, throttle, brake)
+        self.current_steer = 0.0
+        self.current_throttle = 0.0
+        self.current_brake = 0.0
         
         # Paths
         self.trajectory = []  # List of (x, y)
@@ -166,6 +172,11 @@ class VisualizationNode(Node):
         self.current_waypoint_sub = self.create_subscription(
             PointStamped, '/planning/current_waypoint',
             self.current_waypoint_callback, 10)
+        
+        self.control_sub = self.create_subscription(
+            VehicleControl, '/carla/ego_vehicle/control',
+            self.control_callback, 10)
+        self.get_logger().info('Subscribed to vehicle control')
         
         # ==================== Visualization Timer ====================
         viz_period = 1.0 / viz_rate
@@ -237,6 +248,12 @@ class VisualizationNode(Node):
             # Speed not available in Path, use 0
             states.append((x, y, yaw, 0.0))
         self.predicted_trajectory = states
+    
+    def control_callback(self, msg: VehicleControl):
+        """Receive vehicle control command from control node."""
+        self.current_steer = msg.steer
+        self.current_throttle = msg.throttle
+        self.current_brake = msg.brake
     
     def _transform_obstacles_to_world(self, obstacle_array: ObstacleArray) -> List[Obstacle]:
         """
@@ -447,6 +464,16 @@ class VisualizationNode(Node):
                 self.vehicle_state.x, -self.vehicle_state.y,
                 self.vehicle_state.speed * 3.6,  # Convert to km/h
                 self.target_speed * 3.6,   # Target speed from trajectory
+                lifetime=lt
+            )
+        
+        # Draw control info (steer, throttle, brake) - flip Y for CARLA
+        if 'control' in items and self.vehicle_state is not None:
+            self.carla_drawer.draw_control_info(
+                self.vehicle_state.x, -self.vehicle_state.y,
+                self.current_steer,
+                self.current_throttle,
+                self.current_brake,
                 lifetime=lt
             )
         

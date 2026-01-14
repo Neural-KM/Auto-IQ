@@ -33,7 +33,16 @@ class Live2DVisualizerROS:
     
     All data is set via update methods (called from ROS callbacks).
     The visualizer runs its own thread for rendering.
+    
+    Supports interactive zoom controls:
+    - '+' / '=' : Zoom in (smaller view window, more detail)
+    - '-' / '_' : Zoom out (larger view window, less detail)
+    - '0' : Reset to auto-fit mode (shows all data)
+    - 'v' : Vehicle-centered mode (follows vehicle with current zoom)
     """
+    
+    # Zoom levels in meters (half-width of view window)
+    ZOOM_LEVELS = [10, 15, 20, 30, 50, 75, 100, 150, 200, 300, 500]
     
     def __init__(self, title: str = "Auto-IQ Live 2D Visualizer", refresh_hz: float = 10.0):
         self.title = title
@@ -49,6 +58,11 @@ class Live2DVisualizerROS:
         self._global_route = None  # List of (x, y)
         self._predicted_trajectory = None  # List of (x, y, yaw, speed)
         self._obstacles = []  # List of dicts with x, y, yaw, length, width, type
+        
+        # Zoom control
+        self._zoom_index = 3  # Default to 30m half-width
+        self._auto_fit_mode = False  # Start in vehicle-centered mode
+        self._vehicle_centered = True  # Follow vehicle
         
         # Plot handles
         self._fig = None
@@ -121,6 +135,9 @@ class Live2DVisualizerROS:
             global_route = self._global_route.copy() if self._global_route else None
             predicted_trajectory = self._predicted_trajectory.copy() if self._predicted_trajectory else None
             obstacles = self._obstacles.copy()
+            zoom_idx = self._zoom_index
+            auto_fit = self._auto_fit_mode
+            vehicle_centered = self._vehicle_centered
         
         xs, ys = [], []
         
@@ -178,22 +195,44 @@ class Live2DVisualizerROS:
         else:
             self._vehicle_patch.set_xy([[0, 0], [0, 0], [0, 0]])
         
-        # Update plot bounds
-        if xs and ys:
+        # Update plot bounds based on zoom mode
+        if auto_fit and xs and ys:
+            # Auto-fit mode: show all data with margin
+            margin = 20
+            self._ax.set_xlim(min(xs) - margin, max(xs) + margin)
+            self._ax.set_ylim(min(ys) - margin, max(ys) + margin)
+        elif vehicle_centered and vehicle is not None:
+            # Vehicle-centered mode: fixed zoom around vehicle
+            zoom_half_width = self.ZOOM_LEVELS[zoom_idx]
+            vx, vy, _ = vehicle
+            self._ax.set_xlim(vx - zoom_half_width, vx + zoom_half_width)
+            self._ax.set_ylim(vy - zoom_half_width, vy + zoom_half_width)
+        elif xs and ys:
+            # Fallback to auto-fit
             margin = 20
             self._ax.set_xlim(min(xs) - margin, max(xs) + margin)
             self._ax.set_ylim(min(ys) - margin, max(ys) + margin)
         
-        # Update title with speed
-        if vehicle is not None:
-            self._ax.set_title(f"{self.title} | Speed: {speed * 3.6:.1f} km/h")
+        # Build zoom status string
+        if auto_fit:
+            zoom_str = "Auto-fit"
+        else:
+            zoom_str = f"Zoom: {self.ZOOM_LEVELS[zoom_idx]}m"
         
-        # Render to OpenCV window
+        # Update title with speed and zoom info
+        if vehicle is not None:
+            self._ax.set_title(f"{self.title} | Speed: {speed * 3.6:.1f} km/h | {zoom_str}\n[+/-] Zoom  [0] Auto-fit  [V] Vehicle-center")
+        
+        # Render to OpenCV window and handle keyboard
         try:
             self._fig.canvas.draw()
             buf = np.asarray(self._fig.canvas.buffer_rgba())
             img = cv2.cvtColor(buf, cv2.COLOR_RGBA2BGR)
             cv2.imshow(self.title, img)
+            
+            # Handle keyboard input for zoom control
+            key = cv2.waitKey(1) & 0xFF
+            self._handle_key(key)
             cv2.waitKey(1)
         except Exception:
             pass
@@ -238,6 +277,44 @@ class Live2DVisualizerROS:
         pts = pts.dot(R.T) + np.array([x, y])
         
         return pts
+    
+    def _handle_key(self, key: int):
+        """
+        Handle keyboard input for zoom control.
+        
+        Keys:
+            '+' / '=' : Zoom in (smaller view window)
+            '-' / '_' : Zoom out (larger view window)
+            '0'       : Reset to auto-fit mode
+            'v' / 'V' : Toggle vehicle-centered mode
+        """
+        if key == 255:  # No key pressed
+            return
+        
+        with self._lock:
+            # Zoom in: '+' or '='
+            if key in [ord('+'), ord('=')]:
+                if self._zoom_index > 0:
+                    self._zoom_index -= 1
+                    self._auto_fit_mode = False
+                    self._vehicle_centered = True
+            
+            # Zoom out: '-' or '_'
+            elif key in [ord('-'), ord('_')]:
+                if self._zoom_index < len(self.ZOOM_LEVELS) - 1:
+                    self._zoom_index += 1
+                    self._auto_fit_mode = False
+                    self._vehicle_centered = True
+            
+            # Auto-fit mode: '0'
+            elif key == ord('0'):
+                self._auto_fit_mode = True
+                self._vehicle_centered = False
+            
+            # Vehicle-centered mode: 'v' or 'V'
+            elif key in [ord('v'), ord('V')]:
+                self._auto_fit_mode = False
+                self._vehicle_centered = True
     
     # ==================== Update Methods (called from ROS callbacks) ====================
     

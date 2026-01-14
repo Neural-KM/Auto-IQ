@@ -37,7 +37,7 @@ class MPCController:
     MAX_SPEED = 50.0            # m/s
     MIN_SPEED = 0.0             # m/s
     
-    def __init__(self, dt=0.05, horizon=20, target_speed=30.0, trajectory_mode=0):
+    def __init__(self, dt, horizon, trajectory_mode):
         """
         Initialize MPC controller.
         
@@ -47,14 +47,14 @@ class MPCController:
             target_speed: Target speed in km/h
             trajectory_mode: 0 for heuristic (curvature-based), 1 for trapezoidal (forward-backward)
         """
+        
         self.dt = dt
         self.horizon = horizon
         self.L = self.WHEELBASE
         self.trajectory_mode = trajectory_mode
         
         # Speed settings
-        self.target_speed = target_speed / 3.6  # Convert to m/s
-        self.min_speed = 0.0#5.0 / 3.6
+        self.min_speed = 0.0
         
         # State dimensions
         self.n_states = 4   # [x, y, psi, v]
@@ -64,8 +64,8 @@ class MPCController:
         self.w_pos = 1.0
         self.w_heading = 1.0
         self.w_vel = 1.0
-        self.w_delta = 0.0
-        self.w_accel = 0.
+        self.w_delta = 1.0
+        self.w_accel = 0.1
         self.w_delta_rate = 0.5
         self.w_accel_rate = 0.5
         
@@ -151,7 +151,7 @@ class MPCController:
         
         return True
     
-    def _generate_reference(self, current_state, target_speed=None):
+    def _generate_reference(self, current_state, target_speed):
         """Generate reference trajectory from current state."""
         if self._spline is None:
             return None
@@ -161,10 +161,9 @@ class MPCController:
         else:
             return self._generate_reference_heuristic(current_state, target_speed)
 
-    def _generate_reference_heuristic(self, current_state, target_speed=None):
+    def _generate_reference_heuristic(self, current_state, target_speed):
         """Original heuristic generation (Curvature-based only)."""
         curr_x, curr_y = current_state[0], current_state[1]
-        speed = target_speed if target_speed else self.target_speed
         
         # Find closest point on spline
         u_start = self._find_closest_u(curr_x, curr_y)
@@ -186,7 +185,7 @@ class MPCController:
             # Curvature-based speed
             d2x, d2y = splev(u_current, self._spline, der=2)
             curvature = abs(dx * d2y - dy * d2x) / (dx**2 + dy**2 + 1e-6)**1.5
-            v_ref = self._speed_from_curvature(curvature, speed)
+            v_ref = self._speed_from_curvature(curvature, target_speed)
             
             reference.append([float(x), float(y), float(psi), float(v_ref)])
             
@@ -196,18 +195,17 @@ class MPCController:
         
         return np.array(reference)
 
-    def _generate_reference_trapezoidal(self, current_state, target_speed=None):
+    def _generate_reference_trapezoidal(self, current_state, target_speed):
         """Trapezoidal profile generation (Forward-Backward Integration)."""
         curr_x, curr_y = current_state[0], current_state[1]
         curr_v = current_state[3]
-        speed = target_speed if target_speed else self.target_speed
         
         # 1. Generate dense spatial path
         u_start = self._find_closest_u(curr_x, curr_y)
         
         # Look ahead distance: horizon * max_speed (approx) + buffer
         # We need enough spatial points to cover the horizon
-        lookahead_dist = max(self.horizon * self.dt * speed * 1.5, 50.0)
+        lookahead_dist = max(self.horizon * self.dt * target_speed * 1.5, 50.0)
         
         # Sample points along spline
         # Step size approx 1 meter
@@ -242,7 +240,7 @@ class MPCController:
         for p in points:
             # v_max = sqrt(a_lat_max / k)
             v_k = np.sqrt(max_lat_accel / (p['k'] + 1e-3))
-            p['v_lim'] = min(speed, v_k)
+            p['v_lim'] = min(target_speed, v_k)
             
         # 3. Backward Pass (Deceleration)
         max_decel = abs(self.MAX_DECEL) # Use class constant
@@ -440,20 +438,19 @@ class MPCController:
         
         print("[MPC] Solver built successfully")
     
-    def solve(self, current_state, target_speed=None):
+    def generate_reference(self, current_state, target_speed=None):
         """
-        Solve MPC optimization problem.
+        Generate reference trajectory from current state.
+        
+        This is a public method that should be called before solve().
         
         Args:
             current_state: Current vehicle state [x, y, psi, v]
             target_speed: Target speed in m/s (optional)
             
         Returns:
-            Optimal control [delta, a] or None if failed
+            Reference trajectory as numpy array of shape (horizon+1, 4) or None if failed
         """
-        t_start = time.time()
-        
-        # Generate reference trajectory
         reference = self._generate_reference(current_state, target_speed)
         
         if reference is None or len(reference) < self.horizon + 1:
@@ -463,6 +460,24 @@ class MPCController:
         
         # Store for visualization
         self._last_reference = reference
+        return reference
+    
+    def solve(self, current_state, reference):
+        """
+        Solve MPC optimization problem.
+        
+        Args:
+            current_state: Current vehicle state [x, y, psi, v]
+            reference: Reference trajectory from generate_reference(), shape (horizon+1, 4)
+            
+        Returns:
+            Optimal control [delta, a] or None if failed
+        """
+        t_start = time.time()
+        
+        if reference is None or len(reference) < self.horizon + 1:
+            print("[MPC] Invalid reference trajectory")
+            return None
         
         # Build parameter vector
         p = list(current_state)
@@ -635,10 +650,17 @@ if __name__ == '__main__':
     current_state = np.array([init_x, init_y, yaw_rad, init_v])
     print(f"[test_mpc] Initial state: x={init_x:.2f}, y={init_y:.2f}, yaw={init_yaw_deg:.2f}°, v={init_v:.2f}")
 
-    # Solve MPC (generates reference internally)
+    # Generate reference trajectory
     target_speed_ms = target_speed_kmh / 3.6
+    reference = mpc.generate_reference(current_state, target_speed_ms)
+    
+    if reference is None:
+        print("[test_mpc] Failed to generate reference trajectory")
+        exit(1)
+    
+    # Solve MPC
     try:
-        control = mpc.solve(current_state, target_speed_ms)
+        control = mpc.solve(current_state, reference)
     except Exception as exc:
         print(f"[test_mpc] MPC solver failed to run: {exc}")
         exit(1)

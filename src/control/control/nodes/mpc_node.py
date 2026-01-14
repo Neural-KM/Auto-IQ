@@ -51,7 +51,7 @@ class MPCNode(Node):
         # ==================== Parameters ====================
         self.declare_parameter('mpc_horizon', 20)
         self.declare_parameter('mpc_dt', 0.05)
-        self.declare_parameter('trajectory_mode', 0)  # 0: heuristic, 1: trapezoidal
+        self.declare_parameter('trajectory_mode', 1)  # 0: heuristic, 1: trapezoidal
         self.declare_parameter('max_steering_diff', 0.1)
         self.declare_parameter('control_rate', 20.0)  # Hz
         
@@ -142,6 +142,20 @@ class MPCNode(Node):
         """Update vehicle state from odometry."""
         self.vehicle_state = vehicle_state_from_odometry(msg)
     
+    # ==================== Target Speed Selection ====================
+    
+    def _get_target_speed_from_trajectory(self) -> float:
+        """
+        Get target speed from trajectory using maximum velocity.
+        
+        Returns:
+            Target speed in m/s (maximum speed from trajectory)
+        """
+        if not self.current_target_speeds:
+            return 0.0
+        
+        return max(self.current_target_speeds)
+    
     # ==================== Control Loop ====================
     
     def control_loop(self):
@@ -165,9 +179,6 @@ class MPCNode(Node):
         # Publish predicted trajectory for visualization
         self._publish_predicted_trajectory()
         
-        # Apply steering smoothing
-        steering = self._smooth_steering(steering)
-        
         # Publish control
         self._publish_control(steering, throttle, brake)
     
@@ -183,13 +194,18 @@ class MPCNode(Node):
             self.vehicle_state.speed
         ])
         
-        # Get target speed from trajectory (use first waypoint's speed as reference)
-        target_speed_ms = 0.0
-        if self.current_target_speeds:
-            target_speed_ms = self.current_target_speeds[0]
+        # Get target speed using smart selection from trajectory
+        target_speed_ms = self._get_target_speed_from_trajectory()
+        
+        # Generate reference trajectory
+        reference = self.mpc.generate_reference(current_state, target_speed_ms)
+        
+        if reference is None:
+            self.get_logger().warn('MPC reference generation failed - using previous steering with brake')
+            return self.previous_steering, 0.0, 1.0
         
         # Solve MPC optimization
-        optimal_control = self.mpc.solve(current_state, target_speed_ms)
+        optimal_control = self.mpc.solve(current_state, reference)
         
         self._last_solve_time_ms = (time.time() - t_start) * 1000
         
@@ -216,15 +232,6 @@ class MPCNode(Node):
         
         return float(steering), float(throttle), float(brake)
     
-    def _smooth_steering(self, steering):
-        """Apply steering smoothing to prevent jerky movements."""
-        if steering > self.previous_steering + self.max_steering_diff:
-            steering = self.previous_steering + self.max_steering_diff
-        elif steering < self.previous_steering - self.max_steering_diff:
-            steering = self.previous_steering - self.max_steering_diff
-        
-        self.previous_steering = steering
-        return steering
     
     # ==================== Publishers ====================
     
@@ -258,10 +265,9 @@ class MPCNode(Node):
     
     def _publish_status(self):
         """Publish control status."""
-        # Get current target speed from trajectory
-        current_target_speed_kmh = 0.0
-        if self.current_target_speeds:
-            current_target_speed_kmh = self.current_target_speeds[0] * 3.6  # Convert to km/h
+        # Get current target speed using smart selection
+        target_speed_ms = self._get_target_speed_from_trajectory()
+        current_target_speed_kmh = target_speed_ms * 3.6  # Convert to km/h
             
         status = {
             'controller': 'mpc',
