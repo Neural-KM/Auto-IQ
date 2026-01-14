@@ -14,17 +14,20 @@ Subscribes to:
 - /perception/obstacles (autoiq_msgs/ObstacleArray) - Detected obstacles
 - /perception/ground_truth/obstacles (autoiq_msgs/ObstacleArray) - Ground truth obstacles
 - /carla/ego_vehicle/ground_truth/camera/semantic/front/image (Image) - Semantic segmentation
+- /perception/semantic_pointcloud (PointCloud2) - Labeled pointcloud (XYZ + label)
 
 Publishes:
 - /visualization/trajectory (nav_msgs/Path) - Trajectory for RViz
 - /visualization/ground_truth_obstacles (MarkerArray) - Ground truth obstacle markers
 - /visualization/detected_obstacles (MarkerArray) - Detected obstacle markers
 - /visualization/semantic_image (Image) - Colored semantic segmentation
+- /visualization/semantic_pointcloud (PointCloud2) - Colored XYZRGB pointcloud
 
 Connects to CARLA for debug drawing (optional).
 """
 
 import math
+import struct
 import numpy as np
 from dataclasses import replace
 from typing import List, Tuple
@@ -33,9 +36,9 @@ import rclpy
 from rclpy.node import Node
 
 from nav_msgs.msg import Path, Odometry
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, PointCloud2, PointField
 from visualization_msgs.msg import MarkerArray, Marker
-from std_msgs.msg import ColorRGBA
+from std_msgs.msg import ColorRGBA, Header
 from geometry_msgs.msg import PoseStamped, PointStamped
 
 from autoiq_msgs.msg import ObstacleArray as ObstacleArrayMsg, Trajectory as TrajectoryMsg
@@ -50,7 +53,7 @@ from autoiq_common.converters import (
 )
 from autoiq_common.utils import quaternion_to_yaw
 
-from perception.data_classes.semantic_labels import colorize_mask
+from perception.data_classes.semantic_labels import colorize_mask, SEMANTIC_COLOR_LUT
 
 import carla
 
@@ -81,6 +84,8 @@ class VisualizationNode(Node):
         self.declare_parameter('carla_debug_draw', 'trajectory,global_route,predicted_traj,speed,control')
         self.declare_parameter('semantic_topic', '/carla/ego_vehicle/ground_truth/camera/semantic/front/image')
         self.declare_parameter('semantic_output_topic', '/visualization/semantic_image')
+        self.declare_parameter('labeled_pointcloud_topic', '/perception/semantic_pointcloud')
+        self.declare_parameter('colored_pointcloud_topic', '/visualization/semantic_pointcloud')
         
         carla_host = self.get_parameter('carla_host').value
         carla_port = self.get_parameter('carla_port').value
@@ -98,6 +103,8 @@ class VisualizationNode(Node):
         
         semantic_topic = self.get_parameter('semantic_topic').value
         semantic_output_topic = self.get_parameter('semantic_output_topic').value
+        labeled_pointcloud_topic = self.get_parameter('labeled_pointcloud_topic').value
+        colored_pointcloud_topic = self.get_parameter('colored_pointcloud_topic').value
         
         # ==================== CARLA Connection ====================
         self.carla_drawer = None
@@ -155,6 +162,9 @@ class VisualizationNode(Node):
         # Publish colored semantic image
         self.semantic_image_pub = self.create_publisher(
             Image, semantic_output_topic, 10)
+        # Publish colored semantic pointcloud
+        self.colored_pointcloud_pub = self.create_publisher(
+            PointCloud2, colored_pointcloud_topic, 10)
         
         # ==================== Subscribers ====================
         self.odom_sub = self.create_subscription(
@@ -187,6 +197,11 @@ class VisualizationNode(Node):
             Image, semantic_topic,
             self.semantic_callback, 10)
         self.get_logger().info(f'Subscribed to semantic image: {semantic_topic}')
+        
+        self.labeled_pointcloud_sub = self.create_subscription(
+            PointCloud2, labeled_pointcloud_topic,
+            self.labeled_pointcloud_callback, 10)
+        self.get_logger().info(f'Subscribed to labeled pointcloud: {labeled_pointcloud_topic}')
         
         self.current_waypoint_sub = self.create_subscription(
             PointStamped, '/planning/current_waypoint',
@@ -305,6 +320,85 @@ class VisualizationNode(Node):
         out_msg.data = colored.tobytes()
         
         self.semantic_image_pub.publish(out_msg)
+    
+    def labeled_pointcloud_callback(self, msg: PointCloud2):
+        """Convert labeled pointcloud (XYZ+label) to colored pointcloud (XYZRGB)."""
+        # Find field offsets
+        x_offset = y_offset = z_offset = label_offset = 0
+        for field in msg.fields:
+            if field.name == 'x':
+                x_offset = field.offset
+            elif field.name == 'y':
+                y_offset = field.offset
+            elif field.name == 'z':
+                z_offset = field.offset
+            elif field.name == 'label':
+                label_offset = field.offset
+        
+        # Parse points
+        point_step = msg.point_step
+        n_points = msg.width * msg.height
+        data = np.frombuffer(msg.data, dtype=np.uint8)
+        
+        # Extract XYZ and labels
+        points = np.zeros((n_points, 3), dtype=np.float32)
+        labels = np.zeros(n_points, dtype=np.uint32)
+        
+        for i in range(n_points):
+            offset = i * point_step
+            points[i, 0] = struct.unpack('f', data[offset + x_offset:offset + x_offset + 4])[0]
+            points[i, 1] = struct.unpack('f', data[offset + y_offset:offset + y_offset + 4])[0]
+            points[i, 2] = struct.unpack('f', data[offset + z_offset:offset + z_offset + 4])[0]
+            labels[i] = struct.unpack('I', data[offset + label_offset:offset + label_offset + 4])[0]
+        
+        # Get colors from labels using LUT
+        colors = SEMANTIC_COLOR_LUT[np.clip(labels, 0, 255)]
+        
+        # Create XYZRGB pointcloud
+        colored_msg = self._create_colored_pointcloud2(points, colors, msg.header)
+        self.colored_pointcloud_pub.publish(colored_msg)
+    
+    def _create_colored_pointcloud2(
+        self,
+        points: np.ndarray,
+        colors: np.ndarray,
+        header: Header
+    ) -> PointCloud2:
+        """Create XYZRGB PointCloud2 message."""
+        n_points = len(points)
+        
+        fields = [
+            PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+            PointField(name='rgb', offset=12, datatype=PointField.FLOAT32, count=1),
+        ]
+        
+        point_step = 16
+        data = bytearray(n_points * point_step)
+        
+        for i in range(n_points):
+            offset = i * point_step
+            struct.pack_into('fff', data, offset,
+                             points[i, 0], points[i, 1], points[i, 2])
+            
+            r, g, b = int(colors[i, 0]), int(colors[i, 1]), int(colors[i, 2])
+            rgb_packed = (r << 16) | (g << 8) | b
+            rgb_float = struct.unpack('f', struct.pack('I', rgb_packed))[0]
+            struct.pack_into('f', data, offset + 12, rgb_float)
+        
+        out = PointCloud2()
+        out.header = header
+        out.height = 1
+        out.width = n_points
+        out.fields = fields
+        out.is_bigendian = False
+        out.point_step = point_step
+        out.row_step = point_step * n_points
+        out.data = bytes(data)
+        out.is_dense = True
+        
+        return out
     
     def _transform_obstacles_to_world(self, obstacle_array: ObstacleArray) -> List[Obstacle]:
         """

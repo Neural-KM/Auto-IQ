@@ -50,6 +50,7 @@ SEMANTIC_CLASSES: Dict[int, Tuple[str, Tuple[int, int, int]]] = {
 # Lookup by name
 SEMANTIC_BY_NAME: Dict[str, int] = {name: id for id, name, _ in _CLASSES}
 
+
 # Color lookup table (256 entries for fast numpy indexing)
 SEMANTIC_COLOR_LUT = np.zeros((256, 3), dtype=np.uint8)
 for id, (_, color) in SEMANTIC_CLASSES.items():

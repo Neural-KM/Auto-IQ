@@ -9,8 +9,16 @@ Outputs polynomial fits and lane geometry for path planning.
 
 import numpy as np
 import cv2
-from perception.data_classes.semantic_labels import SemanticLabels
+from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME, SEMANTIC_COLOR_LUT
 from perception.data_classes.lane import LaneDetection
+
+# Semantic class IDs
+ROAD = SEMANTIC_BY_NAME['road']
+ROAD_LINE = SEMANTIC_BY_NAME['road_line']
+SIDEWALK = SEMANTIC_BY_NAME['sidewalk']
+VEHICLE = SEMANTIC_BY_NAME['vehicle']
+VEGETATION = SEMANTIC_BY_NAME['vegetation']
+SKY = SEMANTIC_BY_NAME['sky']
 
 
 class LaneDetector:
@@ -201,8 +209,8 @@ class LaneDetector:
         h, w = semantic_image.shape[:2]
         
         # Extract binary masks
-        lane_mask = (semantic_image == SemanticLabels.ROAD_LINE).astype(np.uint8) * 255
-        road_mask = (semantic_image == SemanticLabels.ROAD).astype(np.uint8) * 255
+        lane_mask = (semantic_image == ROAD_LINE).astype(np.uint8) * 255
+        road_mask = (semantic_image == ROAD).astype(np.uint8) * 255
         
         # Transform to bird's eye view
         bev_lane = self.to_birds_eye_view(lane_mask)
@@ -533,14 +541,8 @@ class LaneDetectorDebugWindow:
         """Create colored semantic image with ROI trapezoid overlay."""
         h, w = semantic_image.shape[:2]
         
-        # Color the semantic labels
-        panel = np.zeros((h, w, 3), dtype=np.uint8)
-        panel[semantic_image == SemanticLabels.ROAD] = [128, 64, 128]
-        panel[semantic_image == SemanticLabels.ROAD_LINE] = [50, 234, 157]
-        panel[semantic_image == SemanticLabels.SIDEWALK] = [232, 35, 244]
-        panel[semantic_image == SemanticLabels.VEHICLE] = [142, 0, 0]
-        panel[semantic_image == SemanticLabels.VEGETATION] = [35, 142, 107]
-        panel[semantic_image == SemanticLabels.SKY] = [180, 130, 70]
+        # Color the semantic labels using LUT
+        panel = SEMANTIC_COLOR_LUT[semantic_image]
         
         # Draw ROI trapezoid
         src_pts = lane_detector.get_source_points().astype(np.int32)

@@ -39,7 +39,7 @@ from std_msgs.msg import Header
 import tf2_ros
 from tf2_ros import TransformException
 
-from perception.data_classes.semantic_labels import SEMANTIC_COLOR_LUT
+from perception.data_classes.semantic_labels import SEMANTIC_CLASSES
 
 
 class SemanticPointCloudNode(Node):
@@ -302,12 +302,9 @@ class SemanticPointCloudNode(Node):
         # 6. Look up semantic class at each pixel
         class_ids = semantic_img[v_valid, u_valid]
         
-        # 7. Get colors for each class
-        colors = SEMANTIC_COLOR_LUT[class_ids]
-        
-        # 8. Create and publish colored point cloud
-        labeled_cloud = self._create_colored_pointcloud2(
-            points_veh_valid, colors, self.latest_lidar_header.stamp)
+        # 7. Create and publish labeled point cloud (XYZ + label)
+        labeled_cloud = self._create_labeled_pointcloud2(
+            points_veh_valid, class_ids, self.latest_lidar_header.stamp)
         
         self.pointcloud_pub.publish(labeled_cloud)
     
@@ -350,22 +347,22 @@ class SemanticPointCloudNode(Node):
         
         return points[valid_mask]
     
-    def _create_colored_pointcloud2(
+    def _create_labeled_pointcloud2(
         self, 
         points: np.ndarray, 
-        colors: np.ndarray,
+        labels: np.ndarray,
         stamp
     ) -> PointCloud2:
         """
-        Create a PointCloud2 message with XYZRGB fields.
+        Create a PointCloud2 message with XYZL (label) fields.
         
         Args:
             points: Nx3 array of XYZ coordinates
-            colors: Nx3 array of RGB colors (0-255)
+            labels: N array of semantic class IDs (uint8)
             stamp: Timestamp for the message
             
         Returns:
-            PointCloud2 message
+            PointCloud2 message with x, y, z, label fields
         """
         n_points = len(points)
         
@@ -374,31 +371,23 @@ class SemanticPointCloudNode(Node):
         header.stamp = stamp
         header.frame_id = 'ego_vehicle'
         
-        # Define fields: x, y, z, rgb
+        # Define fields: x, y, z, label
         fields = [
             PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
             PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
             PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
-            PointField(name='rgb', offset=12, datatype=PointField.FLOAT32, count=1),
+            PointField(name='label', offset=12, datatype=PointField.UINT32, count=1),
         ]
         
-        # Pack data: x, y, z, rgb (packed as float)
-        point_step = 16  # 4 floats * 4 bytes
+        # Pack data: x, y, z, label
+        point_step = 16  # 3 floats + 1 uint32 = 16 bytes
         data = bytearray(n_points * point_step)
         
         for i in range(n_points):
             offset = i * point_step
-            
-            # XYZ
-            struct.pack_into('fff', data, offset,
-                             points[i, 0], points[i, 1], points[i, 2])
-            
-            # Pack RGB into a single float (RViz convention)
-            r, g, b = int(colors[i, 0]), int(colors[i, 1]), int(colors[i, 2])
-            rgb_packed = (r << 16) | (g << 8) | b
-            # Interpret as float for PointCloud2
-            rgb_float = struct.unpack('f', struct.pack('I', rgb_packed))[0]
-            struct.pack_into('f', data, offset + 12, rgb_float)
+            struct.pack_into('fffI', data, offset,
+                             points[i, 0], points[i, 1], points[i, 2],
+                             int(labels[i]))
         
         # Create message
         msg = PointCloud2()
