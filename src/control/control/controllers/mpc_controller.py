@@ -636,7 +636,6 @@ if __name__ == '__main__':
     # Initialize MPC (includes trajectory generation)
     mpc = MPCController(dt=mpc_dt, 
                         horizon=horizon, 
-                        target_speed=target_speed_kmh, 
                         trajectory_mode=args.trajectory_mode)
 
     # Set waypoints (fits spline internally)
