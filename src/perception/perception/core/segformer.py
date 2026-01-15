@@ -15,7 +15,21 @@ Cityscapes Classes (19 classes):
     16: train, 17: motorcycle, 18: bicycle
 
 Usage:
-    python -m perception.core.segformer --image path/to/image.jpg --output path/to/output.png
+    Single Image:
+        python -m perception.core.segformer --image path/to/image.jpg --output path/to/output.png
+    
+    Batch Processing (Folder):
+        python -m perception.core.segformer --folder /path/to/images/
+        
+    Examples:
+        # Single image with overlay
+        python -m perception.core.segformer --image input.jpg --overlay --alpha 0.6
+        
+        # Batch process entire folder with B2 model
+        python -m perception.core.segformer --folder /data/images/ --model b2
+        
+        # Batch with stats and GPU
+        python -m perception.core.segformer --folder /data/images/ --stats --device cuda
 """
 
 import numpy as np
@@ -262,148 +276,257 @@ class SegFormer:
 
 
 def main():
-    """Test SegFormer on stored images."""
+    """Semantic segmentation inference - supports single image or batch folder processing."""
     import argparse
-    
-    # Default directories relative to this script
-    SCRIPT_DIR = Path(__file__).resolve().parent.parent  # perception/perception/
-    DATA_DIR = SCRIPT_DIR / 'data'
-    INFERENCE_DIR = DATA_DIR / 'inference'
     
     parser = argparse.ArgumentParser(
         description='SegFormer Semantic Segmentation',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=f'''
-Default paths:
-  Input:  {DATA_DIR}/
-  Output: {INFERENCE_DIR}/
-
-Examples:
-  # Single image (looks in data/ directory)
-  python -m perception.core.segformer --image snapshot.png
-  
-  # Full path override
-  python -m perception.core.segformer --image /path/to/image.jpg
-  
-  # Different model variant
-  python -m perception.core.segformer --image snapshot.png --model b2
-  
-  # Show overlay instead of colored mask
-  python -m perception.core.segformer --image snapshot.png --overlay --alpha 0.6
-        '''
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
-    parser.add_argument('--image', '-i', type=str, required=True,
-                        help='Input image name (in data/) or full path')
+    # Input options (mutually exclusive)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument('--image', '-i', type=str,
+                             help='Single image file path')
+    input_group.add_argument('--folder', '-f', type=str,
+                             help='Folder containing multiple images')
+    
+    parser.add_argument('--output', '-o', type=str, default=None,
+                        help='Output file path for single image (default: input_name_segmented.png)')
     parser.add_argument('--model', '-m', type=str, default='b0',
-                        choices=['b0', 'b1', 'b2', 'b3', 'b4', 'b5'],
-                        help='Model variant (b0=fastest, b5=most accurate)')
+                        choices=['b0', 'b1', 'b2', 'b3', 'b4', 'b5', 'all'],
+                        help='Model variant (b0=fastest, b5=most accurate, all=run all models, default: b0)')
     parser.add_argument('--device', '-d', type=str, default=None,
                         choices=['cuda', 'cpu'],
-                        help='Device for inference (default: auto)')
+                        help='Device for inference (default: auto-detect)')
     parser.add_argument('--overlay', action='store_true',
-                        help='Output overlay instead of colored mask')
+                        help='Save overlay (original + segmentation) instead of just mask')
     parser.add_argument('--alpha', type=float, default=0.5,
-                        help='Overlay blend factor (0-1)')
+                        help='Overlay blend factor: 0=original, 1=mask (default: 0.5)')
     parser.add_argument('--stats', action='store_true',
                         help='Print class statistics')
     parser.add_argument('--show', action='store_true',
-                        help='Display result in window')
+                        help='Display result in window (ESC to close)')
     
     args = parser.parse_args()
     
-    # Resolve input path - check if it's just a filename or a full path
-    input_path = Path(args.image)
-    if not input_path.is_absolute() and not input_path.exists():
-        # Try looking in the data directory
-        input_path = DATA_DIR / args.image
-    
-    # Initialize model
-    segformer = SegFormer(model_name=args.model, device=args.device)
-    
-    # Get input files
-    if input_path.is_dir():
-        image_files = list(input_path.glob('*.jpg')) + \
-                      list(input_path.glob('*.jpeg')) + \
-                      list(input_path.glob('*.png'))
+    # Handle "all models" mode
+    if args.model == 'all':
+        models_to_run = ['b0', 'b1', 'b2', 'b3', 'b4', 'b5']
+        print(f'Running inference on all {len(models_to_run)} models: {", ".join(models_to_run)}\n')
+        
+        if args.image:
+            for model_variant in models_to_run:
+                print(f'\n{"="*70}')
+                print(f'Processing with SegFormer-{model_variant}')
+                print(f'{"="*70}')
+                args.model = model_variant
+                segformer = SegFormer(model_name=model_variant, device=args.device)
+                process_single_image(segformer, args)
+        else:  # args.folder
+            for model_variant in models_to_run:
+                print(f'\n{"="*70}')
+                print(f'Processing with SegFormer-{model_variant}')
+                print(f'{"="*70}')
+                args.model = model_variant
+                segformer = SegFormer(model_name=model_variant, device=args.device)
+                process_batch_folder(segformer, args)
     else:
-        image_files = [input_path]
+        # Single model mode
+        print(f'Loading SegFormer-{args.model}...')
+        segformer = SegFormer(model_name=args.model, device=args.device)
+        print()
+        
+        # Mode 1: Single Image Processing
+        if args.image:
+            process_single_image(segformer, args)
+        
+        # Mode 2: Batch Folder Processing
+        else:  # args.folder
+            process_batch_folder(segformer, args)
+
+
+def process_single_image(segformer, args):
+    """Process a single image file."""
+    img_path = Path(args.image)
     
-    if not image_files or (len(image_files) == 1 and not image_files[0].exists()):
-        print(f'No images found at {input_path}')
-        print(f'Tip: Place images in {DATA_DIR}/ or provide full path')
-        return
+    if not img_path.exists():
+        print(f'ERROR: Image file not found: {img_path}')
+        return 1
     
-    # Ensure inference output directory exists
-    INFERENCE_DIR.mkdir(parents=True, exist_ok=True)
+    if not img_path.is_file():
+        print(f'ERROR: Not a file: {img_path}')
+        return 1
     
-    print(f'Processing {len(image_files)} image(s)...')
-    print(f'Output directory: {INFERENCE_DIR}\n')
+    print(f'Processing: {img_path.name}')
+    
+    # Load image
+    image_bgr = cv2.imread(str(img_path))
+    if image_bgr is None:
+        print(f'ERROR: Could not load image: {img_path}')
+        return 1
+    
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    h, w = image_rgb.shape[:2]
+    
+    # Run inference
+    start = time.perf_counter()
+    mask = segformer.predict(image_rgb)
+    elapsed = (time.perf_counter() - start) * 1000
+    
+    print(f'Inference time: {elapsed:.1f}ms | Image size: {w}x{h}')
+    
+    # Print stats if requested
+    if args.stats:
+        stats = segformer.get_class_stats(mask)
+        print('Class distribution:')
+        for name, info in sorted(stats.items(), key=lambda x: -x[1]['percentage']):
+            print(f'  {name}: {info["percentage"]:.1f}%')
+    
+    # Generate output
+    if args.overlay:
+        result = segformer.overlay(image_rgb, mask, alpha=args.alpha)
+        default_suffix = '_overlay'
+    else:
+        result = segformer.colorize(mask)
+        default_suffix = '_segmented'
+    
+    # Determine output path with model name
+    if args.output:
+        out_file = Path(args.output)
+    else:
+        # Create inference folder and add model name to output
+        inference_folder = img_path.parent / 'inference'
+        model_name = args.model
+        out_file = inference_folder / f'{img_path.stem}_inference_{model_name}{default_suffix}.png'
+    
+    # Save result
+    result_bgr = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_file), result_bgr)
+    print(f'Saved: {out_file}\n')
+    
+    # Display if requested
+    if args.show:
+        combined = np.zeros((h, w * 2, 3), dtype=np.uint8)
+        combined[:, :w] = image_bgr
+        combined[:, w:] = result_bgr
+        
+        cv2.imshow('SegFormer: Original (left) | Segmentation (right) | Press any key to close', combined)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+    
+    return 0
+
+
+def process_batch_folder(segformer, args):
+    """Process all images in a folder."""
+    input_folder = Path(args.folder).resolve()
+    
+    if not input_folder.exists():
+        print(f'ERROR: Folder does not exist: {input_folder}')
+        return 1
+    
+    if not input_folder.is_dir():
+        print(f'ERROR: Not a directory: {input_folder}')
+        return 1
+    
+    # Create inference output subfolder
+    inference_folder = input_folder / 'inference'
+    inference_folder.mkdir(exist_ok=True)
+    
+    # Collect all image files
+    image_extensions = ('*.jpg', '*.jpeg', '*.png', '*.bmp', '*.JPG', '*.JPEG', '*.PNG')
+    image_files = []
+    for ext in image_extensions:
+        image_files.extend(input_folder.glob(ext))
+    
+    # Filter out files already in inference folder
+    image_files = [f for f in image_files if f.parent != inference_folder]
+    image_files = sorted(image_files)
+    
+    if not image_files:
+        print(f'ERROR: No images found in {input_folder}')
+        print(f'Supported formats: jpg, jpeg, png, bmp')
+        return 1
+    
+    print('=' * 70)
+    print(f'Batch Segmentation')
+    print('=' * 70)
+    print(f'Input folder:  {input_folder}')
+    print(f'Output folder: {inference_folder}')
+    print(f'Images found:  {len(image_files)}')
+    print('=' * 70 + '\n')
     
     # Process each image
     total_time = 0.0
+    successful = 0
+    failed = 0
     
-    for img_path in image_files:
-        print(f'Processing: {img_path.name}')
-        
-        # Load image
-        image_bgr = cv2.imread(str(img_path))
-        if image_bgr is None:
-            print(f'  ERROR: Could not load image')
-            continue
-        
-        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        
-        # Run inference
-        start = time.perf_counter()
-        mask = segformer.predict(image_rgb)
-        elapsed = (time.perf_counter() - start) * 1000
-        total_time += elapsed
-        
-        print(f'  Inference: {elapsed:.1f}ms')
-        
-        # Print stats if requested
-        if args.stats:
-            stats = segformer.get_class_stats(mask)
-            print('  Class distribution:')
-            for name, info in sorted(stats.items(), key=lambda x: -x[1]['percentage']):
-                print(f'    {name}: {info["percentage"]:.1f}%')
-        
-        # Generate output
-        if args.overlay:
-            result = segformer.overlay(image_rgb, mask, alpha=args.alpha)
-        else:
-            result = segformer.colorize(mask)
-        
-        # Output path is always in inference directory
-        out_file = INFERENCE_DIR / f'{img_path.stem}_segmented.png'
-        
-        # Save result (convert RGB to BGR for cv2)
-        result_bgr = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(str(out_file), result_bgr)
-        print(f'  Saved: {out_file}')
-        
-        # Show if requested
-        if args.show:
-            # Create side-by-side view
-            h, w = image_rgb.shape[:2]
-            combined = np.zeros((h, w * 2, 3), dtype=np.uint8)
-            combined[:, :w] = image_bgr
-            combined[:, w:] = result_bgr
+    for idx, img_path in enumerate(image_files, 1):
+        try:
+            print(f'[{idx}/{len(image_files)}] {img_path.name}', end=' | ')
             
-            cv2.imshow('SegFormer: Original | Segmentation', combined)
-            key = cv2.waitKey(0)
-            if key == 27:  # ESC
-                break
-    
-    if args.show:
-        cv2.destroyAllWindows()
+            # Load image
+            image_bgr = cv2.imread(str(img_path))
+            if image_bgr is None:
+                print('ERROR: Could not load')
+                failed += 1
+                continue
+            
+            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            h, w = image_rgb.shape[:2]
+            
+            # Run inference
+            start = time.perf_counter()
+            mask = segformer.predict(image_rgb)
+            elapsed = (time.perf_counter() - start) * 1000
+            total_time += elapsed
+            
+            print(f'Time: {elapsed:.1f}ms | Size: {w}x{h}', end='')
+            
+            # Print top classes if stats requested
+            if args.stats:
+                stats = segformer.get_class_stats(mask)
+                top_class = list(sorted(stats.items(), key=lambda x: -x[1]['percentage'])[0])
+                print(f' | Top: {top_class[0]} ({top_class[1]["percentage"]:.1f}%)', end='')
+            
+            # Generate output
+            if args.overlay:
+                result = segformer.overlay(image_rgb, mask, alpha=args.alpha)
+                suffix = '_overlay'
+            else:
+                result = segformer.colorize(mask)
+                suffix = '_segmented'
+            
+            # Save with model name in filename
+            model_name = args.model
+            out_file = inference_folder / f'{img_path.stem}_inference_{model_name}{suffix}.png'
+            result_bgr = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(str(out_file), result_bgr)
+            
+            print(' | ✓ Saved')
+            successful += 1
+            
+        except Exception as e:
+            print(f'ERROR: {str(e)}')
+            failed += 1
+            continue
     
     # Summary
-    if len(image_files) > 1:
-        avg_time = total_time / len(image_files)
-        print(f'\nProcessed {len(image_files)} images')
-        print(f'Average inference time: {avg_time:.1f}ms ({1000/avg_time:.1f} FPS)')
+    print()
+    print('=' * 70)
+    print(f'Processed: {successful}/{len(image_files)} images')
+    if failed > 0:
+        print(f'Failed:    {failed} images')
+    if successful > 0:
+        avg_time = total_time / successful
+        fps = 1000.0 / avg_time
+        print(f'Speed:     {avg_time:.1f}ms per image ({fps:.1f} FPS)')
+    print(f'Output:    {inference_folder}')
+    print('=' * 70)
+    
+    return 0 if failed == 0 else 1
 
 
 if __name__ == '__main__':
