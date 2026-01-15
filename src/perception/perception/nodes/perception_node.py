@@ -42,7 +42,7 @@ from tf2_ros import TransformException
 from perception.core.perception import Perception
 from perception.core.lane_detector import LaneDetector
 from perception.data_classes.lane import LaneDetection
-from perception.tools.ground_truth_perception import GroundTruthPerception
+from perception.core.ground_truth_perception import GroundTruthPerception
 
 import carla
 
