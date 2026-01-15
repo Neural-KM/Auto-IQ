@@ -11,7 +11,7 @@ Pipeline:
 2. Transform LiDAR points to camera frame
 3. Project 3D points to 2D image coordinates
 4. Look up semantic label at each projected pixel
-5. Publish colored point cloud for visualization
+5. Publish labeled point cloud (XYZ + label)
 
 Subscribes:
 - /carla/ego_vehicle/sensor/lidar/top/point_cloud (sensor_msgs/PointCloud2) - LiDAR data
@@ -19,13 +19,12 @@ Subscribes:
 - /carla/ego_vehicle/sensor/camera/rgb/front/camera_info (sensor_msgs/CameraInfo) - Camera intrinsics
 
 Publishes:
-- /perception/semantic_pointcloud (sensor_msgs/PointCloud2) - Labeled colored point cloud
+- /perception/semantic_pointcloud (sensor_msgs/PointCloud2) - Labeled point cloud (XYZ + label)
 
 Note: Only points visible in the camera's field of view will be labeled.
 Points behind the camera or outside the image bounds are discarded.
 """
 
-import math
 import struct
 import numpy as np
 
@@ -39,15 +38,13 @@ from std_msgs.msg import Header
 import tf2_ros
 from tf2_ros import TransformException
 
-from perception.data_classes.semantic_labels import SEMANTIC_CLASSES
-
 
 class SemanticPointCloudNode(Node):
     """
     ROS2 Node for labeling LiDAR points with semantic segmentation data.
     
     Projects LiDAR points onto the semantic segmentation image and assigns
-    colors based on the semantic class at each projected pixel location.
+    labels based on the semantic class at each projected pixel location.
     """
     
     def __init__(self):

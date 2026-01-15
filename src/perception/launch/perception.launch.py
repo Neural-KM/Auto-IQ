@@ -33,4 +33,21 @@ def generate_launch_description():
             output='screen',
             parameters=[LaunchConfiguration('params_file')]
         ),
+        
+        # ==================== Semantic PointCloud Node ====================
+        Node(
+            package='perception',
+            executable='semantic_pointcloud_node',
+            name='semantic_pointcloud_node',
+            output='screen',
+            parameters=[{
+                'lidar_topic': '/carla/ego_vehicle/sensor/lidar/top/point_cloud',
+                'semantic_topic': '/carla/ego_vehicle/ground_truth/camera/semantic/front/image',
+                'camera_info_topic': '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info',
+                'output_topic': '/perception/semantic_pointcloud',
+                'max_range': 100.0,
+                'camera_frame': 'ego_vehicle/sensor/camera/rgb/front',
+                'lidar_frame': 'ego_vehicle/sensor/lidar/top',
+            }]
+        ),
     ])
