@@ -72,6 +72,9 @@ wget "https://huggingface.co/datasets/nakul004/imagessim/resolve/main/Data.zip"
 wget "https://huggingface.co/datasets/nakul004/imagessim/resolve/main/rosbag2_1970_01_01-05_49_48.zip"
 wget "https://huggingface.co/datasets/nakul004/imagessim/resolve/main/rosbag2_1970_01_01-05_54_59.zip"
 wget "https://huggingface.co/datasets/nakul004/imagessim/resolve/main/rosbag2_1970_01_01-05_50_52.zip" 
+
+#Rosbag images 15/1 bot at transit
+wget "https://huggingface.co/datasets/nakul004/imagessim/resolve/main/Images_15jan_bot_transit.zip" 
 ```
 
 ## License

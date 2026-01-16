@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """
-ROS2 Image Subscriber - Saves images from a topic at 2-second intervals.
+ROS2 Image Subscriber - Saves images from 2 topics at 2-second intervals.
+# Command to run this script:
+python3 rosbag_imageextraction.py
+# Or in a ROS2 environment:
+ros2 run perception rosbag_imageextraction.py
+
+# Change the topic names and output directory in the main function as needed
 """
 
 import rclpy
@@ -14,40 +20,78 @@ from PIL import Image as PILImage
 
 
 class ImageSubscriber(Node):
-    def __init__(self, topic_name='/camera/image_raw', output_dir='./captured_images'):
+    def __init__(self, topic_name_1='/camera/image_raw', topic_name_2='/camera/image_raw_2', output_dir='./captured_images'):
         super().__init__('image_subscriber')
         
         # Configuration
         self.output_dir = output_dir
         self.save_interval = 2.0  # seconds
-        self.last_save_time = 0.0
-        self.image_count = 0
         
-        # Create output directory if it doesn't exist
-        os.makedirs(self.output_dir, exist_ok=True)
+        # Separate tracking for each topic
+        self.last_save_time_1 = 0.0
+        self.last_save_time_2 = 0.0
+        self.image_count_1 = 0
+        self.image_count_2 = 0
         
-        # Create subscription
-        self.subscription = self.create_subscription(
+        # Store topic names for logging
+        self.topic_name_1 = topic_name_1
+        self.topic_name_2 = topic_name_2
+        
+        # Create output directories for each topic
+        self.output_dir_1 = os.path.join(self.output_dir, 'topic_1')
+        self.output_dir_2 = os.path.join(self.output_dir, 'topic_2')
+        os.makedirs(self.output_dir_1, exist_ok=True)
+        os.makedirs(self.output_dir_2, exist_ok=True)
+        
+        # Create subscription for topic 1
+        self.subscription_1 = self.create_subscription(
             Image,
-            topic_name,
-            self.image_callback,
+            topic_name_1,
+            self.image_callback_1,
             10  # QoS queue size
         )
         
-        self.get_logger().info(f'Subscribed to topic: {topic_name}')
+        # Create subscription for topic 2
+        self.subscription_2 = self.create_subscription(
+            Image,
+            topic_name_2,
+            self.image_callback_2,
+            10  # QoS queue size
+        )
+        
+        self.get_logger().info(f'Subscribed to topic 1: {topic_name_1}')
+        self.get_logger().info(f'Subscribed to topic 2: {topic_name_2}')
         self.get_logger().info(f'Saving images to: {os.path.abspath(self.output_dir)}')
         self.get_logger().info(f'Save interval: {self.save_interval} seconds')
 
-    def image_callback(self, msg):
-        """Callback function for image messages."""
+    def image_callback_1(self, msg):
+        """Callback function for topic 1 image messages."""
+        self._process_image(msg, 1)
+    
+    def image_callback_2(self, msg):
+        """Callback function for topic 2 image messages."""
+        self._process_image(msg, 2)
+
+    def _process_image(self, msg, topic_num):
+        """Process and save image from either topic."""
         current_time = time.time()
         
+        # Get the appropriate last save time and image count
+        if topic_num == 1:
+            last_save_time = self.last_save_time_1
+            image_count = self.image_count_1
+            output_dir = self.output_dir_1
+        else:
+            last_save_time = self.last_save_time_2
+            image_count = self.image_count_2
+            output_dir = self.output_dir_2
+        
         # Check if enough time has passed since last save
-        if current_time - self.last_save_time >= self.save_interval:
+        if current_time - last_save_time >= self.save_interval:
             try:
                 # Get the image encoding from the message
                 encoding = msg.encoding
-                self.get_logger().info(f'Image encoding: {encoding}, size: {msg.width}x{msg.height}')
+                self.get_logger().info(f'[Topic {topic_num}] Image encoding: {encoding}, size: {msg.width}x{msg.height}')
                 
                 # Convert msg.data to numpy array
                 # Use np.array with list() to ensure proper conversion from ROS2 array
@@ -74,18 +118,18 @@ class ImageSubscriber(Node):
                     # Grayscale 8-bit: 1 channel
                     rgb_image = raw_data.reshape(msg.height, msg.width)
                 else:
-                    self.get_logger().error(f'Unsupported encoding: {encoding}')
+                    self.get_logger().error(f'[Topic {topic_num}] Unsupported encoding: {encoding}')
                     return
                 
                 # Make a contiguous copy
                 rgb_image = np.ascontiguousarray(rgb_image)
                 
-                self.get_logger().info(f'Array shape: {rgb_image.shape}, dtype: {rgb_image.dtype}')
+                self.get_logger().info(f'[Topic {topic_num}] Array shape: {rgb_image.shape}, dtype: {rgb_image.dtype}')
                 
                 # Generate filename with timestamp
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-                filename = f'image_{self.image_count:06d}_{timestamp}.png'
-                filepath = os.path.join(self.output_dir, filename)
+                filename = f'image_{image_count:06d}_{timestamp}.png'
+                filepath = os.path.join(output_dir, filename)
                 
                 # Save using PIL
                 if len(rgb_image.shape) == 2:
@@ -95,13 +139,19 @@ class ImageSubscriber(Node):
                 
                 pil_image.save(filepath)
                 
-                self.image_count += 1
-                self.last_save_time = current_time
-                self.get_logger().info(f'Saved image {self.image_count}: {filename}')
+                # Update the appropriate counters
+                if topic_num == 1:
+                    self.image_count_1 += 1
+                    self.last_save_time_1 = current_time
+                    self.get_logger().info(f'[Topic 1] Saved image {self.image_count_1}: {filename}')
+                else:
+                    self.image_count_2 += 1
+                    self.last_save_time_2 = current_time
+                    self.get_logger().info(f'[Topic 2] Saved image {self.image_count_2}: {filename}')
                 
             except Exception as e:
                 import traceback
-                self.get_logger().error(f'Error saving image: {str(e)}')
+                self.get_logger().error(f'[Topic {topic_num}] Error saving image: {str(e)}')
                 self.get_logger().error(traceback.format_exc())
 
 
@@ -109,11 +159,13 @@ def main(args=None):
     rclpy.init(args=args)
     
     # You can customize these parameters
-    topic_name =  '/zed_multi/zed_left/right/image_rect_color'  # Change this to your image topic
-    output_dir = '/home/autoiq/nakul/Auto-IQ/data/rosbag_images_15jan'   # Change this to your desired output directory
+    topic_name_1 = '/zed_multi/zed_left/right/image_rect_color'  # Change this to your first image topic
+    topic_name_2 = '/zed_multi/zed_right/left/image_rect_color'  # Change this to your second image topic
+    output_dir = '/home/autoiq/nakul/Auto-IQ/data/rosbag_images_15jan/Images_15jan_bot_transit'   # Change this to your desired output directory
     
     image_subscriber = ImageSubscriber(
-        topic_name=topic_name,
+        topic_name_1=topic_name_1,
+        topic_name_2=topic_name_2,
         output_dir=output_dir
     )
     
