@@ -14,6 +14,13 @@ Cityscapes Classes (19 classes):
     10: sky, 11: person, 12: rider, 13: car, 14: truck, 15: bus,
     16: train, 17: motorcycle, 18: bicycle
 
+Output file:
+/Auto-IQ/data/rosbag_images_15jan/inference
+
+Input data:
+/Auto-IQ/data/rosbag_images_15jan/Images_15jan_bot_transit
+
+
 Usage:
     Single Image:
         python -m perception.core.segformer --image path/to/image.jpg --output path/to/output.png
@@ -393,7 +400,14 @@ def process_single_image(segformer, args):
     
     # Determine output path with model name
     if args.output:
-        out_file = Path(args.output)
+        out_path = Path(args.output)
+        # If output is a directory, create filename inside it
+        if out_path.is_dir() or not out_path.suffix:
+            out_path.mkdir(parents=True, exist_ok=True)
+            model_name = args.model
+            out_file = out_path / f'{img_path.stem}_inference_{model_name}{default_suffix}.png'
+        else:
+            out_file = out_path
     else:
         # Create inference folder and add model name to output
         inference_folder = img_path.parent / 'inference'
