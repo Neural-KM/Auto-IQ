@@ -174,7 +174,7 @@ class RoadExtractor:
 
     def extract_lanes(self, image: np.ndarray) -> np.ndarray:
         """
-        Extract lane markings using Grayscale Thresholding on the Road ROI.
+        Extract lane markings using Adaptive Thresholding on the Road ROI.
         
         Args:
             image: RGB image (H, W, 3)
@@ -188,13 +188,26 @@ class RoadExtractor:
         # 2. Extract road ROI
         road_only = cv2.bitwise_and(image, image, mask=road_mask)
         
-        # 3. Convert to Grayscale (as requested)
+        # 3. Convert to Grayscale
         gray = cv2.cvtColor(road_only, cv2.COLOR_RGB2GRAY)
         
-        # 4. Apply Thresholding
-        # Lowered threshold from 140 to 80 to ensure *something* is detected.
-        # Ideally, we should use adaptive thresholding, but let's start low.
-        _, lane_mask = cv2.threshold(gray, 95, 255, cv2.THRESH_BINARY)
+        # 4. Apply Adaptive Thresholding
+        # To make adaptive thresholding work correctly near mask boundaries, 
+        # we fill the non-road area with the mean road intensity.
+        mean_road_val = cv2.mean(gray, mask=road_mask)[0]
+        filled_gray = gray.copy()
+        filled_gray[road_mask == 0] = int(mean_road_val)
+        
+        # Use simple Gaussian Adaptive thresholding
+        # Block size 21, C = -10 (Pixel > Mean + 10)
+        lane_mask = cv2.adaptiveThreshold(
+            filled_gray,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            21,
+            -10
+        )
         
         # 5. Clean up with morphology
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
