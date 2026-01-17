@@ -38,6 +38,18 @@ from std_msgs.msg import Header
 import tf2_ros
 from tf2_ros import TransformException
 
+# CARLA Semantic Class IDs
+SEMANTIC_ROAD = 1
+SEMANTIC_VEHICLE = 14
+SEMANTIC_VEHICLES = {14, 15, 16, 17, 18, 19}  # vehicle, truck, bus, train, motorcycle, bicycle
+
+# Import for debug visualization
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+
 
 class SemanticPointCloudNode(Node):
     """
@@ -58,6 +70,8 @@ class SemanticPointCloudNode(Node):
         self.declare_parameter('camera_frame', 'ego_vehicle/sensor/camera/rgb/front')
         self.declare_parameter('lidar_frame', 'ego_vehicle/sensor/lidar/top')
         self.declare_parameter('max_range', 100.0)  # Max range in meters
+        self.declare_parameter('sample_radius', 2)  # Pixel radius for neighborhood sampling (0 = single pixel)
+        self.declare_parameter('publish_debug_image', True)  # Publish debug visualization
         
         lidar_topic = self.get_parameter('lidar_topic').value
         semantic_topic = self.get_parameter('semantic_topic').value
@@ -66,6 +80,8 @@ class SemanticPointCloudNode(Node):
         self.camera_frame = self.get_parameter('camera_frame').value
         self.lidar_frame = self.get_parameter('lidar_frame').value
         self.max_range = self.get_parameter('max_range').value
+        self.sample_radius = self.get_parameter('sample_radius').value
+        self.publish_debug_image = self.get_parameter('publish_debug_image').value
         
         # ==================== State ====================
         self.camera_info_received = False
@@ -122,6 +138,10 @@ class SemanticPointCloudNode(Node):
         # ==================== Publishers ====================
         self.pointcloud_pub = self.create_publisher(
             PointCloud2, output_topic, 10)
+        
+        # Debug visualization publisher
+        self.debug_image_pub = self.create_publisher(
+            Image, '/perception/semantic_pointcloud_debug', 10)
         
         # ==================== Initialization Timer ====================
         self.init_timer = self.create_timer(0.5, self._check_initialization)
@@ -278,32 +298,153 @@ class SemanticPointCloudNode(Node):
         if len(points_cam_front) == 0:
             return
         
-        # 4. Project to image plane
+        # 4. Project to image plane (keep float for sub-pixel accuracy)
         z = points_cam_front[:, 2]
-        u = (points_cam_front[:, 0] * self.fx / z) + self.cx
-        v = (points_cam_front[:, 1] * self.fy / z) + self.cy
+        u_float = (points_cam_front[:, 0] * self.fx / z) + self.cx
+        v_float = (points_cam_front[:, 1] * self.fy / z) + self.cy
         
-        # 5. Filter points within image bounds
+        # 5. Filter points within image bounds (with margin for neighborhood sampling)
+        # Add +1 to margin to account for rounding (e.g., 1277.6 rounds to 1278)
+        margin = self.sample_radius + 1
         in_image_mask = (
-            (u >= 0) & (u < self.img_width) &
-            (v >= 0) & (v < self.img_height)
+            (u_float >= margin) & (u_float < self.img_width - margin) &
+            (v_float >= margin) & (v_float < self.img_height - margin)
         )
         
-        u_valid = u[in_image_mask].astype(np.int32)
-        v_valid = v[in_image_mask].astype(np.int32)
+        u_valid_float = u_float[in_image_mask]
+        v_valid_float = v_float[in_image_mask]
         points_veh_valid = points_veh_front[in_image_mask]
         
-        if len(u_valid) == 0:
+        if len(u_valid_float) == 0:
             return
         
-        # 6. Look up semantic class at each pixel
-        class_ids = semantic_img[v_valid, u_valid]
+        # 6. Look up semantic class using neighborhood sampling
+        # This fixes boundary issues where single-pixel lookup can pick wrong class
+        class_ids = self._sample_semantic_labels(
+            semantic_img, u_valid_float, v_valid_float, self.sample_radius)
         
-        # 7. Create and publish labeled point cloud (XYZ + label)
+        # 7. Publish debug visualization if enabled
+        if self.publish_debug_image and CV2_AVAILABLE:
+            self._publish_debug_image(
+                semantic_img, u_valid_float, v_valid_float, class_ids, points_veh_valid)
+        
+        # 8. Create and publish labeled point cloud (XYZ + label)
         labeled_cloud = self._create_labeled_pointcloud2(
             points_veh_valid, class_ids, self.latest_lidar_header.stamp)
-        
         self.pointcloud_pub.publish(labeled_cloud)
+    
+    def _sample_semantic_labels(
+        self,
+        semantic_img: np.ndarray,
+        u: np.ndarray,
+        v: np.ndarray,
+        radius: int
+    ) -> np.ndarray:
+        """
+        Sample semantic labels using neighborhood voting.
+        
+        Instead of taking a single pixel, sample a small neighborhood and use
+        majority voting. This handles boundary cases where a point projects
+        near the edge between two semantic classes.
+        
+        Args:
+            semantic_img: HxW semantic segmentation image (class IDs)
+            u: N array of x pixel coordinates (float)
+            v: N array of y pixel coordinates (float)
+            radius: Pixel radius for neighborhood (0 = single pixel)
+            
+        Returns:
+            N array of semantic class IDs
+        """
+        n_points = len(u)
+        
+        # Round to nearest pixel for center
+        u_center = np.round(u).astype(np.int32)
+        v_center = np.round(v).astype(np.int32)
+        
+        if radius == 0:
+            # Simple single-pixel lookup (original behavior)
+            return semantic_img[v_center, u_center]
+        
+        # Create sampling offsets for the neighborhood
+        offsets = []
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                offsets.append((dy, dx))
+        n_samples = len(offsets)
+        
+        # Vectorized: gather all neighborhood samples at once
+        # Shape: (n_points, n_samples)
+        all_labels = np.zeros((n_points, n_samples), dtype=np.uint8)
+        for idx, (dy, dx) in enumerate(offsets):
+            all_labels[:, idx] = semantic_img[v_center + dy, u_center + dx]
+        
+        # Vectorized majority vote using bincount
+        class_ids = np.zeros(n_points, dtype=np.uint8)
+        for i in range(n_points):
+            class_ids[i] = np.bincount(all_labels[i]).argmax()
+        
+        return class_ids
+    
+    def _publish_debug_image(
+        self,
+        semantic_img: np.ndarray,
+        u: np.ndarray,
+        v: np.ndarray,
+        class_ids: np.ndarray,
+        points_veh: np.ndarray
+    ):
+        """
+        Publish a debug image showing projected LiDAR points on semantic image.
+        
+        Only points classified as vehicle are drawn (for debugging misclassification).
+        Points are colored by distance: red (near) -> green (far).
+        """
+        # Create RGB visualization from semantic image
+        from perception.data_classes.semantic_labels import SEMANTIC_COLOR_LUT
+        debug_img = SEMANTIC_COLOR_LUT[semantic_img].copy()
+        
+        # Draw only vehicle-classified points
+        u_int = np.round(u).astype(np.int32)
+        v_int = np.round(v).astype(np.int32)
+        
+        # Filter to only vehicle classes
+        vehicle_mask = np.isin(class_ids, list(SEMANTIC_VEHICLES))
+        vehicle_indices = np.where(vehicle_mask)[0]
+        
+        if len(vehicle_indices) > 0:
+            # Compute distances for vehicle points
+            distances = np.sqrt(
+                points_veh[vehicle_indices, 0]**2 + 
+                points_veh[vehicle_indices, 1]**2
+            )
+            
+            # Normalize distance to [0, 1] for color gradient
+            # Near (0-5m) = red, Far (>30m) = green
+            min_dist, max_dist = 5.0, 30.0
+            norm_dist = np.clip((distances - min_dist) / (max_dist - min_dist), 0, 1)
+            
+            for idx, i in enumerate(vehicle_indices):
+                # Interpolate color: red (255,0,0) -> green (0,255,0)
+                t = norm_dist[idx]
+                r = int(255 * (1 - t))
+                g = int(255 * t)
+                color = (r, g, 0)  # RGB
+                
+                # Draw point with white outline
+                cv2.circle(debug_img, (u_int[i], v_int[i]), 4, (255, 255, 255), -1)
+                cv2.circle(debug_img, (u_int[i], v_int[i]), 3, color, -1)
+        
+        # Publish as ROS Image
+        msg = Image()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.camera_frame
+        msg.height, msg.width = debug_img.shape[:2]
+        msg.encoding = 'rgb8'
+        msg.step = msg.width * 3
+        msg.data = debug_img.tobytes()
+        
+        self.debug_image_pub.publish(msg)
     
     def _parse_pointcloud2(self, msg: PointCloud2) -> np.ndarray:
         """Parse PointCloud2 message to numpy array."""
