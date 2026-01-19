@@ -303,7 +303,6 @@ def process_single_image(extractor: RoadExtractor, args):
         print(f'Saved grayscale road: {road_gray_path}')
 
     # Display if requested
-    # Display if requested
     if args.show:
         display = np.hstack([
             image_bgr,
@@ -459,7 +458,6 @@ def main():
         args.colored = True
         args.overlay = True
     
-    # Initialize extractor
     # Initialize extractor
     print(f'Loading SegFormer-{args.model} for road extraction...')
     extractor = RoadExtractor(model_name=args.model, device=args.device)
