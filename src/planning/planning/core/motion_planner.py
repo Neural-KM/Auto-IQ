@@ -29,10 +29,6 @@ from planning.utils.frenet_utils import (
 )
 from planning.core.behavior_planner import BehaviorState, BehaviorOutput
 
-
-# VehicleState and TrajectoryPoint are now imported from autoiq_common.types
-
-
 @dataclass
 class MotionPlannerConfig:
     """Configuration for motion planner."""
@@ -72,6 +68,10 @@ class MotionPlanner:
         # Lane change tracking (for trajectory generation)
         self._lane_change_start_d: float = 0.0
         self._prev_behavior_state: Optional[BehaviorState] = None
+        
+        # Lateral constraints from corridor
+        self._d_min: float = -self.config.lane_width / 2
+        self._d_max: float = self.config.lane_width / 2
         
     def set_reference_path(self, path_x: List[float], path_y: List[float]) -> bool:
         """
@@ -123,6 +123,21 @@ class MotionPlanner:
     def get_frenet_state(self) -> Tuple[float, float, float]:
         """Get current Frenet state (s, d, d_dot)."""
         return self.current_s, self.current_d, self.current_d_dot
+    
+    def set_lateral_constraints(self, d_min: float, d_max: float):
+        """
+        Set lateral driveable constraints from corridor.
+        
+        Args:
+            d_min: Minimum lateral offset (left boundary, typically negative)
+            d_max: Maximum lateral offset (right boundary, typically positive)
+        """
+        self._d_min = d_min
+        self._d_max = d_max
+    
+    def get_lateral_constraints(self) -> Tuple[float, float]:
+        """Get current lateral constraints (d_min, d_max)."""
+        return self._d_min, self._d_max
     
     def generate_trajectory(
         self,
