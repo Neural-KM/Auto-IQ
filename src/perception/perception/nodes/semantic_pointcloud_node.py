@@ -80,8 +80,8 @@ class SemanticPointCloudNode(Node):
         
         self.declare_parameter('hood_x_min', 3)    # Start at vehicle center
         self.declare_parameter('hood_x_max', 5)    # Hood extends ~2.5m forward
-        self.declare_parameter('hood_y_min', -2.1)   # Right edge
-        self.declare_parameter('hood_y_max', 2.1)    # Left edge
+        self.declare_parameter('hood_y_min', -2.2)   # Right edge
+        self.declare_parameter('hood_y_max', 2.2)    # Left edge
         self.declare_parameter('hood_z_min', -0.1)   # Well below ground to catch slopes
         self.declare_parameter('hood_z_max', 0.1)    # Just above ground (keeps real obstacles on hood)
         
