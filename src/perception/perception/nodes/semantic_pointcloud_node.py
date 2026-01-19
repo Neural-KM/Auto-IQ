@@ -73,6 +73,18 @@ class SemanticPointCloudNode(Node):
         self.declare_parameter('sample_radius', 2)  # Pixel radius for neighborhood sampling (0 = single pixel)
         self.declare_parameter('publish_debug_image', True)  # Publish debug visualization
         
+        # Ego hood mask parameters (in vehicle frame: X-forward, Y-left, Z-up)
+        # Points within this thin ground-level cuboid are reclassified as road
+        # This handles the case where LiDAR shoots through the hood and hits the ground,
+        # but the camera sees the hood, causing ground points to be labeled as "vehicle"
+        
+        self.declare_parameter('hood_x_min', 3)    # Start at vehicle center
+        self.declare_parameter('hood_x_max', 5)    # Hood extends ~2.5m forward
+        self.declare_parameter('hood_y_min', -2.1)   # Right edge
+        self.declare_parameter('hood_y_max', 2.1)    # Left edge
+        self.declare_parameter('hood_z_min', -0.1)   # Well below ground to catch slopes
+        self.declare_parameter('hood_z_max', 0.1)    # Just above ground (keeps real obstacles on hood)
+        
         lidar_topic = self.get_parameter('lidar_topic').value
         semantic_topic = self.get_parameter('semantic_topic').value
         camera_info_topic = self.get_parameter('camera_info_topic').value
@@ -82,6 +94,14 @@ class SemanticPointCloudNode(Node):
         self.max_range = self.get_parameter('max_range').value
         self.sample_radius = self.get_parameter('sample_radius').value
         self.publish_debug_image = self.get_parameter('publish_debug_image').value
+        
+        # Hood mask bounds (3D cuboid in vehicle frame)
+        self.hood_x_min = self.get_parameter('hood_x_min').value
+        self.hood_x_max = self.get_parameter('hood_x_max').value
+        self.hood_y_min = self.get_parameter('hood_y_min').value
+        self.hood_y_max = self.get_parameter('hood_y_max').value
+        self.hood_z_min = self.get_parameter('hood_z_min').value
+        self.hood_z_max = self.get_parameter('hood_z_max').value
         
         # ==================== State ====================
         self.camera_info_received = False
@@ -323,12 +343,25 @@ class SemanticPointCloudNode(Node):
         class_ids = self._sample_semantic_labels(
             semantic_img, u_valid_float, v_valid_float, self.sample_radius)
         
-        # 7. Publish debug visualization if enabled
+        # 7. Apply ego hood mask - reclassify points in hood region as road
+        # This prevents ground points under the hood (misclassified due to camera
+        # seeing hood while LiDAR shoots through it) from appearing as obstacles
+        hood_mask = (
+            (points_veh_valid[:, 0] >= self.hood_x_min) &
+            (points_veh_valid[:, 0] <= self.hood_x_max) &
+            (points_veh_valid[:, 1] >= self.hood_y_min) &
+            (points_veh_valid[:, 1] <= self.hood_y_max) &
+            (points_veh_valid[:, 2] >= self.hood_z_min) &
+            (points_veh_valid[:, 2] <= self.hood_z_max)
+        )
+        class_ids[hood_mask] = SEMANTIC_ROAD
+        
+        # 8. Publish debug visualization if enabled
         if self.publish_debug_image and CV2_AVAILABLE:
             self._publish_debug_image(
                 semantic_img, u_valid_float, v_valid_float, class_ids, points_veh_valid)
         
-        # 8. Create and publish labeled point cloud (XYZ + label)
+        # 9. Create and publish labeled point cloud (XYZ + label)
         labeled_cloud = self._create_labeled_pointcloud2(
             points_veh_valid, class_ids, self.latest_lidar_header.stamp)
         self.pointcloud_pub.publish(labeled_cloud)
@@ -363,7 +396,7 @@ class SemanticPointCloudNode(Node):
         v_center = np.round(v).astype(np.int32)
         
         if radius == 0:
-            # Simple single-pixel lookup (original behavior)
+            # Simple single-pixel lookup
             return semantic_img[v_center, u_center]
         
         # Create sampling offsets for the neighborhood
