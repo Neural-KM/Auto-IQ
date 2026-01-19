@@ -89,7 +89,17 @@ SEGFORMER_MODELS = {
     'b5': 'nvidia/segformer-b5-finetuned-cityscapes-1024-1024',
 }
 
-
+'''
+============================================================
+Model      | FPS        | Time (ms) 
+------------------------------------
+b0         | 50.40      | 19.84     
+b1         | 13.00      | 76.90     
+b2         | 32.32      | 30.94     
+b3         | 25.43      | 39.33     
+b4         | 22.29      | 44.86     
+b5         | 3.75       | 266.84   
+'''
 class SegFormer:
     """
     SegFormer semantic segmentation inference class.
