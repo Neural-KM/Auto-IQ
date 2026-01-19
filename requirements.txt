@@ -9,3 +9,4 @@ empy
 catkin_pkg
 lark
 scikit-image
+tabulate
