@@ -25,6 +25,7 @@ Publishes:
 
 import struct
 import numpy as np
+from scipy import ndimage
 
 import rclpy
 from rclpy.node import Node
@@ -98,6 +99,15 @@ class LocalCostmapNode(Node):
         self.declare_parameter('min_height', -0.5)      # meters (below ground level)
         self.declare_parameter('max_height', 3.0)       # meters (above ground level)
         
+        # Gap filling (for sparse LiDAR scans)
+        self.declare_parameter('fill_gaps', True)       # Enable morphological gap filling
+        self.declare_parameter('gap_fill_kernel', 3)    # Kernel size for closing operation
+        
+        # LiDAR blind spot - area directly under/around sensor where ground isn't visible
+        # Blind spot radius = lidar_height / tan(abs(lidar_lowest_angle))
+        self.declare_parameter('lidar_height', 2.4)              # meters above ground
+        self.declare_parameter('lidar_lowest_angle', -30.0)      # degrees (negative = below horizontal)
+        
         pointcloud_topic = self.get_parameter('pointcloud_topic').value
         costmap_topic = self.get_parameter('costmap_topic').value
         self.frame_id = self.get_parameter('frame_id').value
@@ -109,6 +119,23 @@ class LocalCostmapNode(Node):
         
         self.min_height = self.get_parameter('min_height').value
         self.max_height = self.get_parameter('max_height').value
+        
+        self.fill_gaps = self.get_parameter('fill_gaps').value
+        self.gap_fill_kernel = self.get_parameter('gap_fill_kernel').value
+        
+        lidar_height = self.get_parameter('lidar_height').value
+        lidar_lowest_angle = self.get_parameter('lidar_lowest_angle').value
+        
+        # Calculate blind spot radius: r = h / tan(|angle|)
+        # This is the radius inside which the LiDAR cannot see the ground
+        angle_rad = np.deg2rad(abs(lidar_lowest_angle))
+        if angle_rad > 0.01:  # Avoid division by zero
+            self.blind_spot_radius = lidar_height / np.tan(angle_rad)
+        else:
+            self.blind_spot_radius = 0.0
+        
+        self.get_logger().info(f'LiDAR blind spot radius: {self.blind_spot_radius:.2f}m '
+                               f'(height={lidar_height}m, lowest_angle={lidar_lowest_angle}°)')
         
         # ==================== Grid Setup ====================
         # Grid dimensions in cells
@@ -165,6 +192,14 @@ class LocalCostmapNode(Node):
         
         # Generate costmap
         costmap = self._generate_costmap(points, labels)
+        
+        # Mark immediate area around vehicle as free (LiDAR blind spot)
+        costmap = self._mark_lidar_spot_free(costmap)
+        
+        # Fill gaps between LiDAR channels using morphological closing
+        # This creates a continuous free space for the corridor generator
+        if self.fill_gaps:
+            costmap = self._fill_free_space_gaps(costmap)
         
         # Publish
         grid_msg = self._create_occupancy_grid(costmap, msg.header.stamp)
@@ -279,6 +314,117 @@ class LocalCostmapNode(Node):
         
         return costmap
     
+    def _mark_lidar_spot_free(self, costmap: np.ndarray) -> np.ndarray:
+        """
+        Mark the LiDAR blind spot area around the vehicle as free space.
+        
+        The LiDAR cannot see the ground within a radius determined by:
+            r = lidar_height / tan(|lowest_beam_angle|)
+        
+        Since we know the vehicle is on drivable ground, we mark this
+        circular region as free (only for unknown cells, not obstacles).
+        
+        Args:
+            costmap: 2D array with -1=unknown, 0=free, 100=obstacle
+            
+        Returns:
+            Costmap with LiDAR blind spot marked as free
+        """
+        if self.blind_spot_radius <= 0:
+            return costmap
+        
+        # Vehicle/LiDAR is at origin (0, 0) in ego frame
+        # Create a circular mask for the blind spot
+        
+        # Vehicle position in grid coordinates
+        vehicle_ix = int((0.0 - self.origin_x) / self.resolution)
+        vehicle_iy = int((0.0 - self.origin_y) / self.resolution)
+        
+        # Blind spot radius in grid cells
+        radius_cells = self.blind_spot_radius / self.resolution
+        
+        # Create coordinate grids
+        y_indices, x_indices = np.ogrid[:self.size_y, :self.size_x]
+        
+        # Compute distance from vehicle for each cell
+        dist_sq = (x_indices - vehicle_ix)**2 + (y_indices - vehicle_iy)**2
+        
+        # Circular mask: cells within blind spot radius
+        blind_spot_mask = dist_sq <= radius_cells**2
+        
+        # Only mark unknown cells as free (don't overwrite detected obstacles)
+        fill_mask = blind_spot_mask & (costmap == COST_UNKNOWN)
+        costmap[fill_mask] = COST_FREE
+        
+        return costmap
+
+    def _fill_free_space_gaps(self, costmap: np.ndarray) -> np.ndarray:
+        """
+        Fill gaps in free space caused by sparse LiDAR scan lines.
+        
+        Uses distance-adaptive morphological closing - larger kernels for cells
+        farther from the vehicle since LiDAR scan lines diverge with distance.
+        
+        Args:
+            costmap: 2D array with -1=unknown, 0=free, 100=obstacle
+            
+        Returns:
+            Costmap with filled free space gaps
+        """
+        result = costmap.copy()
+        
+        # Compute distance from vehicle (grid center)
+        # Vehicle is at origin, which maps to specific grid indices
+        vehicle_ix = int(-self.origin_x / self.resolution)
+        vehicle_iy = int(-self.origin_y / self.resolution)
+        
+        # Create distance map (in grid cells)
+        y_indices, x_indices = np.ogrid[:self.size_y, :self.size_x]
+        dist_from_vehicle = np.sqrt((x_indices - vehicle_ix)**2 + (y_indices - vehicle_iy)**2)
+        
+        # Convert to meters
+        dist_meters = dist_from_vehicle * self.resolution
+        
+        # Define distance rings with increasing kernel sizes
+        # (max_distance_m, kernel_size)
+        rings = [
+            (5.0, 3),    # 0-5m: small kernel
+            (10.0, 5),   # 5-10m: medium kernel
+            (20.0, 7),   # 10-20m: larger kernel
+            (float('inf'), 9),  # 20m+: largest kernel
+        ]
+        
+        # Create binary mask of free space
+        free_mask = (costmap == COST_FREE)
+        
+        # Process each ring from inside out
+        prev_dist = 0.0
+        accumulated_free = free_mask.copy()
+        
+        for max_dist, kernel_size in rings:
+            # Create ring mask
+            ring_mask = (dist_meters > prev_dist) & (dist_meters <= max_dist)
+            
+            # Create kernel for this distance
+            kernel = np.ones((kernel_size, kernel_size), dtype=bool)
+            
+            # Apply closing to the accumulated free space
+            closed = ndimage.binary_closing(accumulated_free, structure=kernel, iterations=1)
+            
+            # Dilate to fill unknown gaps
+            dilated = ndimage.binary_dilation(closed, structure=kernel, iterations=1)
+            
+            # Only update cells in this ring that are unknown
+            fill_mask = ring_mask & dilated & (result == COST_UNKNOWN)
+            result[fill_mask] = COST_FREE
+            
+            # Update accumulated free for next ring
+            accumulated_free = (result == COST_FREE)
+            
+            prev_dist = max_dist
+        
+        return result
+
     def _create_occupancy_grid(self, costmap: np.ndarray, stamp) -> OccupancyGrid:
         """Create OccupancyGrid message from costmap array."""
         msg = OccupancyGrid()
