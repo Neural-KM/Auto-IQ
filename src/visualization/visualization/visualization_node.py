@@ -34,6 +34,7 @@ from typing import List, Tuple
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 from nav_msgs.msg import Path, Odometry
 from sensor_msgs.msg import Image, PointCloud2, PointField
@@ -193,14 +194,22 @@ class VisualizationNode(Node):
             self.detected_obstacles_callback, 10)
         self.get_logger().info('Subscribed to detected obstacles')
         
+        # QoS for sensor data (BEST_EFFORT to match publisher)
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+        
         self.semantic_sub = self.create_subscription(
             Image, semantic_topic,
-            self.semantic_callback, 10)
+            self.semantic_callback, sensor_qos)
         self.get_logger().info(f'Subscribed to semantic image: {semantic_topic}')
         
         self.labeled_pointcloud_sub = self.create_subscription(
             PointCloud2, labeled_pointcloud_topic,
-            self.labeled_pointcloud_callback, 10)
+            self.labeled_pointcloud_callback, sensor_qos)
         self.get_logger().info(f'Subscribed to labeled pointcloud: {labeled_pointcloud_topic}')
         
         self.current_waypoint_sub = self.create_subscription(

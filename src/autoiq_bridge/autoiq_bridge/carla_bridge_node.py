@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 # ROS2 message types
 from std_msgs.msg import Header
@@ -93,10 +93,11 @@ class CarlaBridgeNode(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
         self.static_tf_broadcaster = StaticTransformBroadcaster(self)
         
-        # QoS profile for sensor data (RELIABLE for RViz compatibility)
+        # QoS profile for sensor data (BEST_EFFORT for low latency)
         self.sensor_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
         
