@@ -30,7 +30,7 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import Image, PointCloud2, PointField, CameraInfo
 from std_msgs.msg import Header
@@ -137,8 +137,9 @@ class SemanticPointCloudNode(Node):
         
         # ==================== QoS ====================
         sensor_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
         
