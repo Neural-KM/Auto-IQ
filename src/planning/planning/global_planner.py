@@ -629,11 +629,12 @@ if __name__ == '__main__':
     map_name = world.get_map().name
     print(f"Connected to map: {map_name}")
     
-    print_spawn_points(world)
+    # print_spawn_points(world)
     
     # Draw spawn points on the map
     if not args.no_draw:
-        spawn_points = get_spawn_points(world)
+        # spawn_points = get_spawn_points(world)
+        spawn_points = world.get_map().get_spawn_points()
         debug = world.debug
         print(f"\nDrawing {len(spawn_points)} spawn points on map (visible for {args.life_time}s)...")
         
