@@ -38,6 +38,7 @@ from autoiq_bridge.converters import (
     carla_depth_to_ros,
     carla_semantic_to_ros,
     carla_lidar_to_ros,
+    carla_semantic_lidar_to_ros,
     carla_vehicle_to_odometry,
     carla_transform_to_ros,
     create_camera_info,
@@ -250,7 +251,7 @@ class CarlaBridgeNode(Node):
             if 'sensor_tick' in config:
                 bp.set_attribute('sensor_tick', str(config['sensor_tick']))
                 
-        elif sensor_type == 'sensor.lidar.ray_cast':
+        elif sensor_type in ('sensor.lidar.ray_cast', 'sensor.lidar.ray_cast_semantic'):
             if 'channels' in config:
                 bp.set_attribute('channels', str(config['channels']))
             if 'range' in config:
@@ -284,6 +285,8 @@ class CarlaBridgeNode(Node):
             frame_id = f'ego_vehicle/ground_truth/camera/semantic/{sensor_id}'
         elif sensor_type == 'sensor.lidar.ray_cast':
             frame_id = f'ego_vehicle/sensor/lidar/{sensor_id}'
+        elif sensor_type == 'sensor.lidar.ray_cast_semantic':
+            frame_id = f'ego_vehicle/ground_truth/lidar/{sensor_id}'
         elif sensor_type == 'sensor.other.gnss':
             frame_id = f'ego_vehicle/sensor/gnss/{sensor_id}'
         elif sensor_type == 'sensor.other.imu':
@@ -323,6 +326,10 @@ class CarlaBridgeNode(Node):
             sensor_data['cloud_pub'] = self.create_publisher(
                 PointCloud2, f'/carla/ego_vehicle/sensor/lidar/{sensor_id}/point_cloud', self.sensor_qos)
             sensor_actor.listen(lambda data, sd=sensor_data: self.lidar_callback(data, sd))
+        elif sensor_type == 'sensor.lidar.ray_cast_semantic':
+            sensor_data['cloud_pub'] = self.create_publisher(
+                PointCloud2, f'/carla/ego_vehicle/ground_truth/lidar/{sensor_id}/point_cloud', self.sensor_qos)
+            sensor_actor.listen(lambda data, sd=sensor_data: self.semantic_lidar_callback(data, sd))
             
         elif sensor_type == 'sensor.other.gnss':
             sensor_data['gnss_pub'] = self.create_publisher(
@@ -469,6 +476,33 @@ class CarlaBridgeNode(Node):
         # self.get_logger().info(
         #     f'LiDAR Profiling: Points={num_points} | Prep={prep_time:.2f}ms | Conv={conv_time:.2f}ms | Publish (Overhead)={pub_time:.2f}ms'
         # )
+
+    def semantic_lidar_callback(self, carla_lidar, sensor_data: dict):
+        """Process Semantic LiDAR point cloud data (XYZ + semantic label)."""
+        semantic_dtype = np.dtype([
+            ('x', np.float32),
+            ('y', np.float32),
+            ('z', np.float32),
+            ('cos_inc_angle', np.float32),
+            ('object_idx', np.uint32),
+            ('object_tag', np.uint32),
+        ])
+
+        raw = np.frombuffer(bytes(carla_lidar.raw_data), dtype=semantic_dtype)
+        if raw.size == 0:
+            return
+
+        # Flip Y to match ROS frame convention
+        x = raw['x']
+        y = -raw['y']
+        z = raw['z']
+        labels = raw['object_tag']
+
+        points = np.stack((x, y, z), axis=-1)
+
+        msg = carla_semantic_lidar_to_ros(points, labels, sensor_data['frame_id'], carla_lidar.timestamp)
+        msg.header.stamp = self.get_clock().now().to_msg()
+        sensor_data['cloud_pub'].publish(msg)
     
     def gnss_callback(self, carla_gnss, sensor_data: dict):
         """Process GNSS data."""

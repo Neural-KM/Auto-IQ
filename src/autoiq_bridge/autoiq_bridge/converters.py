@@ -196,6 +196,50 @@ def carla_lidar_to_ros(points: np.ndarray, frame_id: str, timestamp: float) -> P
     return msg
 
 
+def carla_semantic_lidar_to_ros(points: np.ndarray, labels: np.ndarray, frame_id: str, timestamp: float) -> PointCloud2:
+    """
+    Convert CARLA Semantic LiDAR detections to ROS2 PointCloud2.
+
+    Args:
+        points: Nx3 array of XYZ coordinates.
+        labels: N array of semantic class IDs (uint32).
+        frame_id: TF frame ID.
+        timestamp: CARLA timestamp.
+
+    Returns:
+        PointCloud2 message with fields x, y, z, label.
+    """
+    msg = PointCloud2()
+    msg.header = create_header(frame_id, timestamp)
+
+    num_points = len(points)
+
+    fields = [
+        PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+        PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+        PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+        PointField(name='label', offset=12, datatype=PointField.UINT32, count=1),
+    ]
+    point_step = 16
+
+    cloud_data = np.zeros(num_points, dtype=[('x', '<f4'), ('y', '<f4'), ('z', '<f4'), ('label', '<u4')])
+    cloud_data['x'] = points[:, 0]
+    cloud_data['y'] = points[:, 1]
+    cloud_data['z'] = points[:, 2]
+    cloud_data['label'] = labels.astype(np.uint32)
+
+    msg.fields = fields
+    msg.is_bigendian = False
+    msg.point_step = point_step
+    msg.height = 1
+    msg.width = num_points
+    msg.row_step = msg.point_step * msg.width
+    msg.is_dense = False
+    msg.data = cloud_data.tobytes()
+
+    return msg
+
+
 def create_camera_info(width: int, height: int, fov: float, frame_id: str, timestamp: float) -> CameraInfo:
     """
     Create CameraInfo message from camera parameters.
