@@ -61,73 +61,12 @@ from perception.core.segformer import SegFormer, CITYSCAPES_CLASSES, CITYSCAPES_
 # Bird's Eye View (BEV) Transform Functions
 # ============================================================================
 
-def compute_bev_transform_full_image(
-    width: int, 
-    height: int,
-    src_points: Optional[np.ndarray] = None,
-    bev_width: int = 800,
-    bev_height: int = 800
-) -> Tuple[np.ndarray, Tuple[int, int]]:
-    """
-    Compute perspective transform for Bird's Eye View using 4 source points.
-    Transforms road from perspective view to top-down bird's eye view.
-    
-    Args:
-        width: Input image width
-        height: Input image height
-        src_points: 4 source points in image [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-                   Order: top-left, top-right, bottom-right, bottom-left of trapezoid
-                   If None, uses default trapezoid for typical driving camera
-        bev_width: Output BEV image width
-        bev_height: Output BEV image height
-        
-    Returns:
-        M: 3x3 perspective transform matrix
-        bev_size: (width, height) of output BEV image
-    """
-    if src_points is None:
-        # Source trapezoid: the road region in perspective view
-        # We define a trapezoid that covers the road surface
-        
-        # Top Y: Horizon line (approx 45% down). We cannot go higher (sky) or points map to infinity.
-        top_y = int(height * 0.45)
-        # Bottom Y: The very bottom of the image
-        bottom_y = height
-        
-        # Width at top (Horizon): Where parallel lines converge
-        # We approximate the vanishing point area
-        top_left_x = int(width * 0.35)
-        top_right_x = int(width * 0.65)
-        
-        # Width at bottom: We take the FULL width of the image to see everything
-        bottom_left_x = 0
-        bottom_right_x = width
-        
-        src_points = np.float32([
-            [top_left_x, top_y],        # Top-left (far left)
-            [top_right_x, top_y],       # Top-right (far right)
-            [bottom_right_x, bottom_y], # Bottom-right (near right)
-            [bottom_left_x, bottom_y],  # Bottom-left (near left)
-        ])
-    else:
-        src_points = np.float32(src_points)
-    
-    # Destination: rectangle (bird's eye view - top-down)
-    # This creates a rectangular output where:
-    # - Parallel lines in real world appear parallel
-    # - Top of image = far from camera
-    # - Bottom of image = near camera
-    margin = int(bev_width * 0.1)  # Small margin on sides
-    dst_points = np.float32([
-        [margin, 0],                         # Top-left
-        [bev_width - margin, 0],             # Top-right  
-        [bev_width - margin, bev_height],    # Bottom-right
-        [margin, bev_height],                # Bottom-left
-    ])
-    
-    M = cv2.getPerspectiveTransform(src_points, dst_points)
-    return M, (bev_width, bev_height)
+# Default BEV parameters (single source of truth)
+DEFAULT_BEV_X_RANGE = (-10.0, 10.0)   # meters left/right from vehicle center
+DEFAULT_BEV_Y_RANGE = (3.0, 30.0)     # meters forward (near to far)
+DEFAULT_PIXELS_PER_METER = 30.0       # resolution: 1 meter = 30 pixels
 
+##uses the instrinsics and extrinsics to compute the bev transform
 
 def compute_bev_transform(
     width: int, 
@@ -135,14 +74,15 @@ def compute_bev_transform(
     fov: float = 110.0, 
     pitch: float = 0.0, 
     camera_height: float = 1.2,
-    bev_width: int = 1200,
-    bev_height: int = 1200,
-    bev_x_range: Tuple[float, float] = (-20.0, 20.0),
-    bev_y_range: Tuple[float, float] = (3.0, 10.0)
+    bev_x_range: Tuple[float, float] = None,
+    bev_y_range: Tuple[float, float] = None,
+    pixels_per_meter: float = None
 ) -> Tuple[np.ndarray, Tuple[int, int]]:
     """
     Compute perspective transform matrix for Bird's Eye View using camera parameters.
-    NOTE: This restricts to a specific ROI. Use compute_bev_transform_full_image for full image.
+    
+    The output BEV dimensions are AUTO-CALCULATED from the x/y ranges and pixels_per_meter
+    to ensure equal scale in both X and Y directions (no distortion).
     
     Args:
         width: Input image width
@@ -150,15 +90,43 @@ def compute_bev_transform(
         fov: Camera horizontal field of view in degrees
         pitch: Camera pitch angle in degrees (positive = looking down)
         camera_height: Camera height above ground in meters
-        bev_width: Output BEV image width
-        bev_height: Output BEV image height
-        bev_x_range: (x_min, x_max) range in meters (left/right)
-        bev_y_range: (y_min, y_max) range in meters (forward distance)
+        bev_x_range: (x_min, x_max) range in meters (left/right from vehicle center)
+        bev_y_range: (y_min, y_max) range in meters (forward distance from camera)
+        pixels_per_meter: Resolution of BEV output (pixels per meter). Higher = more detail.
         
     Returns:
         M: 3x3 perspective transform matrix
-        bev_size: (width, height) of output BEV image
+        bev_size: (width, height) of output BEV image (auto-calculated)
+        
+    Example:
+        # With bev_x_range=(-15, 15) and bev_y_range=(3, 30) at 30 px/m:
+        # X span = 30m -> bev_width = 900 pixels
+        # Y span = 27m -> bev_height = 810 pixels
+        # Scale is equal: 1 pixel = 3.33 cm in both directions
     """
+    # Use defaults if not specified
+    if bev_x_range is None:
+        bev_x_range = DEFAULT_BEV_X_RANGE
+    if bev_y_range is None:
+        bev_y_range = DEFAULT_BEV_Y_RANGE
+    if pixels_per_meter is None:
+        pixels_per_meter = DEFAULT_PIXELS_PER_METER
+    
+    x_min, x_max = bev_x_range
+    y_min, y_max = bev_y_range
+    
+    # Calculate real-world spans
+    x_span = x_max - x_min  # Total width in meters
+    y_span = y_max - y_min  # Total depth in meters
+    
+    # Auto-calculate BEV dimensions to maintain equal scale
+    bev_width = int(x_span * pixels_per_meter)
+    bev_height = int(y_span * pixels_per_meter)
+    
+    # Ensure minimum size
+    bev_width = max(bev_width, 100)
+    bev_height = max(bev_height, 100)
+    
     # Compute camera intrinsics
     fov_rad = np.radians(fov)
     fx = width / (2.0 * np.tan(fov_rad / 2.0))
@@ -168,10 +136,8 @@ def compute_bev_transform(
 
     pitch_rad = np.radians(pitch)
     
-    x_min, x_max = bev_x_range
-    y_min, y_max = bev_y_range
-    
     # Ground plane points: (X, Y, Z) where Z=0 (ground level)
+    # Order: far-left, far-right, near-right, near-left
     ground_points_3d = np.array([
         [x_min, y_max, 0],  # Far left
         [x_max, y_max, 0],  # Far right
@@ -221,17 +187,15 @@ def compute_bev_transform(
     M = cv2.getPerspectiveTransform(src_pts, dst_pts)
     return M, (bev_width, bev_height)
 
-
 def convert_to_bev(
     image: np.ndarray,
     fov: float = 110.0,
     pitch: float = 0.0,
     camera_height: float = 1.2,
-    bev_width: int = 800,
-    bev_height: int = 800,
-    bev_x_range: Tuple[float, float] = (-20.0, 20.0),
-    bev_y_range: Tuple[float, float] = (3.0, 50.0)
-) -> np.ndarray:
+    bev_x_range: Tuple[float, float] = None,
+    bev_y_range: Tuple[float, float] = None,
+    pixels_per_meter: float = None
+) -> Tuple[np.ndarray, Tuple[int, int]]:
     """
     Convert an image to Bird's Eye View.
     
@@ -240,24 +204,24 @@ def convert_to_bev(
         fov: Camera horizontal field of view in degrees
         pitch: Camera pitch angle in degrees
         camera_height: Camera height above ground in meters
-        bev_width: Output BEV image width
-        bev_height: Output BEV image height
-        bev_x_range: (x_min, x_max) range in meters
-        bev_y_range: (y_min, y_max) range in meters
+        bev_x_range: (x_min, x_max) range in meters (left/right). Uses DEFAULT_BEV_X_RANGE if None.
+        bev_y_range: (y_min, y_max) range in meters (forward distance). Uses DEFAULT_BEV_Y_RANGE if None.
+        pixels_per_meter: Resolution of BEV output. Uses DEFAULT_PIXELS_PER_METER if None.
         
     Returns:
-        BEV transformed image
+        bev_img: BEV transformed image
+        bev_size: (width, height) of the BEV image
     """
     height, width = image.shape[:2]
     
     M, bev_size = compute_bev_transform(
         width, height, fov, pitch, camera_height,
-        bev_width, bev_height, bev_x_range, bev_y_range
+        bev_x_range, bev_y_range, pixels_per_meter
     )
     
     bev_img = cv2.warpPerspective(image, M, bev_size, flags=cv2.INTER_LINEAR)
     
-    return bev_img
+    return bev_img, bev_size
 
 
 # Road class index in Cityscapes
@@ -424,12 +388,13 @@ class RoadExtractor:
     def extract_lanes_bev(
         self, 
         image: np.ndarray,
-        bev_width: int = 800,
-        bev_height: int = 800,
         fov: float = 110.0,
         pitch: float = 0.0,
-        camera_height: float = 1.2
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        camera_height: float = 1.2,
+        bev_x_range: Tuple[float, float] = None,
+        bev_y_range: Tuple[float, float] = None,
+        pixels_per_meter: float = None
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Tuple[int, int]]:
         """
         Extract lane markings using the correct pipeline:
         SegFormer → Road Mask → Separate Road → BEV → Lane Detection
@@ -442,11 +407,12 @@ class RoadExtractor:
         
         Args:
             image: RGB image (H, W, 3)
-            bev_width: Output BEV image width
-            bev_height: Output BEV image height
             fov: Camera horizontal field of view in degrees
             pitch: Camera pitch angle in degrees
             camera_height: Camera height above ground in meters
+            bev_x_range: (x_min, x_max) range in meters (left/right). Uses DEFAULT_BEV_X_RANGE if None.
+            bev_y_range: (y_min, y_max) range in meters (forward distance). Uses DEFAULT_BEV_Y_RANGE if None.
+            pixels_per_meter: Resolution - pixels per meter. Uses DEFAULT_PIXELS_PER_METER if None.
             
         Returns:
             road_only: Separated road image (original perspective)
@@ -454,6 +420,7 @@ class RoadExtractor:
             bev_lane_mask: Lane markings mask in BEV space
             original_road_mask: Road mask from SegFormer (perspective)
             bev_road_mask: Road mask in BEV space
+            bev_size: (width, height) of the BEV output
         """
         height, width = image.shape[:2]
         
@@ -466,14 +433,18 @@ class RoadExtractor:
         road_only = cv2.bitwise_and(image, image, mask=original_road_mask)
         
         # 3. Compute BEV transform (Using Camera Geometry)
+        # Dimensions are auto-calculated from ranges and pixels_per_meter
         M, bev_size = compute_bev_transform(
             width, height,
             fov=fov,
             pitch=pitch,
             camera_height=camera_height,
-            bev_width=bev_width,
-            bev_height=bev_height
+            bev_x_range=bev_x_range,
+            bev_y_range=bev_y_range,
+            pixels_per_meter=pixels_per_meter
         )
+        
+        print(f"  BEV size: {bev_size[0]}x{bev_size[1]} pixels (auto-calculated for equal scale)")
         
         # 4. Convert separated road image to BEV
         print("  Step 3: Converting separated road to BEV...")
@@ -489,7 +460,7 @@ class RoadExtractor:
         print("  Step 4: Detecting lane markings in BEV...")
         bev_lane_mask = self._extract_lanes_from_bev(bev_road_image, bev_road_mask)
         
-        return road_only, bev_road_image, bev_lane_mask, original_road_mask, bev_road_mask
+        return road_only, bev_road_image, bev_lane_mask, original_road_mask, bev_road_mask, bev_size
     
     def _extract_lanes_from_bev(
         self, 
@@ -616,7 +587,7 @@ class RoadExtractor:
             (lane_mask_tophat > 0).astype(np.uint8)
         )
         
-        # Require at least 2 votes (detected by 2+ methods)
+        # Require at least 3 votes (detected by 3+ methods)
         lane_mask = ((votes >= 2) * 255).astype(np.uint8)
         
         # =====================================================================
@@ -760,18 +731,25 @@ def process_single_image(extractor: RoadExtractor, args):
     # Pipeline: SegFormer → Road Mask → Separate Road → BEV → Lane Detection
     # =========================================================================
     if args.bev:
+        bev_x_range = (args.bev_x_min, args.bev_x_max)
+        bev_y_range = (args.bev_y_min, args.bev_y_max)
+        
         print(f'Pipeline: SegFormer → Road Mask → Separate Road → BEV → Lane Detection')
-        print(f'BEV output size: {args.bev_width}x{args.bev_height}')
+        print(f'BEV range: X=[{args.bev_x_min}, {args.bev_x_max}]m, Y=[{args.bev_y_min}, {args.bev_y_max}]m')
+        print(f'Resolution: {args.pixels_per_meter} pixels/meter')
         
         # Run the pipeline
-        road_only, bev_road_image, bev_lane_mask, original_road_mask, bev_road_mask = extractor.extract_lanes_bev(
+        road_only, bev_road_image, bev_lane_mask, original_road_mask, bev_road_mask, bev_size = extractor.extract_lanes_bev(
             image_rgb,
-            bev_width=args.bev_width,
-            bev_height=args.bev_height,
             fov=args.fov,
             pitch=args.pitch,
-            camera_height=args.camera_height
+            camera_height=args.camera_height,
+            bev_x_range=bev_x_range,
+            bev_y_range=bev_y_range,
+            pixels_per_meter=args.pixels_per_meter
         )
+        
+        print(f'Final BEV size: {bev_size[0]}x{bev_size[1]} pixels')
         
         # Save separated road image (perspective)
         road_only_bgr = cv2.cvtColor(road_only, cv2.COLOR_RGB2BGR)
@@ -845,7 +823,8 @@ def process_single_image(extractor: RoadExtractor, args):
         if args.show:
             # Create side-by-side comparison
             # Resize original to match BEV height for comparison
-            scale = args.bev_height / image_bgr.shape[0]
+            bev_h = bev_size[1]
+            scale = bev_h / image_bgr.shape[0]
             orig_resized = cv2.resize(image_bgr, None, fx=scale, fy=scale)
             
             # Create BEV lane overlay for display
@@ -1078,10 +1057,16 @@ def main():
                         help='Camera pitch angle in degrees (default: 0 or from config)')
     parser.add_argument('--camera-height', type=float, default=None, dest='camera_height',
                         help='Camera height above ground in meters (default: 1.2 or from config)')
-    parser.add_argument('--bev-width', type=int, default=800, dest='bev_width',
-                        help='BEV output width in pixels (default: 800)')
-    parser.add_argument('--bev-height', type=int, default=800, dest='bev_height',
-                        help='BEV output height in pixels (default: 800)')
+    parser.add_argument('--bev-x-min', type=float, default=DEFAULT_BEV_X_RANGE[0], dest='bev_x_min',
+                        help=f'BEV left boundary in meters (default: {DEFAULT_BEV_X_RANGE[0]})')
+    parser.add_argument('--bev-x-max', type=float, default=DEFAULT_BEV_X_RANGE[1], dest='bev_x_max',
+                        help=f'BEV right boundary in meters (default: {DEFAULT_BEV_X_RANGE[1]})')
+    parser.add_argument('--bev-y-min', type=float, default=DEFAULT_BEV_Y_RANGE[0], dest='bev_y_min',
+                        help=f'BEV near boundary in meters (default: {DEFAULT_BEV_Y_RANGE[0]})')
+    parser.add_argument('--bev-y-max', type=float, default=DEFAULT_BEV_Y_RANGE[1], dest='bev_y_max',
+                        help=f'BEV far boundary in meters (default: {DEFAULT_BEV_Y_RANGE[1]})')
+    parser.add_argument('--pixels-per-meter', type=float, default=DEFAULT_PIXELS_PER_METER, dest='pixels_per_meter',
+                        help=f'BEV resolution in pixels per meter (default: {DEFAULT_PIXELS_PER_METER}). Higher = more detail.')
     
     # Model options
     parser.add_argument('--model', type=str, default='b0', 
