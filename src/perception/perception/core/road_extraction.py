@@ -50,6 +50,7 @@ Examples:
 import numpy as np
 import cv2
 import argparse
+import yaml
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -60,19 +61,88 @@ from perception.core.segformer import SegFormer, CITYSCAPES_CLASSES, CITYSCAPES_
 # Bird's Eye View (BEV) Transform Functions
 # ============================================================================
 
+def compute_bev_transform_full_image(
+    width: int, 
+    height: int,
+    src_points: Optional[np.ndarray] = None,
+    bev_width: int = 800,
+    bev_height: int = 800
+) -> Tuple[np.ndarray, Tuple[int, int]]:
+    """
+    Compute perspective transform for Bird's Eye View using 4 source points.
+    Transforms road from perspective view to top-down bird's eye view.
+    
+    Args:
+        width: Input image width
+        height: Input image height
+        src_points: 4 source points in image [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+                   Order: top-left, top-right, bottom-right, bottom-left of trapezoid
+                   If None, uses default trapezoid for typical driving camera
+        bev_width: Output BEV image width
+        bev_height: Output BEV image height
+        
+    Returns:
+        M: 3x3 perspective transform matrix
+        bev_size: (width, height) of output BEV image
+    """
+    if src_points is None:
+        # Source trapezoid: the road region in perspective view
+        # We define a trapezoid that covers the road surface
+        
+        # Top Y: Horizon line (approx 45% down). We cannot go higher (sky) or points map to infinity.
+        top_y = int(height * 0.45)
+        # Bottom Y: The very bottom of the image
+        bottom_y = height
+        
+        # Width at top (Horizon): Where parallel lines converge
+        # We approximate the vanishing point area
+        top_left_x = int(width * 0.35)
+        top_right_x = int(width * 0.65)
+        
+        # Width at bottom: We take the FULL width of the image to see everything
+        bottom_left_x = 0
+        bottom_right_x = width
+        
+        src_points = np.float32([
+            [top_left_x, top_y],        # Top-left (far left)
+            [top_right_x, top_y],       # Top-right (far right)
+            [bottom_right_x, bottom_y], # Bottom-right (near right)
+            [bottom_left_x, bottom_y],  # Bottom-left (near left)
+        ])
+    else:
+        src_points = np.float32(src_points)
+    
+    # Destination: rectangle (bird's eye view - top-down)
+    # This creates a rectangular output where:
+    # - Parallel lines in real world appear parallel
+    # - Top of image = far from camera
+    # - Bottom of image = near camera
+    margin = int(bev_width * 0.1)  # Small margin on sides
+    dst_points = np.float32([
+        [margin, 0],                         # Top-left
+        [bev_width - margin, 0],             # Top-right  
+        [bev_width - margin, bev_height],    # Bottom-right
+        [margin, bev_height],                # Bottom-left
+    ])
+    
+    M = cv2.getPerspectiveTransform(src_points, dst_points)
+    return M, (bev_width, bev_height)
+
+
 def compute_bev_transform(
     width: int, 
     height: int, 
     fov: float = 110.0, 
     pitch: float = 0.0, 
     camera_height: float = 1.2,
-    bev_width: int = 800,
-    bev_height: int = 800,
-    bev_x_range: Tuple[float, float] = (-5.0, 5.0),
-    bev_y_range: Tuple[float, float] = (3.0, 20.0)
+    bev_width: int = 1200,
+    bev_height: int = 1200,
+    bev_x_range: Tuple[float, float] = (-20.0, 20.0),
+    bev_y_range: Tuple[float, float] = (3.0, 10.0)
 ) -> Tuple[np.ndarray, Tuple[int, int]]:
     """
-    Compute perspective transform matrix for Bird's Eye View.
+    Compute perspective transform matrix for Bird's Eye View using camera parameters.
+    NOTE: This restricts to a specific ROI. Use compute_bev_transform_full_image for full image.
     
     Args:
         width: Input image width
@@ -159,8 +229,8 @@ def convert_to_bev(
     camera_height: float = 1.2,
     bev_width: int = 800,
     bev_height: int = 800,
-    bev_x_range: Tuple[float, float] = (-5.0, 5.0),
-    bev_y_range: Tuple[float, float] = (3.0, 20.0)
+    bev_x_range: Tuple[float, float] = (-20.0, 20.0),
+    bev_y_range: Tuple[float, float] = (3.0, 50.0)
 ) -> np.ndarray:
     """
     Convert an image to Bird's Eye View.
@@ -195,6 +265,7 @@ ROAD_CLASS_ID = 0
 
 # Default output directory
 DEFAULT_OUTPUT_DIR = Path('/home/autoiq/nakul/Auto-IQ/data/rosbag_images_15jan/inference')
+DEFAULT_SENSOR_CONFIG = Path('/home/autoiq/nakul/Auto-IQ/config/carla_sensors.yaml')
 
 
 class RoadExtractor:
@@ -353,59 +424,72 @@ class RoadExtractor:
     def extract_lanes_bev(
         self, 
         image: np.ndarray,
+        bev_width: int = 800,
+        bev_height: int = 800,
         fov: float = 110.0,
         pitch: float = 0.0,
-        camera_height: float = 1.2,
-        bev_width: int = 800,
-        bev_height: int = 800
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        camera_height: float = 1.2
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Extract lane markings using the correct pipeline:
-        Image → SegFormer → Road Mask → BEV → Lane Detection
+        SegFormer → Road Mask → Separate Road → BEV → Lane Detection
         
-        This method:
-        1. Runs road segmentation on ORIGINAL image (SegFormer trained on perspective)
-        2. Converts both image AND road mask to BEV
-        3. Extracts lane markings from BEV road region
+        Pipeline:
+        1. Run SegFormer on original image → get road mask
+        2. Separate road from image (road_only = image AND mask)
+        3. Convert separated road image to BEV
+        4. Find lane markings in BEV image
         
         Args:
             image: RGB image (H, W, 3)
+            bev_width: Output BEV image width
+            bev_height: Output BEV image height
             fov: Camera horizontal field of view in degrees
             pitch: Camera pitch angle in degrees
             camera_height: Camera height above ground in meters
-            bev_width: Output BEV image width
-            bev_height: Output BEV image height
             
         Returns:
-            bev_image: Bird's Eye View transformed image
-            bev_road_mask: Road mask in BEV space
+            road_only: Separated road image (original perspective)
+            bev_road_image: Bird's Eye View of separated road
             bev_lane_mask: Lane markings mask in BEV space
-            original_road_mask: Road mask from original image (for reference)
+            original_road_mask: Road mask from SegFormer (perspective)
+            bev_road_mask: Road mask in BEV space
         """
-        # 1. Run SegFormer on ORIGINAL image (it's trained on perspective images)
+        height, width = image.shape[:2]
+        
+        # 1. Run SegFormer on ORIGINAL image → get road mask
+        print("  Step 1: Running SegFormer to get road mask...")
         original_road_mask = self.extract_road_mask(image)
         
-        # 2. Convert original image to BEV
-        bev_image = convert_to_bev(
-            image, fov, pitch, camera_height,
-            bev_width, bev_height
+        # 2. Separate road from image (keep only road pixels)
+        print("  Step 2: Separating road from image...")
+        road_only = cv2.bitwise_and(image, image, mask=original_road_mask)
+        
+        # 3. Compute BEV transform (Using Camera Geometry)
+        M, bev_size = compute_bev_transform(
+            width, height,
+            fov=fov,
+            pitch=pitch,
+            camera_height=camera_height,
+            bev_width=bev_width,
+            bev_height=bev_height
         )
         
-        # 3. Convert road mask to BEV (use NEAREST interpolation for binary mask)
-        height, width = image.shape[:2]
-        M, bev_size = compute_bev_transform(
-            width, height, fov, pitch, camera_height,
-            bev_width, bev_height
-        )
+        # 4. Convert separated road image to BEV
+        print("  Step 3: Converting separated road to BEV...")
+        bev_road_image = cv2.warpPerspective(road_only, M, bev_size, flags=cv2.INTER_LINEAR)
+        
+        # Also transform road mask to BEV for reference
         bev_road_mask = cv2.warpPerspective(
             original_road_mask, M, bev_size, 
-            flags=cv2.INTER_NEAREST  # Nearest neighbor for binary mask
+            flags=cv2.INTER_NEAREST
         )
         
-        # 4. Extract lanes from BEV image using adaptive thresholding
-        bev_lane_mask = self._extract_lanes_from_bev(bev_image, bev_road_mask)
+        # 5. Find lane markings in BEV image
+        print("  Step 4: Detecting lane markings in BEV...")
+        bev_lane_mask = self._extract_lanes_from_bev(bev_road_image, bev_road_mask)
         
-        return bev_image, bev_road_mask, bev_lane_mask, original_road_mask
+        return road_only, bev_road_image, bev_lane_mask, original_road_mask, bev_road_mask
     
     def _extract_lanes_from_bev(
         self, 
@@ -584,27 +668,33 @@ def process_single_image(extractor: RoadExtractor, args):
     
     # =========================================================================
     # Bird's Eye View (BEV) Processing Mode
-    # Pipeline: Image → SegFormer → Road Mask → BEV → Lane Detection
+    # Pipeline: SegFormer → Road Mask → Separate Road → BEV → Lane Detection
     # =========================================================================
     if args.bev:
-        print(f'Pipeline: Image → SegFormer → Road Mask → BEV → Lane Detection')
-        print(f'BEV params: FOV={args.fov}, pitch={args.pitch}, height={args.camera_height}m')
+        print(f'Pipeline: SegFormer → Road Mask → Separate Road → BEV → Lane Detection')
+        print(f'BEV output size: {args.bev_width}x{args.bev_height}')
         
-        # Run the corrected pipeline
-        bev_image, bev_road_mask, bev_lane_mask, original_road_mask = extractor.extract_lanes_bev(
+        # Run the pipeline
+        road_only, bev_road_image, bev_lane_mask, original_road_mask, bev_road_mask = extractor.extract_lanes_bev(
             image_rgb,
+            bev_width=args.bev_width,
+            bev_height=args.bev_height,
             fov=args.fov,
             pitch=args.pitch,
-            camera_height=args.camera_height,
-            bev_width=args.bev_width,
-            bev_height=args.bev_height
+            camera_height=args.camera_height
         )
         
-        # Save BEV image
-        bev_bgr = cv2.cvtColor(bev_image, cv2.COLOR_RGB2BGR)
+        # Save separated road image (perspective)
+        road_only_bgr = cv2.cvtColor(road_only, cv2.COLOR_RGB2BGR)
+        road_only_path = out_dir / f'{base_name}_road_only.png'
+        cv2.imwrite(str(road_only_path), road_only_bgr)
+        print(f'Saved separated road: {road_only_path}')
+        
+        # Save BEV road image (separated road in bird's eye view)
+        bev_bgr = cv2.cvtColor(bev_road_image, cv2.COLOR_RGB2BGR)
         bev_path = out_dir / f'{base_name}_bev.png'
         cv2.imwrite(str(bev_path), bev_bgr)
-        print(f'Saved BEV image: {bev_path}')
+        print(f'Saved BEV road image: {bev_path}')
         
         # Save original road mask (from SegFormer on perspective image)
         if args.save_mask:
@@ -625,12 +715,12 @@ def process_single_image(extractor: RoadExtractor, args):
         # Save BEV lane overlay
         if args.save_lane_overlay:
             # Create lane overlay on BEV image (Red lanes)
-            bev_lane_overlay = bev_image.copy()
+            bev_lane_overlay = bev_road_image.copy()
             bev_lane_overlay[bev_lane_mask == 255] = (255, 0, 0)  # Red
             
             # Blend
             bev_lane_overlay_blended = cv2.addWeighted(
-                bev_image, 1 - args.alpha, 
+                bev_road_image, 1 - args.alpha, 
                 bev_lane_overlay, args.alpha, 0
             )
             
@@ -641,11 +731,11 @@ def process_single_image(extractor: RoadExtractor, args):
         
         # Save BEV road overlay
         if args.overlay:
-            bev_road_overlay = bev_image.copy()
+            bev_road_overlay = bev_road_image.copy()
             bev_road_overlay[bev_road_mask == 255] = (128, 64, 128)  # Purple
             
             bev_road_overlay_blended = cv2.addWeighted(
-                bev_image, 1 - args.alpha, 
+                bev_road_image, 1 - args.alpha, 
                 bev_road_overlay, args.alpha, 0
             )
             
@@ -656,9 +746,8 @@ def process_single_image(extractor: RoadExtractor, args):
         
         # Save BEV grayscale road texture (road pixels only in grayscale)
         if args.save_road_gray:
-            # Extract road-only pixels from BEV
-            bev_road_only = cv2.bitwise_and(bev_image, bev_image, mask=bev_road_mask)
-            bev_road_gray = cv2.cvtColor(bev_road_only, cv2.COLOR_RGB2GRAY)
+            # Convert BEV road image to grayscale
+            bev_road_gray = cv2.cvtColor(bev_road_image, cv2.COLOR_RGB2GRAY)
             bev_road_gray_path = out_dir / f'{base_name}_bev_road_grayscale.png'
             cv2.imwrite(str(bev_road_gray_path), bev_road_gray)
             print(f'Saved BEV grayscale road: {bev_road_gray_path}')
@@ -875,6 +964,7 @@ def main():
     
     # Output options
     parser.add_argument('--output', type=str, help='Output directory')
+    parser.add_argument('--config', type=str, help='Path to sensor config yaml')
     parser.add_argument('--colored', action='store_true', help='Save colored road visualization')
     parser.add_argument('--overlay', action='store_true', help='Save overlay on original image')
     parser.add_argument('--road-only', action='store_true', dest='road_only', 
@@ -893,12 +983,12 @@ def main():
     # =========================================================================
     parser.add_argument('--bev', action='store_true', 
                         help='Convert to Bird\'s Eye View before processing')
-    parser.add_argument('--fov', type=float, default=110.0,
-                        help='Camera horizontal field of view in degrees (default: 110)')
-    parser.add_argument('--pitch', type=float, default=0.0,
-                        help='Camera pitch angle in degrees (default: 0)')
-    parser.add_argument('--camera-height', type=float, default=1.2, dest='camera_height',
-                        help='Camera height above ground in meters (default: 1.2)')
+    parser.add_argument('--fov', type=float, default=None,
+                        help='Camera horizontal field of view in degrees (default: 110 or from config)')
+    parser.add_argument('--pitch', type=float, default=None,
+                        help='Camera pitch angle in degrees (default: 0 or from config)')
+    parser.add_argument('--camera-height', type=float, default=None, dest='camera_height',
+                        help='Camera height above ground in meters (default: 1.2 or from config)')
     parser.add_argument('--bev-width', type=int, default=800, dest='bev_width',
                         help='BEV output width in pixels (default: 800)')
     parser.add_argument('--bev-height', type=int, default=800, dest='bev_height',
@@ -915,6 +1005,36 @@ def main():
     parser.add_argument('--show', action='store_true', help='Display results')
     args = parser.parse_args()
     
+    # Load defaults from config if available
+    config_fov = 110.0
+    config_pitch = 0.0
+    config_height = 1.2
+    
+    config_path = Path(args.config) if args.config else DEFAULT_SENSOR_CONFIG
+    if config_path.exists():
+        try:
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+                if 'cameras' in config and 'front_rgb' in config['cameras']:
+                    cam_cfg = config['cameras']['front_rgb']
+                    if 'attributes' in cam_cfg and 'fov' in cam_cfg['attributes']:
+                        config_fov = float(cam_cfg['attributes']['fov'])
+                    if 'rotation' in cam_cfg and len(cam_cfg['rotation']) >= 1:
+                        config_pitch = float(cam_cfg['rotation'][0])
+                    if 'location' in cam_cfg and len(cam_cfg['location']) >= 3:
+                        config_height = float(cam_cfg['location'][2])
+                    print(f"Loaded camera config from {config_path}: FOV={config_fov}, Pitch={config_pitch}, Height={config_height}")
+        except Exception as e:
+            print(f"Warning: Failed to load config from {config_path}: {e}")
+
+    # Set values if not provided by CLI
+    if args.fov is None:
+        args.fov = config_fov
+    if args.pitch is None:
+        args.pitch = config_pitch
+    if args.camera_height is None:
+        args.camera_height = config_height
+
     # Handle --all flag
     if args.all:
         args.save_mask = True
