@@ -96,6 +96,7 @@ class PlanningNode(Node):
         self.lane_change_time = self.get_parameter('lane_change_time').value
         self.sampling_resolution = self.get_parameter('sampling_resolution').value
         
+        
         # ==================== Connect to CARLA ====================
         self.get_logger().info(f'Connecting to CARLA at {carla_host}:{carla_port}...')
         

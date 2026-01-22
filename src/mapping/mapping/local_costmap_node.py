@@ -527,10 +527,10 @@ class LocalCostmapNode(Node):
         robot_ix, robot_iy = self._world_to_grid(
             np.array([robot_x]), np.array([robot_y])
         )
-        # robot_ix, and iy with always be around self.grid_cells // 2
+        # robot_ix, and iy with always be self.grid_cells // 2
         robot_ix = int(robot_ix[0])
         robot_iy = int(robot_iy[0])
-        self.get_logger().info(f'Robot grid position: ({robot_ix}, {robot_iy})')
+        # self.get_logger().info(f'Robot grid position: ({robot_ix}, {robot_iy})')
         # Clamp robot position to grid bounds
         robot_ix = np.clip(robot_ix, 0, self.grid_cells - 1)
         robot_iy = np.clip(robot_iy, 0, self.grid_cells - 1)
