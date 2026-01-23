@@ -11,7 +11,7 @@ def generate_launch_description():
         DeclareLaunchArgument('carla_host', default_value='localhost'),
         DeclareLaunchArgument('carla_port', default_value='2000'),
         DeclareLaunchArgument('carla_timeout', default_value='10.0'),
-        DeclareLaunchArgument('target_speed', default_value='10.0'),
+        DeclareLaunchArgument('target_speed', default_value='40.0'),
         DeclareLaunchArgument('use_ground_truth', default_value='true'),
         
         Node(

@@ -27,7 +27,7 @@ from planning.utils.frenet_utils import (
     QuinticPolynomial, 
     QuarticPolynomial,
 )
-from planning.behavior_planner import BehaviorState, BehaviorOutput
+from planning.core.behavior_planner import BehaviorState, BehaviorOutput
 
 
 # VehicleState and TrajectoryPoint are now imported from autoiq_common.types

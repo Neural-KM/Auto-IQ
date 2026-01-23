@@ -37,8 +37,8 @@ from typing import List
 
 import carla
 
-from planning.global_planner import GlobalPlanner, RoadOption
-from planning.behavior_planner import (
+from planning.core.global_planner import GlobalPlanner, RoadOption
+from planning.core.behavior_planner import (
     BehaviorPlanner,
     BehaviorPlannerConfig,
     BehaviorState,
@@ -46,7 +46,7 @@ from planning.behavior_planner import (
     LaneAvailability,
 )
 
-from planning.motion_planner import (
+from planning.core.motion_planner import (
     MotionPlanner, 
     MotionPlannerConfig,
 )
