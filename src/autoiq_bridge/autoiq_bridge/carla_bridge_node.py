@@ -119,8 +119,6 @@ class CarlaBridgeNode(Node):
         self.sensors: Dict[str, dict] = {}  # {sensor_id: {'actor', 'publisher', 'queue', ...}}
         
         # ==================== Synchronization ====================
-        # Each sensor gets a queue for thread-safe data transfer
-        self.sensor_queues: Dict[str, Queue] = {}
         self.current_frame = 0
         self.running = True
         
@@ -303,24 +301,20 @@ class CarlaBridgeNode(Node):
         # Determine frame_id based on sensor type
         frame_id = self._get_frame_id(sensor_type, sensor_id)
         
-        # Create queue for this sensor
-        sensor_queue = Queue(maxsize=10)
-        self.sensor_queues[frame_id] = sensor_queue
-        
-        # Create sensor data structure
+        # Create sensor data structure with thread-safe queue
         sensor_data = {
             'actor': sensor_actor,
             'config': config,
             'frame_id': frame_id,
             'type': sensor_type,
-            'queue': sensor_queue,
+            'queue': Queue(maxsize=10),
         }
         
         # Create publishers based on sensor type
         self._setup_sensor_publishers(sensor_data, sensor_type, sensor_id)
         
         # Setup callback (pure producer - just pushes to queue)
-        self._setup_sensor_callback(sensor_actor, sensor_type, sensor_queue)
+        self._setup_sensor_callback(sensor_actor, sensor_type, sensor_data['queue'])
         
         self.sensors[frame_id] = sensor_data
         self.get_logger().info(f'Spawned sensor: {sensor_type} as {sensor_id} (frame: {frame_id})')
@@ -434,6 +428,7 @@ class CarlaBridgeNode(Node):
         self.get_logger().info('Starting Tick-Wait-Publish loop')
         
         while self.running and rclpy.ok():
+            time_start = time.time()
             try:
                 # ==================== 1. CONTROL ====================
                 if self.vehicle is not None and self.vehicle.is_alive:
@@ -454,16 +449,19 @@ class CarlaBridgeNode(Node):
                 self.clock_pub.publish(clock_msg)
                 
                 # ==================== 4. SYNC BLOCK - Wait for sensors ====================
+                time_start_wait = time.time()
                 sensor_data_packet = self.wait_for_sensors(self.current_frame)
-                
+                self.get_logger().info(f'sensor data collection time: {time.time() - time_start_wait:.3f}s')
                 # ==================== 5. PUBLISH ====================
+                time_start_publish = time.time()
                 # Publish TF and Odometry first (they are always available)
                 self.publish_tf_synchronized(ros_time)
                 self.publish_odometry_synchronized(ros_time)
                 
                 # Publish sensor data with synchronized timestamp
                 self.publish_sensor_data(sensor_data_packet, ros_time)
-                
+                self.get_logger().info(f'sensor data publish time: {time.time() - time_start_publish:.3f}s')
+                self.get_logger().info(f'Tick time: {time.time() - time_start:.3f}s, Hz: {1.0 / (time.time() - time_start):.2f}, Frame: {self.current_frame}')
             except Exception as e:
                 if self.running:
                     self.get_logger().error(f'Error in tick loop: {e}')
@@ -481,13 +479,18 @@ class CarlaBridgeNode(Node):
             Dict mapping frame_id to raw CARLA sensor data
         """
         sensor_data = {}
-        deadline = time.time() + self.sensor_timeout
+        wait_start = time.time()
+        deadline = wait_start + self.sensor_timeout
         
-        sensors_remaining = set(self.sensor_queues.keys())
+        # Track per-sensor wait times
+        sensor_wait_start = {frame_id: wait_start for frame_id in self.sensors.keys()}
+        sensor_wait_times = {}
+        
+        sensors_remaining = set(self.sensors.keys())
         
         while sensors_remaining and time.time() < deadline:
             for frame_id in list(sensors_remaining):
-                queue = self.sensor_queues[frame_id]
+                queue = self.sensors[frame_id]['queue']
                 
                 try:
                     # Non-blocking get with small timeout
@@ -499,6 +502,7 @@ class CarlaBridgeNode(Node):
                     elif item.frame == target_frame:
                         # Matching data - accept
                         sensor_data[frame_id] = item.data
+                        sensor_wait_times[frame_id] = time.time() - sensor_wait_start[frame_id]
                         sensors_remaining.discard(frame_id)
                     else:
                         # Future data (shouldn't happen in sync mode) - put back
@@ -506,6 +510,11 @@ class CarlaBridgeNode(Node):
                         
                 except Empty:
                     continue
+        
+        # Log per-sensor wait times
+        if sensor_wait_times:
+            timing_str = ', '.join(f'{"/".join(fid.split("/")[-3:])}:{t*1000:.1f}ms' for fid, t in sorted(sensor_wait_times.items(), key=lambda x: -x[1]))
+            self.get_logger().info(f'Sensor wait times: {timing_str}')
         
         if sensors_remaining:
             self.get_logger().warn(
@@ -558,6 +567,7 @@ class CarlaBridgeNode(Node):
         after synchronization is confirmed.
         """
         for frame_id, carla_data in sensor_data_packet.items():
+            publish_time_start = time.time()
             if frame_id not in self.sensors:
                 continue
             
@@ -581,6 +591,8 @@ class CarlaBridgeNode(Node):
                     self._publish_imu(carla_data, sensor_info, ros_time)
             except Exception as e:
                 self.get_logger().error(f'Error publishing {frame_id}: {e}')
+            publish_time_end = time.time()
+            self.get_logger().info(f'Publishing {frame_id} took {(publish_time_end - publish_time_start)*1000:.1f}ms')
     
     # ==================== Sensor Processing & Publishing ====================
     
@@ -589,8 +601,9 @@ class CarlaBridgeNode(Node):
         # Convert BGRA to RGB
         array = np.frombuffer(carla_image.raw_data, dtype=np.uint8)
         array = array.reshape((carla_image.height, carla_image.width, 4))
+        copy_time_start = time.time()
         rgb_array = array[:, :, :3][:, :, ::-1]  # BGRA -> RGB
-        
+        self.get_logger().info(f'RGB buffer copy time: {time.time() - copy_time_start:.3f}s')   
         # Create Image message
         msg = Image()
         msg.header = self.create_synchronized_header(sensor_info['frame_id'], ros_time)
@@ -599,8 +612,9 @@ class CarlaBridgeNode(Node):
         msg.encoding = 'rgb8'
         msg.is_bigendian = False
         msg.step = carla_image.width * 3
+        convert_rgb_time_start = time.time()
         msg.data = rgb_array.tobytes()
-        
+        self.get_logger().info(f'RGB buffer convert time: {time.time() - convert_rgb_time_start:.3f}s')
         sensor_info['image_pub'].publish(msg)
         
         # Publish camera info
