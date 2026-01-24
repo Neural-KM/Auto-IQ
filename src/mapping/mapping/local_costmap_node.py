@@ -136,6 +136,96 @@ def compute_raycast_batch(robot_ix, robot_iy, hit_ix_arr, hit_iy_arr, ray_mask, 
         count += n_pts
         
     return all_free_x[:count], all_free_y[:count]
+
+
+@jit(nopython=True, cache=True)
+def compute_shadow_buffer(obstacle_x: np.ndarray, obstacle_y: np.ndarray,
+                          robot_x: float, robot_y: float, 
+                          angular_res: float) -> np.ndarray:
+    """
+    Build an angular depth buffer (shadow buffer) from obstacle points.
+    
+    For each angular bin (360°), stores the minimum distance to an obstacle.
+    This creates a "shadow" behind each obstacle that will block raycasting.
+    
+    Args:
+        obstacle_x: X coordinates of obstacle points (world frame)
+        obstacle_y: Y coordinates of obstacle points (world frame)
+        robot_x, robot_y: Robot position (world frame)
+        angular_res: Angular resolution in radians (e.g., 1° = 0.0175)
+        
+    Returns:
+        1D array of size (2*pi / angular_res) with minimum distance per bin.
+        Bins with no obstacles have value np.inf.
+    """
+    n_bins = int(2.0 * np.pi / angular_res) + 1
+    shadow_buffer = np.full(n_bins, np.inf, dtype=np.float32)
+    
+    n_obstacles = len(obstacle_x)
+    
+    for i in range(n_obstacles):
+        dx = obstacle_x[i] - robot_x
+        dy = obstacle_y[i] - robot_y
+        
+        # Calculate angle and distance
+        angle = np.arctan2(dy, dx)  # [-pi, pi]
+        distance = np.sqrt(dx * dx + dy * dy)
+        
+        # Convert angle to bin index [0, n_bins)
+        bin_idx = int((angle + np.pi) / angular_res)
+        
+        # Keep minimum distance (closest obstacle)
+        if distance < shadow_buffer[bin_idx]:
+            shadow_buffer[bin_idx] = distance
+    
+    return shadow_buffer
+
+
+@jit(nopython=True, cache=True)
+def filter_rays_by_shadows(target_x: np.ndarray, target_y: np.ndarray,
+                           robot_x: float, robot_y: float,
+                           shadow_buffer: np.ndarray, angular_res: float,
+                           tolerance: float) -> np.ndarray:
+    """
+    Filter target points that are occluded by obstacles (behind the shadow).
+    
+    A point is occluded if its distance is greater than the shadow buffer
+    distance for its angular bin (plus a small tolerance).
+    
+    Args:
+        target_x, target_y: Target point coordinates (world frame)
+        robot_x, robot_y: Robot position (world frame)
+        shadow_buffer: Angular depth buffer from compute_shadow_buffer
+        angular_res: Angular resolution in radians (must match shadow buffer)
+        tolerance: Distance tolerance in meters (points within tolerance pass through)
+        
+    Returns:
+        Boolean mask - True for points that should be raycasted (not occluded)
+    """
+    n_points = len(target_x)
+    n_bins = len(shadow_buffer)
+    valid_mask = np.ones(n_points, dtype=np.bool_)
+    
+    for i in range(n_points):
+        dx = target_x[i] - robot_x
+        dy = target_y[i] - robot_y
+        
+        # Calculate angle and distance
+        angle = np.arctan2(dy, dx)  # [-pi, pi]
+        distance = np.sqrt(dx * dx + dy * dy)
+        
+        # Convert angle to bin index
+        angle_normalized = angle + np.pi
+        bin_idx = int(angle_normalized / angular_res)
+        
+        # Check if point is behind an obstacle (occluded)
+        # If target distance > shadow distance + tolerance, it's behind an obstacle
+        if distance > shadow_buffer[bin_idx] + tolerance:
+            valid_mask[i] = False
+    
+    return valid_mask
+
+
 class LocalCostmapNode(Node):
     """
     ROS2 Node for generating odom-aligned rolling window costmap.
@@ -171,7 +261,10 @@ class LocalCostmapNode(Node):
         self.declare_parameter('decay_rate', 0.2)        # Log-odds decay rate per second
         # Raycasting parameters
         self.declare_parameter('max_ray_range', 30.0)   # Max range for raycasting (meters)
-        self.declare_parameter('enable_raycasting', True)  # Enable free space raycasting
+        
+        # Shadow filter parameters (prevents ray passthrough)
+        self.declare_parameter('shadow_angular_res', 1.0)  # Angular resolution in degrees
+        self.declare_parameter('shadow_tolerance', 0.5)    # Distance tolerance in meters
         
         # Get parameter values
         pointcloud_topic = self.get_parameter('pointcloud_topic').value
@@ -193,7 +286,10 @@ class LocalCostmapNode(Node):
         self.decay_rate = self.get_parameter('decay_rate').value
 
         self.max_ray_range = self.get_parameter('max_ray_range').value
-        self.enable_raycasting = self.get_parameter('enable_raycasting').value
+        
+        # Shadow filter parameters (convert degrees to radians)
+        self.shadow_angular_res = np.radians(self.get_parameter('shadow_angular_res').value)
+        self.shadow_tolerance = self.get_parameter('shadow_tolerance').value
         
         # ==================== Grid Setup ====================
         # Square grid centered on vehicle
@@ -263,7 +359,6 @@ class LocalCostmapNode(Node):
         self.get_logger().info(f'  Input Odometry: {odom_topic}')
         self.get_logger().info(f'  Output: {costmap_topic}')
         self.get_logger().info(f'  Odom Frame: {self.odom_frame}')
-        self.get_logger().info(f'  Raycasting: {self.enable_raycasting}')
     
     def odom_callback(self, msg: Odometry):
         """Store latest odometry for position tracking."""
@@ -281,22 +376,11 @@ class LocalCostmapNode(Node):
             Tuple of (x, y, z) or None if lookup fails
         """
         try:
-            # Wait for transform at exact timestamp
-            # if not self.tf_buffer.can_transform(
-            #     self.odom_frame,
-            #     'ego_vehicle',
-            #     stamp,
-            #     timeout=rclpy.duration.Duration(seconds=1.0)
-            # ):
-            #     self.get_logger().warn('TF not available at exact timestamp', throttle_duration_sec=1.0)
-            #     return None
-            
             transform = self.tf_buffer.lookup_transform(
                 self.odom_frame,
                 'ego_vehicle',
                 stamp
             )
-            
             t = transform.transform.translation
             return (t.x, t.y, t.z)
         except TransformException as e:
@@ -327,14 +411,14 @@ class LocalCostmapNode(Node):
         points, labels = self._parse_labeled_pointcloud(msg)
         
         if len(points) == 0:
-            self._publish_costmap(msg.header.stamp)
+            self.get_logger().error('No points for costmap')
             return
         
         # Transform points from sensor frame to odom frame
         points_odom = self._transform_points_to_odom(points, msg.header)
         
         if points_odom is None or len(points_odom) == 0:
-            self._publish_costmap(msg.header.stamp)
+            self.get_logger().error('No points for costmap')
             return
         
         # Height filter (relative to vehicle z)
@@ -344,7 +428,7 @@ class LocalCostmapNode(Node):
         labels = labels[height_mask]
         
         if len(points_odom) == 0:
-            self._publish_costmap(msg.header.stamp)
+            self.get_logger().error('No points for costmap')
             return
         
         # Update costmap with sensor data
@@ -456,8 +540,6 @@ class LocalCostmapNode(Node):
             return np.array([]), np.array([])
 
         try:
-            # Zero-copy parsing using strided numpy arrays
-            # We assume msg.data supports the buffer interface (bytes or array.array)
             points_x = np.ndarray(shape=(n_points,), dtype=np.float32, buffer=msg.data, offset=x_offset, strides=(point_step,))
             points_y = np.ndarray(shape=(n_points,), dtype=np.float32, buffer=msg.data, offset=y_offset, strides=(point_step,))
             points_z = np.ndarray(shape=(n_points,), dtype=np.float32, buffer=msg.data, offset=z_offset, strides=(point_step,))
@@ -580,45 +662,76 @@ class LocalCostmapNode(Node):
         robot_ix = center
         robot_iy = center
 
+        # Two seperate masks so that there are no oscillations between positive and negative values
         # Add decay so that cells not visible anymore go to zero over time
         abs_grid = np.abs(self.log_odds_grid)
         mask_decay = abs_grid > self.decay_rate
         mask_reset = abs_grid <= self.decay_rate
-        
-        # Apply decay where magnitude is large enough
+        # Apply decay where magnitude of odds is larger than the decay itself
         self.log_odds_grid[mask_decay] -= np.sign(self.log_odds_grid[mask_decay]) * self.decay_rate
-        
-        # Snap to zero where magnitude is small
+        # Snap to zero where magnitude is smaller than decay
         self.log_odds_grid[mask_reset] = 0.0
-        # ==================== Raycasting for Free Space ====================
-        if self.enable_raycasting and len(hit_ix) > 0:
-            # OPTIMIZATION: Deduplicate by grid cell
-            # If multiple LiDAR points hit the same cell, we only need to raycast once
-            # This reduces 41k points to ~2-5k unique cells (depending on density)
+        
+        # ==================== Identify Obstacle Points First ====================
+        # We need obstacles BEFORE raycasting to build the shadow buffer
+        is_obstacle = self.obstacle_labels[labels]
+        obstacle_ix = hit_ix[is_obstacle]
+        obstacle_iy = hit_iy[is_obstacle]
+        obstacle_x = x_valid[is_obstacle]
+        obstacle_y = y_valid[is_obstacle]
+        
+        # ==================== Raycasting ====================
+        if len(hit_ix) > 0:
+            # STEP 1: Build shadow buffer from obstacle points
+            # This creates an angular depth buffer that prevents rays from passing
+            # through obstacles to reach ground points behind them
+            shadow_buffer = compute_shadow_buffer(
+                obstacle_x.astype(np.float32),
+                obstacle_y.astype(np.float32),
+                robot_x, robot_y,
+                self.shadow_angular_res
+            )
             
-            # Create unique cell indices using structured array
+            # Step 2: remove duplicates hits in grid cell (optimization)
             cell_coords = np.column_stack((hit_ix, hit_iy))
+            # self.get_logger().info(f'Raycasting {len(hit_ix)} hits before deduplication')
             unique_cells, unique_indices = np.unique(
                 cell_coords.view(dtype=[('x', np.int32), ('y', np.int32)]).reshape(-1),
                 return_index=True
             )
-            
-            # Extract unique cell coordinates
+            # self.get_logger().info(f'Raycasting {len(unique_indices)} hits after deduplication')
             unique_ix = hit_ix[unique_indices]
             unique_iy = hit_iy[unique_indices]
             unique_x = x_valid[unique_indices]
             unique_y = y_valid[unique_indices]
             
-            # Calculate distances for range limiting (using unique points)
-            distances = np.sqrt((unique_x - robot_x)**2 + (unique_y - robot_y)**2)
+            # STEP 3: Filter rays by shadow buffer
+            # Remove points that are behind obstacles (would cause ray passthrough)
+            shadow_mask = filter_rays_by_shadows(
+                unique_x.astype(np.float32),
+                unique_y.astype(np.float32),
+                robot_x, robot_y,
+                shadow_buffer,
+                self.shadow_angular_res,
+                self.shadow_tolerance
+            )
+            
+            # Apply shadow filter
+            filtered_ix = unique_ix[shadow_mask]
+            filtered_iy = unique_iy[shadow_mask]
+            filtered_x = unique_x[shadow_mask]
+            filtered_y = unique_y[shadow_mask]
+            
+            # STEP 4: Range filter on remaining points
+            distances = np.sqrt((filtered_x - robot_x)**2 + (filtered_y - robot_y)**2)
             ray_mask = distances <= self.max_ray_range
             
             # Estimate max cells per ray for buffer allocation
             max_ray_cells = int(self.max_ray_range / self.resolution) + 10
             
-            # --- NUMBA BATCH CALL ---
+            # STEP 5: Raycast to filtered points only
             free_ix_concat, free_iy_concat = compute_raycast_batch(
-                robot_ix, robot_iy, unique_ix, unique_iy, ray_mask, max_ray_cells
+                robot_ix, robot_iy, filtered_ix, filtered_iy, ray_mask, max_ray_cells
             )
             
             # Apply free space updates (batch)
@@ -633,12 +746,8 @@ class LocalCostmapNode(Node):
                 
                 # Apply l_miss to free cells
                 np.subtract.at(self.log_odds_grid, (free_iy_concat, free_ix_concat), self.l_miss)
-        # ==================== Mark Occupied Cells ====================
-        # Only mark obstacle-class points as occupied
-        is_obstacle = self.obstacle_labels[np.clip(labels, 0, 255)]
-        obstacle_ix = hit_ix[is_obstacle]
-        obstacle_iy = hit_iy[is_obstacle]
         
+        # ==================== Mark Occupied Cells ====================
         if len(obstacle_ix) > 0:
             # Apply l_hit to occupied cells
             np.add.at(self.log_odds_grid, (obstacle_iy, obstacle_ix), self.l_hit)
