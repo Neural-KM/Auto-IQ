@@ -60,12 +60,16 @@ def generate_launch_description():
         #     default_value='true',
         #     description='Enable Bresenham raycasting for free space'
         # ),
-        
+        DeclareLaunchArgument(
+            'mapper_executable',
+            default_value='inverse_perspective_mapper_node',
+            description='Local costmap node executable to launch'
+        ),
         # ==================== Node ====================
         Node(
             package='mapping',
-            executable='local_costmap_node_new',
-            name='local_costmap_node_new',
+            executable=LaunchConfiguration('mapper_executable'),
+            name='local_costmap_node',
             output='screen',
             parameters=[{
                 'use_sim_time': True,  # Use simulation time from /clock
