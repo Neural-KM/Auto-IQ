@@ -64,8 +64,8 @@ def generate_launch_description():
         # ==================== Node ====================
         Node(
             package='mapping',
-            executable='local_costmap_node',
-            name='local_costmap_node',
+            executable='local_costmap_node_new',
+            name='local_costmap_node_new',
             output='screen',
             parameters=[{
                 'use_sim_time': True,  # Use simulation time from /clock

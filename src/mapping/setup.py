@@ -27,8 +27,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'local_costmap_node = mapping.local_costmap_node:main',
-            'semantic_costmap_node = mapping.semantic_costmap_node:main',
+            'local_costmap_node_new = mapping.nodes.local_costmap_node_new:main',
+            'local_costmap_node_old = mapping.nodes.local_costmap_node_old:main',
+
         ],
     },
 )
