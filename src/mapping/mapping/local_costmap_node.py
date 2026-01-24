@@ -215,8 +215,7 @@ def filter_rays_by_shadows(target_x: np.ndarray, target_y: np.ndarray,
         distance = np.sqrt(dx * dx + dy * dy)
         
         # Convert angle to bin index
-        angle_normalized = angle + np.pi
-        bin_idx = int(angle_normalized / angular_res)
+        bin_idx = int((angle + np.pi) / angular_res)
         
         # Check if point is behind an obstacle (occluded)
         # If target distance > shadow distance + tolerance, it's behind an obstacle
@@ -389,7 +388,8 @@ class LocalCostmapNode(Node):
     
     def pointcloud_callback(self, msg: PointCloud2):
         """Process labeled point cloud and update costmap."""
-        t_start = time.perf_counter()
+        self.get_logger().info('=========CALLBACK START==========')
+        t_start_pointcloud_cb = time.perf_counter()
         
         # Get vehicle pose at exact pointcloud timestamp
         result = self._get_vehicle_pose_at_time(msg.header.stamp)
@@ -403,19 +403,28 @@ class LocalCostmapNode(Node):
         # Initialize on first update
         if not self.initialized:
             self._initialize_grid(x_curr, y_curr)
-        
+        t_gridroll_start = time.perf_counter()
         # Handle ego-motion: roll grid to keep vehicle centered
         self._roll_grid_for_motion(x_curr, y_curr)
+        self.get_logger().info(f'Grid roll time: '
+                               f'{(time.perf_counter() - t_gridroll_start)*1000:.1f} ms')
         
-        # Parse point cloud
+        t_parse_start = time.perf_counter()
         points, labels = self._parse_labeled_pointcloud(msg)
+        t_parse_end = time.perf_counter()
+        self.get_logger().info(f'Point cloud parse time: '
+                               f'{(t_parse_end - t_parse_start)*1000:.1f} ms')
         
         if len(points) == 0:
             self.get_logger().error('No points for costmap')
             return
         
+        t_transform_start = time.perf_counter()
         # Transform points from sensor frame to odom frame
         points_odom = self._transform_points_to_odom(points, msg.header)
+        t_transform_end = time.perf_counter()
+        self.get_logger().info(f'Point cloud transform time: '
+                               f'{(t_transform_end - t_transform_start)*1000:.1f} ms')
         
         if points_odom is None or len(points_odom) == 0:
             self.get_logger().error('No points for costmap')
@@ -431,16 +440,20 @@ class LocalCostmapNode(Node):
             self.get_logger().error('No points for costmap')
             return
         
+        t_start_costmap_update = time.perf_counter()
         # Update costmap with sensor data
         self._update_costmap(points_odom, labels, x_curr, y_curr)
-        
+        t_end_costmap_update = time.perf_counter()
+        self.get_logger().info(f'Costmap update time: '
+                               f'{(t_end_costmap_update - t_start_costmap_update)*1000:.1f} ms')
         # Publish with pointcloud timestamp (same as TF lookup timestamp)
         self._publish_costmap(msg.header.stamp)
         
         # Log timing
-        t_elapsed = (time.perf_counter() - t_start) * 1000  # ms
-        self.get_logger().info(f'Costmap update: {t_elapsed:.1f}ms ({len(points_odom)} points)', throttle_duration_sec=1.0)
-    
+        t_elapsed_pointcloud_cb = (time.perf_counter() - t_start_pointcloud_cb) * 1000  # ms
+        self.get_logger().info(f'Pointcloud callback execution time: {t_elapsed_pointcloud_cb:.1f}ms ({len(points_odom)} points)')
+        self.get_logger().info('=========CALLBACK END==========')
+
     def _initialize_grid(self, x_curr: float, y_curr: float):
         """Initialize grid origin centered on vehicle position."""
         # Grid origin = vehicle position - half grid size
@@ -576,7 +589,7 @@ class LocalCostmapNode(Node):
                 header.stamp,
                 timeout=rclpy.duration.Duration(seconds=1.0)
             ):
-                self.get_logger().warn(f'TF not available for {header.frame_id} at exact timestamp', throttle_duration_sec=1.0)
+                self.get_logger().warn(f'TF not available for {header.frame_id} at exact timestamp')
                 return None
             
             transform = self.tf_buffer.lookup_transform(
@@ -637,6 +650,8 @@ class LocalCostmapNode(Node):
             labels: N array of semantic labels
             robot_x, robot_y: Robot position in odom frame
         """
+        self.get_logger().info("Starting Costmap Update")
+        t_start_raycast_prep = time.perf_counter()
         x = points_odom[:, 0]
         y = points_odom[:, 1]
         
@@ -679,73 +694,84 @@ class LocalCostmapNode(Node):
         obstacle_iy = hit_iy[is_obstacle]
         obstacle_x = x_valid[is_obstacle]
         obstacle_y = y_valid[is_obstacle]
-        
+        self.get_logger().info(f'Raycast prep time: {(time.perf_counter() - t_start_raycast_prep)*1000:.1f} ms')
         # ==================== Raycasting ====================
-        if len(hit_ix) > 0:
-            # STEP 1: Build shadow buffer from obstacle points
-            # This creates an angular depth buffer that prevents rays from passing
-            # through obstacles to reach ground points behind them
-            shadow_buffer = compute_shadow_buffer(
-                obstacle_x.astype(np.float32),
-                obstacle_y.astype(np.float32),
-                robot_x, robot_y,
-                self.shadow_angular_res
+        # STEP 1: Build shadow buffer from obstacle points
+        # This creates an angular depth buffer that prevents rays from passing
+        # through obstacles to reach ground points behind them
+        t_compute_shadow_start = time.perf_counter()
+        shadow_buffer = compute_shadow_buffer(
+            obstacle_x.astype(np.float32),
+            obstacle_y.astype(np.float32),
+            robot_x, robot_y,
+            self.shadow_angular_res
+        )
+        self.get_logger().info(f'Shadow buffer time: '
+                                f'{(time.perf_counter() - t_compute_shadow_start)*1000:.1f} ms')
+        
+        # Step 2: remove duplicates hits in grid cell (optimization)
+        t_dedup_start = time.perf_counter()
+        cell_coords = np.column_stack((hit_ix, hit_iy))
+        # self.get_logger().info(f'Raycasting {len(hit_ix)} hits before deduplication')
+        unique_cells, unique_indices = np.unique(
+            cell_coords.view(dtype=[('x', np.int32), ('y', np.int32)]).reshape(-1),
+            return_index=True
+        )
+        # self.get_logger().info(f'Unique hits calc took: {(time.perf_counter() - t_dedup_start)*1000:.1f} ms')
+        # self.get_logger().info(f'Raycasting {len(unique_indices)} hits after deduplication')
+        unique_ix = hit_ix[unique_indices]
+        unique_iy = hit_iy[unique_indices]
+        unique_x = x_valid[unique_indices]
+        unique_y = y_valid[unique_indices]
+        self.get_logger().info(f'Deduplication time: '
+                                f'{(time.perf_counter() - t_dedup_start)*1000:.1f} ms')
+        # STEP 3: Filter rays by shadow buffer
+        # Remove points that are behind obstacles (would cause ray passthrough)
+        t_filter_shadow_start = time.perf_counter()
+        shadow_mask = filter_rays_by_shadows(
+            unique_x.astype(np.float32),
+            unique_y.astype(np.float32),
+            robot_x, robot_y,
+            shadow_buffer,
+            self.shadow_angular_res,
+            self.shadow_tolerance
+        )
+        
+        # Apply shadow filter
+        filtered_ix = unique_ix[shadow_mask]
+        filtered_iy = unique_iy[shadow_mask]
+        filtered_x = unique_x[shadow_mask]
+        filtered_y = unique_y[shadow_mask]
+        self.get_logger().info(f'Shadow filter time: '
+                                f'{(time.perf_counter() - t_filter_shadow_start)*1000:.1f} ms')
+        # STEP 4: Range filter on remaining points
+        distances = np.sqrt((filtered_x - robot_x)**2 + (filtered_y - robot_y)**2)
+        ray_mask = distances <= self.max_ray_range
+        
+        # Estimate max cells per ray for buffer allocation
+        max_ray_cells = int(self.max_ray_range / self.resolution) + 10
+        
+        # STEP 5: Raycast to filtered points only
+        t_raycast_start = time.perf_counter()
+        free_ix_concat, free_iy_concat = compute_raycast_batch(
+            robot_ix, robot_iy, filtered_ix, filtered_iy, ray_mask, max_ray_cells
+        )
+        self.get_logger().info(f'Raycast time: {(time.perf_counter() - t_raycast_start)*1000:.1f} ms')
+        
+        ############### APPLY UPDATES TO LOG-ODDS GRID ###############
+        t_logodds_update_start = time.perf_counter()
+        # Apply free space updates (batch)
+        if len(free_ix_concat) > 0:
+            # Filter to valid indices
+            valid = (
+                (free_ix_concat >= 0) & (free_ix_concat < self.grid_cells) &
+                (free_iy_concat >= 0) & (free_iy_concat < self.grid_cells)
             )
+            free_ix_concat = free_ix_concat[valid]
+            free_iy_concat = free_iy_concat[valid]
             
-            # Step 2: remove duplicates hits in grid cell (optimization)
-            cell_coords = np.column_stack((hit_ix, hit_iy))
-            # self.get_logger().info(f'Raycasting {len(hit_ix)} hits before deduplication')
-            unique_cells, unique_indices = np.unique(
-                cell_coords.view(dtype=[('x', np.int32), ('y', np.int32)]).reshape(-1),
-                return_index=True
-            )
-            # self.get_logger().info(f'Raycasting {len(unique_indices)} hits after deduplication')
-            unique_ix = hit_ix[unique_indices]
-            unique_iy = hit_iy[unique_indices]
-            unique_x = x_valid[unique_indices]
-            unique_y = y_valid[unique_indices]
-            
-            # STEP 3: Filter rays by shadow buffer
-            # Remove points that are behind obstacles (would cause ray passthrough)
-            shadow_mask = filter_rays_by_shadows(
-                unique_x.astype(np.float32),
-                unique_y.astype(np.float32),
-                robot_x, robot_y,
-                shadow_buffer,
-                self.shadow_angular_res,
-                self.shadow_tolerance
-            )
-            
-            # Apply shadow filter
-            filtered_ix = unique_ix[shadow_mask]
-            filtered_iy = unique_iy[shadow_mask]
-            filtered_x = unique_x[shadow_mask]
-            filtered_y = unique_y[shadow_mask]
-            
-            # STEP 4: Range filter on remaining points
-            distances = np.sqrt((filtered_x - robot_x)**2 + (filtered_y - robot_y)**2)
-            ray_mask = distances <= self.max_ray_range
-            
-            # Estimate max cells per ray for buffer allocation
-            max_ray_cells = int(self.max_ray_range / self.resolution) + 10
-            
-            # STEP 5: Raycast to filtered points only
-            free_ix_concat, free_iy_concat = compute_raycast_batch(
-                robot_ix, robot_iy, filtered_ix, filtered_iy, ray_mask, max_ray_cells
-            )
-            
-            # Apply free space updates (batch)
-            if len(free_ix_concat) > 0:
-                # Filter to valid indices
-                valid = (
-                    (free_ix_concat >= 0) & (free_ix_concat < self.grid_cells) &
-                    (free_iy_concat >= 0) & (free_iy_concat < self.grid_cells)
-                )
-                free_ix_concat = free_ix_concat[valid]
-                free_iy_concat = free_iy_concat[valid]
-                
-                # Apply l_miss to free cells
-                np.subtract.at(self.log_odds_grid, (free_iy_concat, free_ix_concat), self.l_miss)
+            # Apply l_miss to free cells
+            np.subtract.at(self.log_odds_grid, (free_iy_concat, free_ix_concat), self.l_miss)
         
         # ==================== Mark Occupied Cells ====================
         if len(obstacle_ix) > 0:
@@ -754,7 +780,9 @@ class LocalCostmapNode(Node):
         
         # ==================== Clamp Values ====================
         np.clip(self.log_odds_grid, self.l_min, self.l_max, out=self.log_odds_grid)
-    
+        self.get_logger().info(f'Log-odds update time: '
+                                f'{(time.perf_counter() - t_logodds_update_start)*1000:.1f} ms')
+
     def _log_odds_to_probability(self, log_odds: np.ndarray) -> np.ndarray:
         """Convert log-odds to probability [0, 1]."""
         return 1.0 / (1.0 + np.exp(-log_odds))
