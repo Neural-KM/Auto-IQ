@@ -158,9 +158,8 @@ class InversePerspectiveMapperNode(Node):
         self.declare_parameter('map_frame', 'map')           # World-fixed frame for grid alignment
         
         # Grid parameters
-        self.declare_parameter('grid_resolution', 0.2)   # meters per cell
-        self.declare_parameter('grid_width', 200)        # cells
-        self.declare_parameter('grid_height', 200)       # cells
+        self.declare_parameter('grid_size', 40.0)   # meters (square grid)
+        self.declare_parameter('resolution', 0.4)   # meters per cell
         
         # Get parameter values
         semantic_topic = self.get_parameter('semantic_topic').value
@@ -169,13 +168,11 @@ class InversePerspectiveMapperNode(Node):
         self.base_frame = self.get_parameter('base_frame').value
         self.map_frame = self.get_parameter('map_frame').value
         
-        self.resolution = self.get_parameter('grid_resolution').value
-        self.width = self.get_parameter('grid_width').value
-        self.height = self.get_parameter('grid_height').value
+        self.grid_size = self.get_parameter('grid_size').value
+        self.resolution = self.get_parameter('resolution').value
         
-        # Grid size in meters (for centering on vehicle)
-        self.grid_size_x = self.width * self.resolution
-        self.grid_size_y = self.height * self.resolution
+        # Derive grid cells from size and resolution
+        self.grid_cells = int(self.grid_size / self.resolution)
         
         # ==================== TF2 ====================
         self.tf_buffer = tf2_ros.Buffer(cache_time=rclpy.duration.Duration(seconds=1.0))
@@ -211,7 +208,7 @@ class InversePerspectiveMapperNode(Node):
         self.get_logger().info(f'  Output: {costmap_topic}')
         self.get_logger().info(f'  Base Frame: {self.base_frame}')
         self.get_logger().info(f'  Map Frame: {self.map_frame} (grid aligned to this)')
-        self.get_logger().info(f'  Grid: {self.width}x{self.height} cells, {self.resolution}m resolution')
+        self.get_logger().info(f'  Grid: {self.grid_cells}x{self.grid_cells} cells, {self.grid_size}m, {self.resolution}m/cell')
         self.get_logger().info(f'  Road labels: road={ROAD_LABEL_ID}, road_line={ROAD_LINE_LABEL_ID}')
 
     def camera_info_callback(self, msg: CameraInfo):
@@ -306,27 +303,6 @@ class InversePerspectiveMapperNode(Node):
         self.get_logger().info(f'Camera transform: t=[{t[0]:.2f}, {t[1]:.2f}, {t[2]:.2f}]')
         self.get_logger().info(f'Camera R row2 (Z-axis in base): [{R[2,0]:.3f}, {R[2,1]:.3f}, {R[2,2]:.3f}]')
         
-        # Test a single pixel from bottom-center of image (should point at ground)
-        test_u = 640.0  # center x
-        test_v = 700.0  # near bottom y
-        fx, fy = self.K[0, 0], self.K[1, 1]
-        cx, cy = self.K[0, 2], self.K[1, 2]
-        norm_x = (test_u - cx) / fx
-        norm_y = (test_v - cy) / fy
-        # Convert from optical to camera_link frame (CARLA convention)
-        link_x, link_y, link_z = 1.0, -norm_x, -norm_y
-        dx = R[0,0]*link_x + R[0,1]*link_y + R[0,2]*link_z
-        dy = R[1,0]*link_x + R[1,1]*link_y + R[1,2]*link_z
-        dz = R[2,0]*link_x + R[2,1]*link_y + R[2,2]*link_z
-        self.get_logger().info(f'Test pixel ({test_u}, {test_v}): link_ray=[{link_x:.3f}, {link_y:.3f}, {link_z:.3f}], base_ray=[{dx:.3f}, {dy:.3f}, {dz:.3f}]')
-        if abs(dz) > 1e-4:
-            s = -t[2] / dz
-            self.get_logger().info(f'  s={s:.3f} (s>0 required for valid intersection)')
-            if s > 0:
-                gx = t[0] + s * dx
-                gy = t[1] + s * dy
-                self.get_logger().info(f'  Ground intersection: ({gx:.2f}, {gy:.2f})')
-        
         # 2. Parse Image directly from buffer
         try:
             height = msg.height
@@ -381,8 +357,8 @@ class InversePerspectiveMapperNode(Node):
         vehicle_x, vehicle_y, ground_z = vehicle_pos
         
         # Grid origin in map frame (centered on vehicle)
-        origin_x = vehicle_x - self.grid_size_x / 2.0
-        origin_y = vehicle_y - self.grid_size_y / 2.0
+        origin_x = vehicle_x - self.grid_size / 2.0
+        origin_y = vehicle_y - self.grid_size / 2.0
 
         # 4. Project to Ground (Numba JIT)
         # Use vehicle Z as ground plane (CARLA ground is not at Z=0)
@@ -404,22 +380,22 @@ class InversePerspectiveMapperNode(Node):
             self.get_logger().info(f'Projection X range: [{valid_gx.min():.2f}, {valid_gx.max():.2f}]')
             self.get_logger().info(f'Projection Y range: [{valid_gy.min():.2f}, {valid_gy.max():.2f}]')
             self.get_logger().info(f'Grid origin: ({origin_x:.2f}, {origin_y:.2f})')
-            self.get_logger().info(f'Grid extent: X=[{origin_x:.2f}, {origin_x + self.grid_size_x:.2f}], '
-                                   f'Y=[{origin_y:.2f}, {origin_y + self.grid_size_y:.2f}]')
+            self.get_logger().info(f'Grid extent: X=[{origin_x:.2f}, {origin_x + self.grid_size:.2f}], '
+                                   f'Y=[{origin_y:.2f}, {origin_y + self.grid_size:.2f}]')
         
         # 5. Populate Grid
         # Initialize as OCCUPIED (100) - road pixels will be marked FREE (0)
-        grid_data = np.full((self.height, self.width), 100, dtype=np.int8)
+        grid_data = np.full((self.grid_cells, self.grid_cells), 100, dtype=np.int8)
         
         fill_grid_from_points(
             gx, gy, valid_mask, grid_data,
             origin_x, origin_y, self.resolution,
-            self.width, self.height
+            self.grid_cells, self.grid_cells
         )
         
         # DEBUG: Count free cells in grid
         n_free = np.sum(grid_data == 0)
-        self.get_logger().info(f'Free cells in grid: {n_free}/{self.width * self.height}')
+        self.get_logger().info(f'Free cells in grid: {n_free}/{self.grid_cells * self.grid_cells}')
         
         # 6. Publish
         self._publish_grid(grid_data, origin_x, origin_y, msg.header.stamp)
@@ -430,10 +406,10 @@ class InversePerspectiveMapperNode(Node):
         vehicle_pos = self._get_vehicle_position(stamp)
         if vehicle_pos is None:
             return
-        origin_x = vehicle_pos[0] - self.grid_size_x / 2.0
-        origin_y = vehicle_pos[1] - self.grid_size_y / 2.0
+        origin_x = vehicle_pos[0] - self.grid_size / 2.0
+        origin_y = vehicle_pos[1] - self.grid_size / 2.0
         
-        grid_data = np.full((self.height, self.width), -1, dtype=np.int8)
+        grid_data = np.full((self.grid_cells, self.grid_cells), -1, dtype=np.int8)
         self._publish_grid(grid_data, origin_x, origin_y, stamp)
     
     def _publish_grid(self, grid_data: np.ndarray, origin_x: float, origin_y: float, stamp):
@@ -443,8 +419,8 @@ class InversePerspectiveMapperNode(Node):
         msg.header.frame_id = self.map_frame  # World-fixed frame, no yaw rotation
         
         msg.info.resolution = self.resolution
-        msg.info.width = self.width
-        msg.info.height = self.height
+        msg.info.width = self.grid_cells
+        msg.info.height = self.grid_cells
         msg.info.origin.position.x = origin_x
         msg.info.origin.position.y = origin_y
         msg.info.origin.position.z = 0.0

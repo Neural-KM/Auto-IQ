@@ -35,16 +35,16 @@ def generate_launch_description():
         #     default_value='map',
         #     description='World-fixed reference frame (map frame in CARLA)'
         # ),
-        # DeclareLaunchArgument(
-        #     'grid_size',
-        #     default_value='40.0',
-        #     description='Grid size in meters (square grid)'
-        # ),
-        # DeclareLaunchArgument(
-        #     'resolution',
-        #     default_value='0.2',
-        #     description='Grid resolution in meters per cell'
-        # ),
+        DeclareLaunchArgument(
+            'grid_size',
+            default_value='80.0',
+            description='Grid size in meters (square grid)'
+        ),
+        DeclareLaunchArgument(
+            'resolution',
+            default_value='0.4',
+            description='Grid resolution in meters per cell'
+        ),
         # DeclareLaunchArgument(
         #     'l_hit',
         #     default_value='2.0',
@@ -73,6 +73,8 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'use_sim_time': True,  # Use simulation time from /clock
+                'grid_size': LaunchConfiguration('grid_size'),
+                'resolution': LaunchConfiguration('resolution'),
             }]
             # parameters=[{
             #     'pointcloud_topic': LaunchConfiguration('pointcloud_topic'),
@@ -80,8 +82,7 @@ def generate_launch_description():
             #     'costmap_topic': LaunchConfiguration('costmap_topic'),
             #     'odom_frame': LaunchConfiguration('odom_frame'),
             #     'base_link_frame': 'ego_vehicle',
-            #     'grid_size': LaunchConfiguration('grid_size'),
-            #     'resolution': LaunchConfiguration('resolution'),
+
             #     'min_height': -0.3,
             #     'max_height': 2.5,
             #     'l_hit': LaunchConfiguration('l_hit'),
