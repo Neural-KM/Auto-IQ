@@ -31,7 +31,10 @@ def generate_launch_description():
             executable='perception_node',
             name='perception_node',
             output='screen',
-            parameters=[LaunchConfiguration('params_file')]
+            parameters=[
+                LaunchConfiguration('params_file'),
+                {'use_sim_time': True}
+            ]
         ),
         
         # ==================== Semantic PointCloud Node ====================
@@ -41,6 +44,7 @@ def generate_launch_description():
             name='semantic_pointcloud_node',
             output='screen',
             parameters=[{
+                'use_sim_time': True,
                 'lidar_topic': '/carla/ego_vehicle/sensor/lidar/top/point_cloud',
                 'semantic_topic': '/carla/ego_vehicle/ground_truth/camera/semantic/front/image',
                 'camera_info_topic': '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info',

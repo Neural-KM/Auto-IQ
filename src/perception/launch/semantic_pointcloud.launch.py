@@ -42,6 +42,7 @@ def generate_launch_description():
             name='semantic_pointcloud_node',
             output='screen',
             parameters=[{
+                'use_sim_time': True,
                 'lidar_topic': LaunchConfiguration('lidar_topic'),
                 'semantic_topic': LaunchConfiguration('semantic_topic'),
                 'camera_info_topic': LaunchConfiguration('camera_info_topic'),

@@ -66,7 +66,10 @@ def generate_launch_description():
             package='mapping',
             executable='local_costmap_node',
             name='local_costmap_node',
-            output='screen'
+            output='screen',
+            parameters=[{
+                'use_sim_time': True,  # Use simulation time from /clock
+            }]
             # parameters=[{
             #     'pointcloud_topic': LaunchConfiguration('pointcloud_topic'),
             #     'odom_topic': LaunchConfiguration('odom_topic'),

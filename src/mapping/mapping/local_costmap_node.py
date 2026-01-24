@@ -168,7 +168,7 @@ class LocalCostmapNode(Node):
         self.declare_parameter('l_min', -5.0)           # Minimum log-odds (clamp)
         self.declare_parameter('l_max', 5.0)            # Maximum log-odds (clamp)
         self.declare_parameter('l_occ_threshold', 0.0)  # Threshold for occupied in output
-        self.declare_parameter('decay_rate', 0.1)        # Log-odds decay rate per second
+        self.declare_parameter('decay_rate', 0.2)        # Log-odds decay rate per second
         # Raycasting parameters
         self.declare_parameter('max_ray_range', 30.0)   # Max range for raycasting (meters)
         self.declare_parameter('enable_raycasting', True)  # Enable free space raycasting
@@ -230,7 +230,8 @@ class LocalCostmapNode(Node):
                                f'clamp=[{self.l_min}, {self.l_max}]')
         
         # ==================== TF2 ====================
-        self.tf_buffer = tf2_ros.Buffer()
+        # Use a 1 second buffer to handle simulation time jumps
+        self.tf_buffer = tf2_ros.Buffer(cache_time=rclpy.duration.Duration(seconds=1.0))
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         
         # ==================== State ====================
@@ -255,7 +256,7 @@ class LocalCostmapNode(Node):
         
         # ==================== Publisher ====================
         self.costmap_pub = self.create_publisher(
-            OccupancyGrid, costmap_topic, 10)
+            OccupancyGrid, costmap_topic, 1)
         
         self.get_logger().info(f'Rolling Window Bayes Filter Costmap Node started')
         self.get_logger().info(f'  Input PointCloud: {pointcloud_topic}')
@@ -268,18 +269,52 @@ class LocalCostmapNode(Node):
         """Store latest odometry for position tracking."""
         self.current_odom = msg
     
+    def _get_vehicle_pose_at_time(self, stamp) -> Optional[Tuple[float, float, float]]:
+        """
+        Get vehicle pose (x, y, z) in odom frame at the specified timestamp.
+        
+        Uses exact timestamp matching - no fallback to latest.
+        This ensures the costmap origin is computed at the same time as the
+        pointcloud data, preventing lag/snap issues in RViz.
+        
+        Returns:
+            Tuple of (x, y, z) or None if lookup fails
+        """
+        try:
+            # Wait for transform at exact timestamp
+            # if not self.tf_buffer.can_transform(
+            #     self.odom_frame,
+            #     'ego_vehicle',
+            #     stamp,
+            #     timeout=rclpy.duration.Duration(seconds=1.0)
+            # ):
+            #     self.get_logger().warn('TF not available at exact timestamp', throttle_duration_sec=1.0)
+            #     return None
+            
+            transform = self.tf_buffer.lookup_transform(
+                self.odom_frame,
+                'ego_vehicle',
+                stamp
+            )
+            
+            t = transform.transform.translation
+            return (t.x, t.y, t.z)
+        except TransformException as e:
+            self.get_logger().warn(f'Vehicle pose lookup failed: {e}')
+            return None
+    
     def pointcloud_callback(self, msg: PointCloud2):
         """Process labeled point cloud and update costmap."""
         t_start = time.perf_counter()
         
-        if self.current_odom is None:
-            self.get_logger().warn('No odometry received yet, skipping pointcloud')
+        # Get vehicle pose at exact pointcloud timestamp
+        result = self._get_vehicle_pose_at_time(msg.header.stamp)
+        
+        if result is None:
+            self.get_logger().warn('No vehicle pose available, skipping pointcloud')
             return
         
-        # Get current vehicle position in odom frame
-        odom_pos = self.current_odom.pose.pose.position
-        x_curr = odom_pos.x
-        y_curr = odom_pos.y
+        x_curr, y_curr, z_vehicle = result
         
         # Initialize on first update
         if not self.initialized:
@@ -303,7 +338,6 @@ class LocalCostmapNode(Node):
             return
         
         # Height filter (relative to vehicle z)
-        z_vehicle = odom_pos.z
         z = points_odom[:, 2]
         height_mask = (z >= z_vehicle + self.min_height) & (z <= z_vehicle + self.max_height)
         points_odom = points_odom[height_mask]
@@ -316,7 +350,7 @@ class LocalCostmapNode(Node):
         # Update costmap with sensor data
         self._update_costmap(points_odom, labels, x_curr, y_curr)
         
-        # Publish
+        # Publish with pointcloud timestamp (same as TF lookup timestamp)
         self._publish_costmap(msg.header.stamp)
         
         # Log timing
@@ -326,75 +360,80 @@ class LocalCostmapNode(Node):
     def _initialize_grid(self, x_curr: float, y_curr: float):
         """Initialize grid origin centered on vehicle position."""
         # Grid origin = vehicle position - half grid size
+        # This places the vehicle at the center of the grid
         self.origin_x = x_curr - self.grid_size / 2.0
         self.origin_y = y_curr - self.grid_size / 2.0
         
+        # Track the last position we rolled to (for calculating shift on next update)
         self.last_x = x_curr
         self.last_y = y_curr
         
         self.initialized = True
         
-        self.get_logger().info(f'Grid initialized at origin ({self.origin_x:.2f}, {self.origin_y:.2f})')
+        self.get_logger().info(f'Grid initialized: vehicle at ({x_curr:.2f}, {y_curr:.2f}), '
+                               f'origin at ({self.origin_x:.2f}, {self.origin_y:.2f})')
     
     def _roll_grid_for_motion(self, x_curr: float, y_curr: float):
         """
         Roll the grid to keep the vehicle centered.
         
-        Uses numpy.roll for efficient shifting, then zeros out wrapped edges.
-        This prevents "smearing" of obstacles during motion.
+        The key insight: the grid origin should ALWAYS be (vehicle_pos - grid_size/2).
+        We use numpy.roll to shift the data so that the obstacles remain in correct
+        world positions even though the grid is moving.
         
+        Steps:
+        1. Calculate how many cells the vehicle moved since last update
+        2. Roll the grid data by that amount (opposite direction to vehicle motion)
+        3. Clear the wrapped edges (stale data from the other side)
+        4. Update origin to keep vehicle centered
         """
         if self.last_x is None:
             return
         
-        # Calculate displacement in world coordinates
+        # Calculate displacement in world coordinates since last roll
         dx_world = x_curr - self.last_x
         dy_world = y_curr - self.last_y
         
-        # Convert to cell shifts (truncate toward zero to get integer cells)
-        # Use floor for positive, ceil for negative to get consistent truncation
-        shift_x = int(np.floor(dx_world / self.resolution)) if dx_world >= 0 else int(np.ceil(dx_world / self.resolution))
-        shift_y = int(np.floor(dy_world / self.resolution)) if dy_world >= 0 else int(np.ceil(dy_world / self.resolution))
+        # Convert to integer cell shifts
+        # When vehicle moves +1 cell in world, we need to roll grid data -1 cell
+        shift_x = int(round(dx_world / self.resolution))
+        shift_y = int(round(dy_world / self.resolution))
         
-        # Only roll if there's a significant shift
+        # Only roll if there's a significant shift (at least 1 cell)
         if shift_x == 0 and shift_y == 0:
             return
         
-        # Roll the grid
-        # numpy.roll shifts array elements: positive = shift right/down
-        # We want to shift the data in the opposite direction of vehicle motion
-        # so the grid "follows" the vehicle
+        # Roll the grid data
+        # np.roll with negative shift moves data toward lower indices
+        # When vehicle moves +X, we want obstacles to appear at lower X indices (relative to vehicle)
+        # So we roll with (-shift_y, -shift_x)
         self.log_odds_grid = np.roll(self.log_odds_grid, (-shift_y, -shift_x), axis=(0, 1))
         
-        # Zero out the wrapped edges (these are now unknown/stale)
+        # Clear the wrapped edges (stale data that wrapped around)
+        # The data that "falls off" one edge wraps to the opposite edge - clear it
         if shift_x > 0:
-            # Vehicle moved right (positive x), clear left edge (old right wrapped to left)
-            self.log_odds_grid[:, :shift_x] = 0.0
+            # Vehicle moved +X, data wrapped to high-X (right) edge
+            self.log_odds_grid[:, -shift_x:] = 0.0
         elif shift_x < 0:
-            # Vehicle moved left (negative x), clear right edge
-            self.log_odds_grid[:, shift_x:] = 0.0
+            # Vehicle moved -X, data wrapped to low-X (left) edge
+            self.log_odds_grid[:, :-shift_x] = 0.0
         
         if shift_y > 0:
-            # Vehicle moved forward (positive y in grid), clear bottom edge
-            self.log_odds_grid[:shift_y, :] = 0.0
+            # Vehicle moved +Y, data wrapped to high-Y (bottom) edge
+            self.log_odds_grid[-shift_y:, :] = 0.0
         elif shift_y < 0:
-            # Vehicle moved backward (negative y in grid), clear top edge
-            self.log_odds_grid[shift_y:, :] = 0.0
+            # Vehicle moved -Y, data wrapped to low-Y (top) edge
+            self.log_odds_grid[:-shift_y, :] = 0.0
         
-        # Calculate the QUANTIZED displacement (what we actually rolled)
-        quantized_dx = shift_x * self.resolution
-        quantized_dy = shift_y * self.resolution
+        # Update the grid origin to keep vehicle at center
+        # Origin = vehicle_position - grid_size/2
+        self.origin_x = x_curr - self.grid_size / 2.0
+        self.origin_y = y_curr - self.grid_size / 2.0
         
-        # Update origin by the quantized amount
-        self.origin_x += quantized_dx
-        self.origin_y += quantized_dy
-        
-        # CRITICAL: Only update last position by the quantized amount!
-        # This preserves the fractional offset for the next iteration.
-        # If we set last_x = x_curr, we lose the sub-cell movement and
-        # the grid origin will drift from the vehicle position over time.
-        self.last_x += quantized_dx
-        self.last_y += quantized_dy
+        # Update last position to the current position
+        # (We use the actual position, not quantized, to avoid drift)
+        self.last_x = x_curr
+        self.last_y = y_curr
     
     def _parse_labeled_pointcloud(self, msg: PointCloud2) -> Tuple[np.ndarray, np.ndarray]:
         """Parse PointCloud2 with XYZ + label fields."""
@@ -415,21 +454,26 @@ class LocalCostmapNode(Node):
         
         if n_points == 0:
             return np.array([]), np.array([])
-        
-        data = np.frombuffer(msg.data, dtype=np.uint8)
-        
-        # Vectorized parsing
-        points = np.zeros((n_points, 3), dtype=np.float32)
-        labels = np.zeros(n_points, dtype=np.uint32)
-        
-        for i in range(n_points):
-            offset = i * point_step
-            points[i, 0] = struct.unpack('f', data[offset + x_offset:offset + x_offset + 4])[0]
-            points[i, 1] = struct.unpack('f', data[offset + y_offset:offset + y_offset + 4])[0]
-            points[i, 2] = struct.unpack('f', data[offset + z_offset:offset + z_offset + 4])[0]
-            labels[i] = struct.unpack('I', data[offset + label_offset:offset + label_offset + 4])[0]
-        
-        return points, labels
+
+        try:
+            # Zero-copy parsing using strided numpy arrays
+            # We assume msg.data supports the buffer interface (bytes or array.array)
+            points_x = np.ndarray(shape=(n_points,), dtype=np.float32, buffer=msg.data, offset=x_offset, strides=(point_step,))
+            points_y = np.ndarray(shape=(n_points,), dtype=np.float32, buffer=msg.data, offset=y_offset, strides=(point_step,))
+            points_z = np.ndarray(shape=(n_points,), dtype=np.float32, buffer=msg.data, offset=z_offset, strides=(point_step,))
+            
+            # Stack to create Nx3 array (this creates a copy, but it's contiguous and fast)
+            points = np.column_stack((points_x, points_y, points_z))
+            
+            # Parse labels
+            labels = np.ndarray(shape=(n_points,), dtype=np.uint32, buffer=msg.data, offset=label_offset, strides=(point_step,))
+            # Create a copy of labels to ensure 1D contiguous array for JIT compatibility
+            labels = labels.copy() 
+            
+            return points, labels
+        except Exception as e:
+            self.get_logger().error(f'Error parsing pointcloud: {e}')
+            return np.array([]), np.array([])
     
     def _transform_points_to_odom(self, points: np.ndarray, header: Header) -> Optional[np.ndarray]:
         """
@@ -443,12 +487,20 @@ class LocalCostmapNode(Node):
             Nx3 array in odom frame, or None if transform fails
         """
         try:
-            # Get transform from sensor frame to odom frame
+            # Use exact pointcloud timestamp - no fallback
+            if not self.tf_buffer.can_transform(
+                self.odom_frame,
+                header.frame_id,
+                header.stamp,
+                timeout=rclpy.duration.Duration(seconds=1.0)
+            ):
+                self.get_logger().warn(f'TF not available for {header.frame_id} at exact timestamp', throttle_duration_sec=1.0)
+                return None
+            
             transform = self.tf_buffer.lookup_transform(
                 self.odom_frame,
                 header.frame_id,
-                rclpy.time.Time(),  # Use latest available
-                timeout=rclpy.duration.Duration(seconds=0.1)
+                header.stamp
             )
         except TransformException as e:
             self.get_logger().warn(f'Transform lookup failed: {e}')
@@ -523,17 +575,10 @@ class LocalCostmapNode(Node):
         if len(hit_ix) == 0:
             return
         
-        # Robot position in grid
-        robot_ix, robot_iy = self._world_to_grid(
-            np.array([robot_x]), np.array([robot_y])
-        )
-        # robot_ix, and iy with always be self.grid_cells // 2
-        robot_ix = int(robot_ix[0])
-        robot_iy = int(robot_iy[0])
-        # self.get_logger().info(f'Robot grid position: ({robot_ix}, {robot_iy})')
-        # Clamp robot position to grid bounds
-        robot_ix = np.clip(robot_ix, 0, self.grid_cells - 1)
-        robot_iy = np.clip(robot_iy, 0, self.grid_cells - 1)
+        # Robot is always at grid center since we keep origin = vehicle_pos - grid_size/2
+        center = self.grid_cells // 2
+        robot_ix = center
+        robot_iy = center
 
         # Add decay so that cells not visible anymore go to zero over time
         abs_grid = np.abs(self.log_odds_grid)
@@ -546,19 +591,34 @@ class LocalCostmapNode(Node):
         # Snap to zero where magnitude is small
         self.log_odds_grid[mask_reset] = 0.0
         # ==================== Raycasting for Free Space ====================
-        if self.enable_raycasting:
-            # Calculate distances for range limiting
-            distances = np.sqrt((x_valid - robot_x)**2 + (y_valid - robot_y)**2)
+        if self.enable_raycasting and len(hit_ix) > 0:
+            # OPTIMIZATION: Deduplicate by grid cell
+            # If multiple LiDAR points hit the same cell, we only need to raycast once
+            # This reduces 41k points to ~2-5k unique cells (depending on density)
+            
+            # Create unique cell indices using structured array
+            cell_coords = np.column_stack((hit_ix, hit_iy))
+            unique_cells, unique_indices = np.unique(
+                cell_coords.view(dtype=[('x', np.int32), ('y', np.int32)]).reshape(-1),
+                return_index=True
+            )
+            
+            # Extract unique cell coordinates
+            unique_ix = hit_ix[unique_indices]
+            unique_iy = hit_iy[unique_indices]
+            unique_x = x_valid[unique_indices]
+            unique_y = y_valid[unique_indices]
+            
+            # Calculate distances for range limiting (using unique points)
+            distances = np.sqrt((unique_x - robot_x)**2 + (unique_y - robot_y)**2)
             ray_mask = distances <= self.max_ray_range
             
             # Estimate max cells per ray for buffer allocation
-            # (e.g. 30m / 0.2m = 150 cells)
             max_ray_cells = int(self.max_ray_range / self.resolution) + 10
             
             # --- NUMBA BATCH CALL ---
-            # Replaces the slow Python for-loop
             free_ix_concat, free_iy_concat = compute_raycast_batch(
-                robot_ix, robot_iy, hit_ix, hit_iy, ray_mask, max_ray_cells
+                robot_ix, robot_iy, unique_ix, unique_iy, ray_mask, max_ray_cells
             )
             
             # Apply free space updates (batch)
@@ -593,6 +653,9 @@ class LocalCostmapNode(Node):
     def _publish_costmap(self, stamp):
         """
         Convert log-odds grid to OccupancyGrid and publish.
+        
+        Args:
+            stamp: builtin_interfaces.msg.Time from pointcloud header
         
         Mapping:
         - log_odds < l_occ_threshold -> free (0)

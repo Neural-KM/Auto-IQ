@@ -20,6 +20,7 @@ def generate_launch_description():
             name='planning_node',
             output='screen',
             parameters=[{
+                'use_sim_time': True,
                 'carla_host': LaunchConfiguration('carla_host'),
                 'carla_port': LaunchConfiguration('carla_port'),
                 'carla_timeout': LaunchConfiguration('carla_timeout'),

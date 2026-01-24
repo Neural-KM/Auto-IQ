@@ -18,20 +18,22 @@ class PlannerConfig:
     prediction_horizon: float = 10.0 # Lookahead time
     
     # The Discrete Set of Choices: [Center, Left Lane, Right Lane, Nudge Left, Nudge Right]
-    d_samples: List[float] = field(default_factory=lambda: [0.0, -3.5, 3.5, -1.5, 1.5, -2.5, 2.5])
+    d_samples: List[float] = field(default_factory=lambda: [0.0, -4.0,
+                                                                4.0])
     
     # Cost Weights
-    w_collision: float = 1000.0    # Safety is priority #1
+    w_collision: float = 1000.0    # Safety is priority
     w_ref: float = 1.0             # Preference for lane center
     w_smooth: float = 5.0          # Penalize lateral movement
     
-    # Grid Parameters (Must match your Mapping Node)
+    # Grid Parameters (SHOULD match mapping Node)
     grid_res: float = 0.2          # meters/cell
     grid_w: int = 200              # width in cells
     grid_h: int = 200              # height in cells
     lethal_thresh: int = 80        # Probability [0-100]
 
 class OptimizationMotionPlanner:
+    # ==================== Planner ====================
     def __init__(self, config: PlannerConfig = None):
         self.config = config or PlannerConfig()
         self.wp_converter: Optional[WaypointConverter] = None
@@ -94,8 +96,8 @@ class OptimizationMotionPlanner:
             if cost < best_cost:
                 best_cost = cost
                 best_traj = traj
-            print(f"Traj Cost: {cost:.2f} for target_d={traj[-1].d:.2f}")
-        print(f"Best Traj Cost: {best_cost:.2f} with {len(best_traj)} points.")
+            # print(f"Traj Cost: {cost:.2f} for target_d={traj[-1].d:.2f}")
+        # print(f"Best Traj Cost: {best_cost:.2f} with {len(best_traj)} points.")
         if best_traj:
             return best_traj
         else:
@@ -143,7 +145,7 @@ class OptimizationMotionPlanner:
         world position of cell [0,0].
         """
         cost = 0.0
-
+        
         # 1. Reference Cost (Prefer staying on path)
         final_d = abs(trajectory[-1].d)
         cost += (final_d ** 2) * self.config.w_ref

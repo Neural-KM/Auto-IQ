@@ -30,6 +30,7 @@ from queue import Queue, Empty
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import rclpy
@@ -122,6 +123,12 @@ class CarlaBridgeNode(Node):
         self.current_frame = 0
         self.running = True
         
+        # Thread pool for parallel sensor publishing
+        self.publish_executor = ThreadPoolExecutor(max_workers=8)
+        
+        # Cached CameraInfo messages (avoid recreating each frame)
+        self.cached_camera_info: Dict[str, CameraInfo] = {}
+        
         # ==================== TF Broadcasters ====================
         self.tf_broadcaster = TransformBroadcaster(self)
         self.static_tf_broadcaster = StaticTransformBroadcaster(self)
@@ -203,7 +210,7 @@ class CarlaBridgeNode(Node):
         
         # Initial tick to get things started
         self.current_frame = self.world.tick()
-        self.get_logger().info(f'Synchronous mode enabled, dt={self.fixed_delta_seconds}s')
+        self.get_logger().info(f'Synchronous mode enabled, sim dt between every tick={self.fixed_delta_seconds}s')
     
     # ==================== Spawning ====================
     
@@ -451,7 +458,7 @@ class CarlaBridgeNode(Node):
                 # ==================== 4. SYNC BLOCK - Wait for sensors ====================
                 time_start_wait = time.time()
                 sensor_data_packet = self.wait_for_sensors(self.current_frame)
-                self.get_logger().info(f'sensor data collection time: {time.time() - time_start_wait:.3f}s')
+                self.get_logger().info(f'sensor data collection time: {time.time() - time_start_wait:.3f}s', throttle_duration_sec=10.0)
                 # ==================== 5. PUBLISH ====================
                 time_start_publish = time.time()
                 # Publish TF and Odometry first (they are always available)
@@ -460,8 +467,8 @@ class CarlaBridgeNode(Node):
                 
                 # Publish sensor data with synchronized timestamp
                 self.publish_sensor_data(sensor_data_packet, ros_time)
-                self.get_logger().info(f'sensor data publish time: {time.time() - time_start_publish:.3f}s')
-                self.get_logger().info(f'Tick time: {time.time() - time_start:.3f}s, Hz: {1.0 / (time.time() - time_start):.2f}, Frame: {self.current_frame}')
+                self.get_logger().info(f'sensor data+odometry+tf publish time: {time.time() - time_start_publish:.3f}s', throttle_duration_sec=10.0)
+                self.get_logger().info(f'Tick time: {time.time() - time_start:.3f}s, Hz: {1.0 / (time.time() - time_start):.2f}, Frame: {self.current_frame}', throttle_duration_sec=10.0)
             except Exception as e:
                 if self.running:
                     self.get_logger().error(f'Error in tick loop: {e}')
@@ -514,7 +521,7 @@ class CarlaBridgeNode(Node):
         # Log per-sensor wait times
         if sensor_wait_times:
             timing_str = ', '.join(f'{"/".join(fid.split("/")[-3:])}:{t*1000:.1f}ms' for fid, t in sorted(sensor_wait_times.items(), key=lambda x: -x[1]))
-            self.get_logger().info(f'Sensor wait times: {timing_str}')
+            self.get_logger().info(f'Sensor wait times: {timing_str}', throttle_duration_sec=10.0)
         
         if sensors_remaining:
             self.get_logger().warn(
@@ -544,7 +551,7 @@ class CarlaBridgeNode(Node):
         
         # Rotation (flip pitch and yaw for ROS)
         roll = math.radians(transform.rotation.roll)
-        pitch = math.radians(-transform.rotation.pitch)
+        pitch = math.radians(transform.rotation.pitch)
         yaw = math.radians(-transform.rotation.yaw)
         tf_msg.transform.rotation = euler_to_quaternion(roll, pitch, yaw)
         
@@ -563,36 +570,55 @@ class CarlaBridgeNode(Node):
         """
         Process and publish all sensor data with synchronized timestamp.
         
-        Heavy processing (buffer conversion) happens here in the main thread,
-        after synchronization is confirmed.
+        Uses ThreadPoolExecutor for parallel processing of camera/lidar data.
         """
+        futures = []
+        
         for frame_id, carla_data in sensor_data_packet.items():
-            publish_time_start = time.time()
             if frame_id not in self.sensors:
                 continue
             
             sensor_info = self.sensors[frame_id]
             sensor_type = sensor_info['type']
             
+            # Submit heavy processing to thread pool
+            if 'sensor.camera' in sensor_type or 'sensor.lidar' in sensor_type:
+                future = self.publish_executor.submit(
+                    self._publish_sensor_threaded, frame_id, carla_data, sensor_info, sensor_type, ros_time
+                )
+                futures.append(future)
+            else:
+                # Light sensors (IMU, GNSS) - process inline
+                try:
+                    if sensor_type == 'sensor.other.gnss':
+                        self._publish_gnss(carla_data, sensor_info, ros_time)
+                    elif sensor_type == 'sensor.other.imu':
+                        self._publish_imu(carla_data, sensor_info, ros_time)
+                except Exception as e:
+                    self.get_logger().error(f'Error publishing {frame_id}: {e}')
+        
+        # Wait for all parallel tasks to complete
+        for future in as_completed(futures):
             try:
-                if 'sensor.camera.rgb' in sensor_type:
-                    self._publish_rgb(carla_data, sensor_info, ros_time)
-                elif 'sensor.camera.depth' in sensor_type:
-                    self._publish_depth(carla_data, sensor_info, ros_time)
-                elif 'sensor.camera.semantic_segmentation' in sensor_type:
-                    self._publish_semantic(carla_data, sensor_info, ros_time)
-                elif sensor_type == 'sensor.lidar.ray_cast':
-                    self._publish_lidar(carla_data, sensor_info, ros_time)
-                elif sensor_type == 'sensor.lidar.ray_cast_semantic':
-                    self._publish_semantic_lidar(carla_data, sensor_info, ros_time)
-                elif sensor_type == 'sensor.other.gnss':
-                    self._publish_gnss(carla_data, sensor_info, ros_time)
-                elif sensor_type == 'sensor.other.imu':
-                    self._publish_imu(carla_data, sensor_info, ros_time)
+                future.result()
             except Exception as e:
-                self.get_logger().error(f'Error publishing {frame_id}: {e}')
-            publish_time_end = time.time()
-            self.get_logger().info(f'Publishing {frame_id} took {(publish_time_end - publish_time_start)*1000:.1f}ms')
+                self.get_logger().error(f'Error in parallel publish: {e}')
+    
+    def _publish_sensor_threaded(self, frame_id: str, carla_data, sensor_info: dict, sensor_type: str, ros_time: TimeMsg):
+        """Thread-safe sensor publishing for heavy processing."""
+        try:
+            if 'sensor.camera.rgb' in sensor_type:
+                self._publish_rgb(carla_data, sensor_info, ros_time)
+            elif 'sensor.camera.depth' in sensor_type:
+                self._publish_depth(carla_data, sensor_info, ros_time)
+            elif 'sensor.camera.semantic_segmentation' in sensor_type:
+                self._publish_semantic(carla_data, sensor_info, ros_time)
+            elif sensor_type == 'sensor.lidar.ray_cast':
+                self._publish_lidar(carla_data, sensor_info, ros_time)
+            elif sensor_type == 'sensor.lidar.ray_cast_semantic':
+                self._publish_semantic_lidar(carla_data, sensor_info, ros_time)
+        except Exception as e:
+            self.get_logger().error(f'Error publishing {frame_id}: {e}')
     
     # ==================== Sensor Processing & Publishing ====================
     
@@ -601,9 +627,8 @@ class CarlaBridgeNode(Node):
         # Convert BGRA to RGB
         array = np.frombuffer(carla_image.raw_data, dtype=np.uint8)
         array = array.reshape((carla_image.height, carla_image.width, 4))
-        copy_time_start = time.time()
         rgb_array = array[:, :, :3][:, :, ::-1]  # BGRA -> RGB
-        self.get_logger().info(f'RGB buffer copy time: {time.time() - copy_time_start:.3f}s')   
+        
         # Create Image message
         msg = Image()
         msg.header = self.create_synchronized_header(sensor_info['frame_id'], ros_time)
@@ -612,49 +637,57 @@ class CarlaBridgeNode(Node):
         msg.encoding = 'rgb8'
         msg.is_bigendian = False
         msg.step = carla_image.width * 3
-        convert_rgb_time_start = time.time()
-        msg.data = rgb_array.tobytes()
-        self.get_logger().info(f'RGB buffer convert time: {time.time() - convert_rgb_time_start:.3f}s')
+        msg.data = np.ascontiguousarray(rgb_array).tobytes()
+        
         sensor_info['image_pub'].publish(msg)
         
-        # Publish camera info
-        config = sensor_info['config']
-        info_msg = create_camera_info(
-            config.get('image_size_x', carla_image.width),
-            config.get('image_size_y', carla_image.height),
-            config.get('fov', 90.0),
-            sensor_info['frame_id'],
-            carla_image.timestamp
-        )
-        info_msg.header = self.create_synchronized_header(sensor_info['frame_id'], ros_time)
+        # Use cached CameraInfo (only create once per sensor)
+        frame_id = sensor_info['frame_id']
+        if frame_id not in self.cached_camera_info:
+            config = sensor_info['config']
+            self.cached_camera_info[frame_id] = create_camera_info(
+                config.get('image_size_x', carla_image.width),
+                config.get('image_size_y', carla_image.height),
+                config.get('fov', 90.0),
+                frame_id,
+                0.0  # Timestamp will be overwritten
+            )
+        
+        info_msg = self.cached_camera_info[frame_id]
+        info_msg.header = self.create_synchronized_header(frame_id, ros_time)
         sensor_info['info_pub'].publish(info_msg)
     
     def _publish_depth(self, carla_image, sensor_info: dict, ros_time: TimeMsg):
-        """Process and publish depth camera data."""
-        # Convert to depth in meters
+        """Process and publish depth camera data with optimized conversion."""
+        # Parse raw buffer once
         array = np.frombuffer(carla_image.raw_data, dtype=np.uint8)
         array = array.reshape((carla_image.height, carla_image.width, 4))
         
-        normalized = (array[:, :, 2].astype(np.float32) + 
-                     array[:, :, 1].astype(np.float32) * 256.0 +
-                     array[:, :, 0].astype(np.float32) * 256.0 * 256.0)
-        normalized /= (256.0 * 256.0 * 256.0 - 1.0)
-        depth_meters = normalized * 1000.0
+        # Single-pass vectorized depth conversion (avoid 3 separate astype calls)
+        # Combine BGR channels into 24-bit depth value, convert to meters
+        depth_raw = array[:, :, :3].astype(np.float32)
+        depth_meters = (depth_raw[:, :, 2] + 
+                       depth_raw[:, :, 1] * 256.0 + 
+                       depth_raw[:, :, 0] * 65536.0) / 16777215.0 * 1000.0
         
         msg = carla_depth_to_ros(depth_meters, sensor_info['frame_id'], carla_image.timestamp)
         msg.header = self.create_synchronized_header(sensor_info['frame_id'], ros_time)
         sensor_info['image_pub'].publish(msg)
         
-        # Publish camera info
-        config = sensor_info['config']
-        info_msg = create_camera_info(
-            config.get('image_size_x', carla_image.width),
-            config.get('image_size_y', carla_image.height),
-            config.get('fov', 90.0),
-            sensor_info['frame_id'],
-            carla_image.timestamp
-        )
-        info_msg.header = self.create_synchronized_header(sensor_info['frame_id'], ros_time)
+        # Use cached CameraInfo
+        frame_id = sensor_info['frame_id']
+        if frame_id not in self.cached_camera_info:
+            config = sensor_info['config']
+            self.cached_camera_info[frame_id] = create_camera_info(
+                config.get('image_size_x', carla_image.width),
+                config.get('image_size_y', carla_image.height),
+                config.get('fov', 90.0),
+                frame_id,
+                0.0
+            )
+        
+        info_msg = self.cached_camera_info[frame_id]
+        info_msg.header = self.create_synchronized_header(frame_id, ros_time)
         sensor_info['info_pub'].publish(info_msg)
     
     def _publish_semantic(self, carla_image, sensor_info: dict, ros_time: TimeMsg):
@@ -667,21 +700,26 @@ class CarlaBridgeNode(Node):
         msg.header = self.create_synchronized_header(sensor_info['frame_id'], ros_time)
         sensor_info['image_pub'].publish(msg)
         
-        # Publish camera info
-        config = sensor_info['config']
-        info_msg = create_camera_info(
-            config.get('image_size_x', carla_image.width),
-            config.get('image_size_y', carla_image.height),
-            config.get('fov', 90.0),
-            sensor_info['frame_id'],
-            carla_image.timestamp
-        )
-        info_msg.header = self.create_synchronized_header(sensor_info['frame_id'], ros_time)
+        # Use cached CameraInfo
+        frame_id = sensor_info['frame_id']
+        if frame_id not in self.cached_camera_info:
+            config = sensor_info['config']
+            self.cached_camera_info[frame_id] = create_camera_info(
+                config.get('image_size_x', carla_image.width),
+                config.get('image_size_y', carla_image.height),
+                config.get('fov', 90.0),
+                frame_id,
+                0.0
+            )
+        
+        info_msg = self.cached_camera_info[frame_id]
+        info_msg.header = self.create_synchronized_header(frame_id, ros_time)
         sensor_info['info_pub'].publish(info_msg)
     
     def _publish_lidar(self, carla_lidar, sensor_info: dict, ros_time: TimeMsg):
         """Process and publish LiDAR point cloud data."""
-        lidar_data = np.frombuffer(bytes(carla_lidar.raw_data), dtype=np.float32)
+        # Direct buffer access without bytes() copy
+        lidar_data = np.frombuffer(carla_lidar.raw_data, dtype=np.float32)
         lidar_data = lidar_data.reshape((-1, 4)).copy()
         
         # CARLA LiDAR uses left-handed, ROS uses right-handed (flip Y)
@@ -702,7 +740,8 @@ class CarlaBridgeNode(Node):
             ('object_tag', np.uint32),
         ])
 
-        raw = np.frombuffer(bytes(carla_lidar.raw_data), dtype=semantic_dtype)
+        # Direct buffer access without bytes() copy
+        raw = np.frombuffer(carla_lidar.raw_data, dtype=semantic_dtype)
         if raw.size == 0:
             return
 

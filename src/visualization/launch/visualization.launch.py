@@ -27,7 +27,8 @@ def generate_launch_description():
             executable='semantic_colorizer_node',
             name='semantic_colorizer_node',
             output='screen',
-            condition=IfCondition(LaunchConfiguration('enable_semantic_colorizer'))
+            condition=IfCondition(LaunchConfiguration('enable_semantic_colorizer')),
+            parameters=[{'use_sim_time': True}]
         ),
 
         # ==================== Node B: Live 2D Visualizer ====================
@@ -36,7 +37,8 @@ def generate_launch_description():
             executable='live_2d_viz_node',
             name='live_2d_viz_node',
             output='screen',
-            condition=IfCondition(LaunchConfiguration('enable_2d_viz'))
+            condition=IfCondition(LaunchConfiguration('enable_2d_viz')),
+            parameters=[{'use_sim_time': True}]
         ),
 
         # ==================== Node C: CARLA Debug Drawing ====================
@@ -47,6 +49,7 @@ def generate_launch_description():
             output='screen',
             condition=IfCondition(LaunchConfiguration('enable_carla_viz')),
             parameters=[{
+                'use_sim_time': True,
                 'carla_debug_draw': LaunchConfiguration('carla_debug_draw'),
             }]
         ),
