@@ -29,7 +29,7 @@ from nav_msgs.msg import OccupancyGrid
 import tf2_ros
 from tf2_ros import TransformException
 from numba import jit
-
+import time
 # Import semantic labels from perception module (CARLA convention)
 from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME
 
@@ -291,6 +291,7 @@ class InversePerspectiveMapperNode(Node):
     def semantic_callback(self, msg: Image):
         """Process semantic segmentation image and generate occupancy grid."""
         self.get_logger().info('Semantic image received')
+        t_start_semantic_cb = time.perf_counter()
         if self.K is None:
             return
         
@@ -303,32 +304,18 @@ class InversePerspectiveMapperNode(Node):
         self.get_logger().info(f'Camera transform: t=[{t[0]:.2f}, {t[1]:.2f}, {t[2]:.2f}]')
         self.get_logger().info(f'Camera R row2 (Z-axis in base): [{R[2,0]:.3f}, {R[2,1]:.3f}, {R[2,2]:.3f}]')
         
-        # 2. Parse Image directly from buffer
-        try:
-            height = msg.height
-            width = msg.width
-            self.get_logger().info(f'Image size: {width}x{height}, encoding: {msg.encoding}')
-            # CARLA semantic segmentation uses BGRA format (4 bytes per pixel)
-            # Label is stored in R channel (index 2 in BGRA order)
-            if msg.encoding == 'bgra8':
-                # Parse as 4-channel image, extract R channel (index 2)
-
-                img_data = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width, 4)
-                label_img = img_data[:, :, 2]  # R channel has the label
-            elif msg.encoding == 'mono8':
-                self.get_logger().info('Mono8 encoding detected')
-                # Direct grayscale label image
-                label_img = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width)
-            elif msg.encoding == 'rgb8':
-                # RGB format - label might be in first channel
-                img_data = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width, 3)
-                label_img = img_data[:, :, 0]  # R channel
-            else:
-                self.get_logger().error(f'Unsupported encoding: {msg.encoding}')
-                return
-        except Exception as e:
-            self.get_logger().error(f'Image parsing error: {e}')
+        # 2. Parse Image
+        
+        height = msg.height
+        width = msg.width
+        self.get_logger().info(f'Image size: {width}x{height}, encoding: {msg.encoding}')
+        
+        # bgra is converted to mono8 by our bridge, no need to check for other data types
+        if msg.encoding != 'mono8':
+            self.get_logger().warn(f'Unexpected image encoding: {msg.encoding}')
             return
+        label_img = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width)
+           
 
         # DEBUG: Log unique labels in the image to verify semantic encoding
         unique_labels = np.unique(label_img)
@@ -361,7 +348,7 @@ class InversePerspectiveMapperNode(Node):
         origin_y = vehicle_y - self.grid_size / 2.0
 
         # 4. Project to Ground (Numba JIT)
-        # Use vehicle Z as ground plane (CARLA ground is not at Z=0)
+        # Use vehicle Z as ground plane (ground in sim wont be at Z=0 always)
         fx, fy = self.K[0, 0], self.K[1, 1]
         cx, cy = self.K[0, 2], self.K[1, 2]
         
@@ -399,7 +386,8 @@ class InversePerspectiveMapperNode(Node):
         
         # 6. Publish
         self._publish_grid(grid_data, origin_x, origin_y, msg.header.stamp)
-    
+        t_end_semantic_cb = time.perf_counter()
+        self.get_logger().info(f'Semantic callback processing time: {(t_end_semantic_cb - t_start_semantic_cb)*1000:.1f} ms')
     def _publish_empty_grid(self, stamp):
         """Publish an empty grid (all unknown) when no road pixels found."""
         # Need vehicle position for origin even for empty grid

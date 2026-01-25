@@ -30,6 +30,7 @@ setup(
             'local_costmap_node_new = mapping.nodes.local_costmap_node_new:main',
             'local_costmap_node_old = mapping.nodes.local_costmap_node_old:main',
             'inverse_perspective_mapper_node = mapping.nodes.inverse_perspective_mapper:main',
+            'inverse_perspective_mapper_node_v2 = mapping.nodes.inverse_perspective_mapper_v2:main',
         ],
     },
 )

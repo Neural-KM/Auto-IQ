@@ -62,7 +62,7 @@ def generate_launch_description():
         # ),
         DeclareLaunchArgument(
             'mapper_executable',
-            default_value='inverse_perspective_mapper_node',
+            default_value='inverse_perspective_mapper_node_v2',
             description='Local costmap node executable to launch'
         ),
         # ==================== Node ====================
