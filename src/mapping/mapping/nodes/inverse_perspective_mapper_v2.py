@@ -33,6 +33,7 @@ from sensor_msgs.msg import Image, CameraInfo
 from nav_msgs.msg import OccupancyGrid
 import tf2_ros
 from tf2_ros import TransformException
+from scipy import ndimage
 import time
 
 # Import semantic labels from perception module (CARLA convention)
@@ -55,6 +56,10 @@ class InversePerspectiveMapperNode2(Node):
     Unlike forward projection (pixel-to-grid), reverse projection (grid-to-pixel)
     iterates over every grid cell and samples the camera image, guaranteeing
     a dense, hole-free occupancy map.
+    Problems: 
+    1) The road below a car is seen as drivable because 
+        semantics and reverse IPM are doing "too well".
+        Handling this by vertically diluting the obstacle before IPM
     """
     
     def __init__(self):
@@ -71,6 +76,9 @@ class InversePerspectiveMapperNode2(Node):
         self.declare_parameter('grid_size', 40.0)    # meters (square grid)
         self.declare_parameter('resolution', 0.4)   # meters per cell
         
+        # Morphology parameters (in cells)
+        self.declare_parameter('morphology_iterations', 2)  # Dilation then equal erosion (closing)
+        
         # Get parameter values
         semantic_topic = self.get_parameter('semantic_topic').value
         camera_info_topic = self.get_parameter('camera_info_topic').value
@@ -80,6 +88,7 @@ class InversePerspectiveMapperNode2(Node):
         
         self.grid_size = self.get_parameter('grid_size').value
         self.resolution = self.get_parameter('resolution').value
+        self.morphology_iterations = self.get_parameter('morphology_iterations').value
         
         # Derive grid cells from size and resolution
         self.grid_cells = int(self.grid_size / self.resolution)
@@ -128,6 +137,7 @@ class InversePerspectiveMapperNode2(Node):
         self.get_logger().info(f'  Base Frame: {self.base_frame}')
         self.get_logger().info(f'  Camera Frame: {self.camera_frame}')
         self.get_logger().info(f'  Grid: {self.grid_cells}x{self.grid_cells} cells, {self.grid_size}m, {self.resolution}m/cell')
+        self.get_logger().info(f'  Morphology: closing with {self.morphology_iterations} iterations')
         self.get_logger().info(f'  Road labels: road={ROAD_LABEL_ID}, road_line={ROAD_LINE_LABEL_ID}')
 
     def camera_info_callback(self, msg: CameraInfo):
@@ -245,7 +255,10 @@ class InversePerspectiveMapperNode2(Node):
             OCCUPIED
         )
         
-        # 5. Publish OccupancyGrid
+        # 5. Apply morphological operations on obstacles
+        grid = self._apply_morphology(grid)
+        
+        # 6. Publish OccupancyGrid
         self._publish_grid(grid, msg.header.stamp)
         
         t_end = time.perf_counter()
@@ -258,6 +271,34 @@ class InversePerspectiveMapperNode2(Node):
             f'IPM V2: {(t_end - t_start)*1000:.1f}ms | '
             f'Free: {n_free}, Occupied: {n_occupied}, Unknown: {n_unknown}'
         )
+
+    def _apply_morphology(self, grid: np.ndarray) -> np.ndarray:
+        """
+        Apply morphological closing (dilation + erosion) to obstacle layer.
+        
+        Closing fills small holes and smooths boundaries without changing
+        the overall obstacle size.
+        """
+        if self.morphology_iterations == 0:
+            return grid
+        
+        # Create binary obstacle mask
+        obstacle_mask = (grid == OCCUPIED)
+        
+        # Morphological closing: dilate then erode with same iterations
+        struct = ndimage.generate_binary_structure(2, 1)  # 4-connected
+        obstacle_mask = ndimage.binary_dilation(
+            obstacle_mask, structure=struct, iterations=self.morphology_iterations
+        )
+        obstacle_mask = ndimage.binary_erosion(
+            obstacle_mask, structure=struct, iterations=self.morphology_iterations
+        )
+        
+        # Apply back to grid
+        result = grid.copy()
+        result[obstacle_mask & (grid == FREE)] = OCCUPIED
+        
+        return result
 
     def _publish_grid(self, grid: np.ndarray, stamp):
         """Publish occupancy grid message in base_link frame."""
