@@ -116,3 +116,50 @@ def reverse_project_grid(
     
     return grid
 
+@jit(nopython=True, cache=True)
+def apply_column_drop_skirt(semantic_img, obstacle_ids, drop_pixels, hood_mask_rows):
+    """
+    Scans every column to find the lowest obstacle pixel and extends it downwards.
+    Solves the 'Ghost Road' undercarriage problem without merging adjacent lanes.
+    
+    Args:
+        semantic_img: Semantic label image [H, W]
+        obstacle_ids: Array of label IDs to treat as obstacles
+        drop_pixels: Number of pixels to extend obstacle downward
+        hood_mask_rows: Ignore bottom N rows (ego vehicle hood)
+    """
+    rows, cols = semantic_img.shape
+    
+    # Don't scan the hood region at the bottom
+    scan_limit = rows - hood_mask_rows
+    
+    # Iterate over every column
+    for c in range(cols):
+        # Scan from bottom of valid region up to find the first obstacle
+        lowest_obs_row = -1
+        fill_val = 0
+        
+        for r in range(scan_limit - 1, -1, -1):
+            pixel_val = semantic_img[r, c]
+            
+            # Check if this is an obstacle
+            is_obstacle = False
+            for i in range(len(obstacle_ids)):
+                if pixel_val == obstacle_ids[i]:
+                    is_obstacle = True
+                    break
+            
+            if is_obstacle:
+                lowest_obs_row = r
+                fill_val = pixel_val
+                break # Found the bottom edge
+        
+        # Extend downwards (can fill into hood region)
+        if lowest_obs_row != -1:
+            start_r = lowest_obs_row + 1
+            end_r = min(rows, start_r + drop_pixels)
+            # print(f'Column {c}: Extending obstacle from row {lowest_obs_row} down to {end_r - 1} with label {fill_val}')
+            for r in range(start_r, end_r):
+                semantic_img[r, c] = fill_val
+
+    return semantic_img

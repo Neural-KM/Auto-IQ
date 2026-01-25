@@ -37,12 +37,16 @@ from scipy import ndimage
 import time
 
 # Import semantic labels from perception module (CARLA convention)
-from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME
-from mapping.utils.ipm_funcs import reverse_project_grid
+from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME, colorize_mask
+from mapping.utils.ipm_funcs import reverse_project_grid, apply_column_drop_skirt
 # ================= CONFIGURATION =================
 ROAD_LABEL_ID = SEMANTIC_BY_NAME['road']           # 1 in CARLA
 ROAD_LINE_LABEL_ID = SEMANTIC_BY_NAME['road_line'] # 24 in CARLA
 
+VEHICLE_LABEL_IDS = {SEMANTIC_BY_NAME['vehicle'],
+                     SEMANTIC_BY_NAME['rider'],
+                     SEMANTIC_BY_NAME['truck'],
+                     SEMANTIC_BY_NAME['bus']}
 # Grid cell values
 UNKNOWN = -1
 FREE = 0
@@ -129,7 +133,7 @@ class InversePerspectiveMapperNode2(Node):
         
         # ==================== Publisher ====================
         self.costmap_pub = self.create_publisher(OccupancyGrid, costmap_topic, 1)
-        
+        self.debug_image_pub = self.create_publisher(Image, '/mapping/ipm_debug_image', 1)
         self.get_logger().info('Inverse Perspective Mapper V2 (Reverse Projection) started')
         self.get_logger().info(f'  Semantic Image: {semantic_topic}')
         self.get_logger().info(f'  Camera Info: {camera_info_topic}')
@@ -236,7 +240,19 @@ class InversePerspectiveMapperNode2(Node):
         fx, fy = self.K[0, 0], self.K[1, 1]
         cx, cy = self.K[0, 2], self.K[1, 2]
         
-        # 4. Run Reverse Projection (Numba JIT with parallel)
+        # 4. Apply column drop skirt to semantic image
+        semantic_img = apply_column_drop_skirt(semantic_img, obstacle_ids=list(VEHICLE_LABEL_IDS), drop_pixels=5, hood_mask_rows=135)
+        colorized_dropped = colorize_mask(semantic_img)
+        self.debug_image_pub.publish(Image(
+            header=msg.header,
+            height=colorized_dropped.shape[0],
+            width=colorized_dropped.shape[1],
+            encoding='rgb8',
+            is_bigendian=0,
+            step=colorized_dropped.shape[1] * 3,
+            data=colorized_dropped.tobytes()
+        ))
+        # 5. Run Reverse Projection (Numba JIT with parallel)
         grid = reverse_project_grid(
             self.grid_cells,
             self.grid_cells,
