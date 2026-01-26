@@ -44,11 +44,8 @@ SEMANTIC_VEHICLE = 14
 SEMANTIC_VEHICLES = {14, 15, 16, 17, 18, 19}  # vehicle, truck, bus, train, motorcycle, bicycle
 
 # Import for debug visualization
-try:
-    import cv2
-    CV2_AVAILABLE = True
-except ImportError:
-    CV2_AVAILABLE = False
+import cv2
+
 
 
 class SemanticPointCloudNode(Node):
@@ -358,7 +355,7 @@ class SemanticPointCloudNode(Node):
         class_ids[hood_mask] = SEMANTIC_ROAD
         
         # 8. Publish debug visualization if enabled
-        if self.publish_debug_image and CV2_AVAILABLE:
+        if self.publish_debug_image:
             self._publish_debug_image(
                 semantic_img, u_valid_float, v_valid_float, class_ids, points_veh_valid)
         
