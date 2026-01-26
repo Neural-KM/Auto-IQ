@@ -210,8 +210,7 @@ Visualization Manager:
       Enabled: true
       Name: Ground Truth Obstacles
       Namespaces:
-        ground_truth_obstacles: true
-        ground_truth_obstacles_labels: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -223,8 +222,7 @@ Visualization Manager:
       Enabled: true
       Name: Detected Obstacles
       Namespaces:
-        detected_obstacles: true
-        detected_obstacles_labels: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -389,6 +387,29 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /mapping/ipm_debug_image
+      Value: true
+    - Alpha: 0.699999988079071
+      Binary representation: false
+      Binary threshold: 100
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Draw Behind: false
+      Enabled: true
+      Name: Map
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /planning/cspace_costmap
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /planning/cspace_costmap_updates
+      Use Timestamp: false
       Value: true
   Enabled: true
   Global Options:

@@ -4,6 +4,7 @@ import rclpy
 from rclpy.node import Node
 import numpy as np
 import math
+from scipy.ndimage import binary_dilation, generate_binary_structure
 
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped, PointStamped
@@ -27,9 +28,11 @@ class PlanningNode(Node):
         # --- Parameters ---
         self.declare_parameter('carla_host', 'localhost')
         self.declare_parameter('target_speed', 10.0) # km/h
+        self.declare_parameter('vehicle_radius', 1.5) # meters (for C-space inflation)
         
         carla_host = self.get_parameter('carla_host').value
         self.target_speed = self.get_parameter('target_speed').value / 3.6 # m/s
+        self.vehicle_radius = self.get_parameter('vehicle_radius').value
         
         # --- CARLA Connection (Only for Global Route) ---
         self.get_logger().info('Connecting to CARLA...')
@@ -66,6 +69,7 @@ class PlanningNode(Node):
         # --- ROS2 Publishers ---
         self.traj_pub = self.create_publisher(Trajectory, '/planning/trajectory', 1)
         self.global_route_pub = self.create_publisher(Path, '/planning/global_route', 1)
+        self.cspace_pub = self.create_publisher(OccupancyGrid, '/planning/cspace_costmap', 1)
         
         # --- Timer Loop (10 Hz) ---
         self.create_timer(0.1, self.planning_loop)
@@ -78,11 +82,59 @@ class PlanningNode(Node):
         # Store grid data and metadata for the planning loop
         grid = np.array(msg.data, dtype=np.int8)
         grid = grid.reshape((msg.info.height, msg.info.width))
+        
+        # Inflate obstacles to create C-space (configuration space)
+        resolution = msg.info.resolution
+        grid = self._inflate_to_cspace(grid, self.vehicle_radius, resolution)
+        
         self.latest_costmap = grid
         self.costmap_origin_x = msg.info.origin.position.x
         self.costmap_origin_y = msg.info.origin.position.y
-        self.costmap_resolution = msg.info.resolution
+        self.costmap_resolution = resolution
         self.costmap_frame_id = msg.header.frame_id
+        
+        # Publish C-space for debugging
+        cspace_msg = OccupancyGrid()
+        cspace_msg.header = msg.header
+        cspace_msg.info = msg.info
+        cspace_msg.data = grid.flatten().tolist()
+        self.cspace_pub.publish(cspace_msg)
+
+    def _inflate_to_cspace(self, grid: np.ndarray, radius: float, resolution: float) -> np.ndarray:
+        """
+        Inflate obstacles by vehicle radius to create configuration space.
+        
+        This allows the planner to treat the vehicle as a point.
+        
+        Args:
+            grid: Occupancy grid (values 0-100, -1 for unknown)
+            radius: Vehicle radius in meters
+            resolution: Grid cell size in meters
+            
+        Returns:
+            Inflated occupancy grid
+        """
+        # Calculate kernel radius in cells
+        radius_cells = int(np.ceil(radius / resolution))
+        if radius_cells < 1:
+            return grid
+        
+        # Create circular structuring element
+        kernel_size = 2 * radius_cells + 1
+        y, x = np.ogrid[-radius_cells:radius_cells+1, -radius_cells:radius_cells+1]
+        circular_kernel = (x**2 + y**2) <= radius_cells**2
+        
+        # Create binary obstacle mask (occupied cells)
+        obstacle_mask = grid > 50  # Threshold for obstacles
+        
+        # Dilate obstacles
+        inflated_mask = binary_dilation(obstacle_mask, structure=circular_kernel)
+        
+        # Apply inflation to grid: set dilated cells to occupied (100)
+        result = grid.copy()
+        result[inflated_mask & (grid <= 50)] = 100
+        
+        return result
 
     def goal_cb(self, msg):
         # Convert ROS Goal -> CARLA Location
