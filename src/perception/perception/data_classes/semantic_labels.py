@@ -1,31 +1,87 @@
-class SemanticLabels:
-    """CARLA semantic segmentation label IDs."""
+"""
+CARLA Semantic Segmentation Labels
+===================================
+
+Defines semantic class IDs, names, and colors for CARLA ground truth segmentation.
+"""
+
+import numpy as np
+from typing import Tuple, Dict, Optional
+
+
+# (id, name, color) tuples - name is derived automatically
+_CLASSES = [
+    (0,  'unlabeled',     (0, 0, 0)),
+    (1,  'road',          (128, 64, 128)),
+    (2,  'sidewalk',      (244, 35, 232)),
+    (3,  'building',      (70, 70, 70)),
+    (4,  'wall',          (102, 102, 156)),
+    (5,  'fence',         (190, 153, 153)),
+    (6,  'pole',          (153, 153, 153)),
+    (7,  'traffic_light', (250, 170, 30)),
+    (8,  'traffic_sign',  (220, 220, 0)),
+    (9,  'vegetation',    (107, 142, 35)),
+    (10, 'terrain',       (152, 251, 152)),
+    (11, 'sky',           (70, 130, 180)),
+    (12, 'pedestrian',    (220, 20, 60)),
+    (13, 'rider',         (255, 0, 0)),
+    (14, 'vehicle',       (0, 0, 142)),
+    (15, 'truck',         (0, 0, 70)),
+    (16, 'bus',           (0, 60, 100)),
+    (17, 'train',         (0, 80, 100)),
+    (18, 'motorcycle',    (0, 0, 230)),
+    (19, 'bicycle',       (119, 11, 32)),
+    (20, 'static',        (110, 190, 160)),
+    (21, 'dynamic',       (170, 120, 50)),
+    (22, 'other',         (55, 90, 80)),
+    (23, 'water',         (45, 60, 150)),
+    (24, 'road_line',     (157, 234, 50)),
+    (25, 'ground',        (81, 0, 81)),
+    (26, 'bridge',        (150, 100, 100)),
+    (27, 'rail_track',    (230, 150, 140)),
+    (28, 'guard_rail',    (180, 165, 180)),
+]
+
+# Lookup by ID: {0: ('unlabeled', (0,0,0)), 1: ('road', (128,64,128)), ...}
+SEMANTIC_CLASSES: Dict[int, Tuple[str, Tuple[int, int, int]]] = {
+    id: (name, color) for id, name, color in _CLASSES
+}
+
+# Lookup by name
+SEMANTIC_BY_NAME: Dict[str, int] = {name: id for id, name, _ in _CLASSES}
+
+
+# Color lookup table (256 entries for fast numpy indexing)
+SEMANTIC_COLOR_LUT = np.zeros((256, 3), dtype=np.uint8)
+for id, (_, color) in SEMANTIC_CLASSES.items():
+    SEMANTIC_COLOR_LUT[id] = color
+
+
+def get_class_name(class_id: int) -> Optional[str]:
+    """Get class name by ID."""
+    entry = SEMANTIC_CLASSES.get(class_id)
+    return entry[0] if entry else None
+
+
+def get_class_color(class_id: int) -> Optional[Tuple[int, int, int]]:
+    """Get class color by ID."""
+    entry = SEMANTIC_CLASSES.get(class_id)
+    return entry[1] if entry else None
+
+
+def get_class_id(name: str) -> Optional[int]:
+    """Get class ID by name."""
+    return SEMANTIC_BY_NAME.get(name.lower())
+
+
+def colorize_mask(mask: np.ndarray) -> np.ndarray:
+    """
+    Convert semantic mask (class IDs) to RGB image.
     
-    ROAD = 1           # Roads (128, 64, 128)
-    SIDEWALK = 2       # Sidewalks (244, 35, 232)
-    BUILDING = 3       # Buildings (70, 70, 70)
-    WALL = 4           # Walls (102, 102, 156)
-    FENCE = 5          # Fences (190, 153, 153)
-    POLE = 6           # Poles (153, 153, 153)
-    TRAFFIC_LIGHT = 7  # Traffic lights (250, 170, 30)
-    TRAFFIC_SIGN = 8   # Traffic signs (220, 220, 0)
-    VEGETATION = 9     # Vegetation (107, 142, 35)
-    TERRAIN = 10       # Terrain (152, 251, 152)
-    SKY = 11           # Sky (70, 130, 180)
-    PEDESTRIAN = 12    # Pedestrians (220, 20, 60)
-    RIDER = 13         # Riders (255, 0, 0)
-    VEHICLE = 14       # Cars/Vans (0, 0, 142)
-    TRUCK = 15         # Trucks (0, 0, 70)
-    BUS = 16           # Buses (0, 60, 100)
-    TRAIN = 17         # Trains (0, 80, 100)
-    MOTORCYCLE = 18    # Motorcycles (0, 0, 230)
-    BICYCLE = 19       # Bicycles (119, 11, 32)
-    STATIC = 20        # Static objects (110, 190, 160)
-    DYNAMIC = 21       # Dynamic objects (170, 120, 50)
-    OTHER = 22         # Other (55, 90, 80)
-    WATER = 23         # Water (45, 60, 150)
-    ROAD_LINE = 24     # Road markings (157, 234, 50)
-    GROUND = 25        # Ground (81, 0, 81)
-    BRIDGE = 26        # Bridge (150, 100, 100)
-    RAIL_TRACK = 27    # Rail tracks (230, 150, 140)
-    GUARD_RAIL = 28    # Guard rails (180, 165, 180)
+    Args:
+        mask: 2D array of class IDs (H, W)
+        
+    Returns:
+        RGB image (H, W, 3)
+    """
+    return SEMANTIC_COLOR_LUT[np.clip(mask, 0, 255)]

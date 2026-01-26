@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
 """
-CARLA Bridge Node
-=================
+CARLA Bridge Node - Deterministic Tick-Wait-Publish Architecture
+=================================================================
 
-ROS2 node that connects to CARLA simulator, spawns vehicle with sensors,
-publishes sensor data to ROS2 topics, and subscribes to control commands.
+ROS2 node that bridges CARLA simulator to ROS2 using a strictly deterministic
+synchronization model. The node acts as the simulation time source (/clock)
+and guarantees that all published messages for a given simulation step share
+the exact same timestamp and frame ID.
+
+Architecture:
+1. Simulation Time Source: Bridge publishes to /clock, all messages use CARLA time
+2. Tick-Wait-Publish Loop: 
+   - Apply vehicle control
+   - world.tick() to advance simulation
+   - Wait for all sensor data matching current frame
+   - Publish all ROS messages with synchronized timestamp
+3. Sensor callbacks are pure producers (push to queues, no publishing)
+4. TF & Odometry share the synchronized timestamp
 
 """
 
@@ -14,15 +26,21 @@ import sys
 import os
 import time
 import threading
+from queue import Queue, Empty
 from pathlib import Path
+from typing import Dict, Any, Optional
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 # ROS2 message types
 from std_msgs.msg import Header
+from builtin_interfaces.msg import Time as TimeMsg
+from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import Image, PointCloud2, CameraInfo, NavSatFix, Imu
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
@@ -31,13 +49,13 @@ from autoiq_msgs.msg import VehicleControl
 
 import carla
 
-
 # Local converters
 from autoiq_bridge.converters import (
     carla_image_to_ros,
     carla_depth_to_ros,
     carla_semantic_to_ros,
     carla_lidar_to_ros,
+    carla_semantic_lidar_to_ros,
     carla_vehicle_to_odometry,
     carla_transform_to_ros,
     create_camera_info,
@@ -46,11 +64,23 @@ from autoiq_bridge.converters import (
 )
 
 
+@dataclass
+class SensorQueueItem:
+    """Container for sensor data with frame information."""
+    frame: int
+    timestamp: float
+    data: Any
+
+
 class CarlaBridgeNode(Node):
     """
-    ROS2 Node that bridges CARLA simulator to ROS2.
+    ROS2 Node that bridges CARLA simulator to ROS2 with deterministic synchronization.
+    
+    Uses a Tick-Wait-Publish loop to ensure all sensor data for a given
+    simulation frame is published with the exact same timestamp.
     
     Publishes:
+        - /clock (simulation time source)
         - Camera images (RGB, Depth, Semantic)
         - LiDAR point clouds
         - Vehicle odometry
@@ -63,47 +93,67 @@ class CarlaBridgeNode(Node):
     def __init__(self):
         super().__init__('carla_bridge_node')
         
-        # Declare parameters
+        # ==================== Parameters ====================
         self.declare_parameter('host', 'localhost')
         self.declare_parameter('port', 2000)
         self.declare_parameter('timeout', 10.0)
-        self.declare_parameter('synchronous_mode', True)
         self.declare_parameter('fixed_delta_seconds', 0.05)
         self.declare_parameter('objects_file', '')
         self.declare_parameter('spawn_point_index', 50)
         self.declare_parameter('vehicle_type', 'vehicle.tesla.model3')
+        self.declare_parameter('sensor_timeout', 2.0)  # Seconds to wait for sensor data
         
         # Get parameters
         self.host = self.get_parameter('host').value
         self.port = self.get_parameter('port').value
         self.timeout = self.get_parameter('timeout').value
-        self.synchronous_mode = self.get_parameter('synchronous_mode').value
         self.fixed_delta_seconds = self.get_parameter('fixed_delta_seconds').value
         self.objects_file = self.get_parameter('objects_file').value
         self.spawn_point_index = self.get_parameter('spawn_point_index').value
         self.vehicle_type = self.get_parameter('vehicle_type').value
+        self.sensor_timeout = self.get_parameter('sensor_timeout').value
 
-        # CARLA objects
+        # ==================== CARLA Objects ====================
         self.client = None
         self.world = None
         self.vehicle = None
-        self.sensors = {}  # {sensor_id: {'actor': carla_actor, 'publisher': ros_publisher, ...}}
+        self.sensors: Dict[str, dict] = {}  # {sensor_id: {'actor', 'publisher', 'queue', ...}}
         
-        # TF broadcaster
+        # ==================== Synchronization ====================
+        self.current_frame = 0
+        self.running = True
+        
+        # Thread pool for parallel sensor publishing
+        self.publish_executor = ThreadPoolExecutor(max_workers=8)
+        
+        # Cached CameraInfo messages (avoid recreating each frame)
+        self.cached_camera_info: Dict[str, CameraInfo] = {}
+        
+        # ==================== TF Broadcasters ====================
         self.tf_broadcaster = TransformBroadcaster(self)
         self.static_tf_broadcaster = StaticTransformBroadcaster(self)
         
-        # QoS profile for sensor data (RELIABLE for RViz compatibility)
+        # ==================== QoS Profiles ====================
         self.sensor_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
         
-        # Publishers
+        # Clock uses RELIABLE for /clock topic (sim time source)
+        self.clock_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+        
+        # ==================== Publishers ====================
+        self.clock_pub = self.create_publisher(Clock, '/clock', self.clock_qos)
         self.odom_pub = self.create_publisher(Odometry, '/carla/ego_vehicle/ground_truth/odometry', 10)
         
-        # Subscribers
+        # ==================== Subscribers ====================
         self.control_sub = self.create_subscription(
             VehicleControl,
             '/carla/ego_vehicle/control',
@@ -111,27 +161,26 @@ class CarlaBridgeNode(Node):
             1
         )
         
-        # Control state
+        # ==================== Control State ====================
         self.current_control = carla.VehicleControl()
         self.control_lock = threading.Lock()
         
-        # Connect and setup (sync mode enabled AFTER spawning)
+        # ==================== Connect and Setup ====================
         self.connect_to_carla()
         self.spawn_vehicle_and_sensors()
+        self.enable_synchronous_mode()
         
-        # NOW enable synchronous mode (after spawning to avoid freeze)
-        if self.synchronous_mode:
-            self.enable_synchronous_mode()
+        # Publish static transforms once
+        self.publish_static_sensor_tfs()
         
-        # Create timer for world tick (in synchronous mode)
-        if self.synchronous_mode:
-            tick_period = self.fixed_delta_seconds
-            self.tick_timer = self.create_timer(tick_period, self.tick_callback)
-        else:
-            # In async mode, publish odometry at fixed rate
-            self.tick_timer = self.create_timer(0.05, self.publish_odometry)
+        # ==================== Main Loop Thread ====================
+        # Run the tick-wait-publish loop in a separate thread
+        self.main_loop_thread = threading.Thread(target=self.tick_wait_publish_loop, daemon=True)
+        self.main_loop_thread.start()
         
-        self.get_logger().info('CARLA Bridge Node initialized')
+        self.get_logger().info('CARLA Bridge Node initialized (Tick-Wait-Publish mode)')
+    
+    # ==================== CARLA Connection ====================
     
     def connect_to_carla(self):
         """Connect to CARLA server."""
@@ -158,9 +207,12 @@ class CarlaBridgeNode(Node):
         settings.synchronous_mode = True
         settings.fixed_delta_seconds = self.fixed_delta_seconds
         self.world.apply_settings(settings)
-        # Do initial tick to get things started
-        self.world.tick()
-        self.get_logger().info(f'Synchronous mode enabled, dt={self.fixed_delta_seconds}s')
+        
+        # Initial tick to get things started
+        self.current_frame = self.world.tick()
+        self.get_logger().info(f'Synchronous mode enabled, sim dt between every tick={self.fixed_delta_seconds}s')
+    
+    # ==================== Spawning ====================
     
     def spawn_vehicle_and_sensors(self):
         """Spawn vehicle and attach sensors based on config."""
@@ -192,9 +244,6 @@ class CarlaBridgeNode(Node):
         # Spawn sensors
         for sensor_cfg in sensor_configs:
             self.spawn_sensor(sensor_cfg)
-        
-        # Publish static transforms for sensors (once, after all sensors spawned)
-        self.publish_static_sensor_tfs()
     
     def spawn_vehicle(self):
         """Spawn the ego vehicle."""
@@ -203,7 +252,6 @@ class CarlaBridgeNode(Node):
         # Find vehicle blueprint
         vehicle_bp = blueprint_library.find(self.vehicle_type)
         if vehicle_bp is None:
-            # Fallback to any vehicle
             vehicle_bp = blueprint_library.filter('vehicle.*')[0]
             self.get_logger().warn(f'Vehicle {self.vehicle_type} not found, using {vehicle_bp.id}')
         
@@ -212,20 +260,18 @@ class CarlaBridgeNode(Node):
         if self.spawn_point_index < len(spawn_points):
             spawn_point = spawn_points[self.spawn_point_index]
         else:
-            spawn_point = spawn_points[0]  # Default spawn point
+            spawn_point = spawn_points[0]
             self.get_logger().warn(f'Spawn index {self.spawn_point_index} out of range, using 0')
         
         vehicle_bp.set_attribute('role_name', 'hero')
-        # Spawn vehicle
         self.vehicle = self.world.spawn_actor(vehicle_bp, spawn_point)
-        self.get_logger().info(f'Spawned vehicle: {self.vehicle.type_id} at spawn point {self.spawn_point_index}. Role name: {self.vehicle.attributes.get("role_name", "unknown")}')
+        self.get_logger().info(f'Spawned vehicle: {self.vehicle.type_id} at spawn point {self.spawn_point_index}')
     
     def spawn_sensor(self, config: dict):
         """
-        Spawn a sensor and setup its publisher.
+        Spawn a sensor, setup its queue and publisher.
         
-        Args:
-            config: Sensor configuration dict (carla-ros-bridge format)
+        Sensor callbacks are now pure producers - they only push data to queues.
         """
         sensor_type = config['type']
         sensor_id = config['id']
@@ -240,30 +286,15 @@ class CarlaBridgeNode(Node):
         
         # Set sensor attributes based on type
         if 'sensor.camera' in sensor_type:
-            if 'image_size_x' in config:
-                bp.set_attribute('image_size_x', str(config['image_size_x']))
-            if 'image_size_y' in config:
-                bp.set_attribute('image_size_y', str(config['image_size_y']))
-            if 'fov' in config:
-                bp.set_attribute('fov', str(config['fov']))
-            if 'sensor_tick' in config:
-                bp.set_attribute('sensor_tick', str(config['sensor_tick']))
-                
-        elif sensor_type == 'sensor.lidar.ray_cast':
-            if 'channels' in config:
-                bp.set_attribute('channels', str(config['channels']))
-            if 'range' in config:
-                bp.set_attribute('range', str(config['range']))
-            if 'points_per_second' in config:
-                bp.set_attribute('points_per_second', str(config['points_per_second']))
-            if 'rotation_frequency' in config:
-                bp.set_attribute('rotation_frequency', str(config['rotation_frequency']))
-            if 'upper_fov' in config:
-                bp.set_attribute('upper_fov', str(config['upper_fov']))
-            if 'lower_fov' in config:
-                bp.set_attribute('lower_fov', str(config['lower_fov']))
-            if 'sensor_tick' in config:
-                bp.set_attribute('sensor_tick', str(config['sensor_tick']))
+            for attr in ['image_size_x', 'image_size_y', 'fov', 'sensor_tick']:
+                if attr in config:
+                    bp.set_attribute(attr, str(config[attr]))
+                    
+        elif sensor_type in ('sensor.lidar.ray_cast', 'sensor.lidar.ray_cast_semantic'):
+            for attr in ['channels', 'range', 'points_per_second', 'rotation_frequency', 
+                         'upper_fov', 'lower_fov', 'sensor_tick']:
+                if attr in config:
+                    bp.set_attribute(attr, str(config[attr]))
         
         # Create transform
         transform = carla.Transform(
@@ -274,290 +305,502 @@ class CarlaBridgeNode(Node):
         # Spawn sensor attached to vehicle
         sensor_actor = self.world.spawn_actor(bp, transform, attach_to=self.vehicle)
         
-        # Determine frame_id based on sensor type (matches topic structure)
-        if 'sensor.camera.rgb' in sensor_type:
-            frame_id = f'ego_vehicle/sensor/camera/rgb/{sensor_id}'
-        elif 'sensor.camera.depth' in sensor_type:
-            frame_id = f'ego_vehicle/sensor/camera/depth/{sensor_id}'
-        elif 'sensor.camera.semantic_segmentation' in sensor_type:
-            frame_id = f'ego_vehicle/ground_truth/camera/semantic/{sensor_id}'
-        elif sensor_type == 'sensor.lidar.ray_cast':
-            frame_id = f'ego_vehicle/sensor/lidar/{sensor_id}'
-        elif sensor_type == 'sensor.other.gnss':
-            frame_id = f'ego_vehicle/sensor/gnss/{sensor_id}'
-        elif sensor_type == 'sensor.other.imu':
-            frame_id = f'ego_vehicle/sensor/imu/{sensor_id}'
-        else:
-            frame_id = f'ego_vehicle/{sensor_id}'
+        # Determine frame_id based on sensor type
+        frame_id = self._get_frame_id(sensor_type, sensor_id)
         
-        # Create publishers based on sensor type
+        # Create sensor data structure with thread-safe queue
         sensor_data = {
             'actor': sensor_actor,
             'config': config,
-            'frame_id': frame_id
+            'frame_id': frame_id,
+            'type': sensor_type,
+            'queue': Queue(maxsize=10),
         }
         
+        # Create publishers based on sensor type
+        self._setup_sensor_publishers(sensor_data, sensor_type, sensor_id)
+        
+        # Setup callback (pure producer - just pushes to queue)
+        self._setup_sensor_callback(sensor_actor, sensor_type, sensor_data['queue'])
+        
+        self.sensors[frame_id] = sensor_data
+        self.get_logger().info(f'Spawned sensor: {sensor_type} as {sensor_id} (frame: {frame_id})')
+    
+    def _get_frame_id(self, sensor_type: str, sensor_id: str) -> str:
+        """Generate frame_id for a sensor type."""
+        if 'sensor.camera.rgb' in sensor_type:
+            return f'ego_vehicle/sensor/camera/rgb/{sensor_id}'
+        elif 'sensor.camera.depth' in sensor_type:
+            return f'ego_vehicle/sensor/camera/depth/{sensor_id}'
+        elif 'sensor.camera.semantic_segmentation' in sensor_type:
+            return f'ego_vehicle/ground_truth/camera/semantic/{sensor_id}'
+        elif sensor_type == 'sensor.lidar.ray_cast':
+            return f'ego_vehicle/sensor/lidar/{sensor_id}'
+        elif sensor_type == 'sensor.lidar.ray_cast_semantic':
+            return f'ego_vehicle/ground_truth/lidar/{sensor_id}'
+        elif sensor_type == 'sensor.other.gnss':
+            return f'ego_vehicle/sensor/gnss/{sensor_id}'
+        elif sensor_type == 'sensor.other.imu':
+            return f'ego_vehicle/sensor/imu/{sensor_id}'
+        else:
+            return f'ego_vehicle/{sensor_id}'
+    
+    def _setup_sensor_publishers(self, sensor_data: dict, sensor_type: str, sensor_id: str):
+        """Create publishers for a sensor."""
         if 'sensor.camera.rgb' in sensor_type:
             sensor_data['image_pub'] = self.create_publisher(
                 Image, f'/carla/ego_vehicle/sensor/camera/rgb/{sensor_id}/image', self.sensor_qos)
             sensor_data['info_pub'] = self.create_publisher(
                 CameraInfo, f'/carla/ego_vehicle/sensor/camera/rgb/{sensor_id}/camera_info', self.sensor_qos)
-            sensor_actor.listen(lambda data, sd=sensor_data: self.rgb_callback(data, sd))
             
         elif 'sensor.camera.depth' in sensor_type:
             sensor_data['image_pub'] = self.create_publisher(
                 Image, f'/carla/ego_vehicle/sensor/camera/depth/{sensor_id}/image', self.sensor_qos)
             sensor_data['info_pub'] = self.create_publisher(
                 CameraInfo, f'/carla/ego_vehicle/sensor/camera/depth/{sensor_id}/camera_info', self.sensor_qos)
-            sensor_actor.listen(lambda data, sd=sensor_data: self.depth_callback(data, sd))
             
         elif 'sensor.camera.semantic_segmentation' in sensor_type:
             sensor_data['image_pub'] = self.create_publisher(
                 Image, f'/carla/ego_vehicle/ground_truth/camera/semantic/{sensor_id}/image', self.sensor_qos)
             sensor_data['info_pub'] = self.create_publisher(
                 CameraInfo, f'/carla/ego_vehicle/ground_truth/camera/semantic/{sensor_id}/camera_info', self.sensor_qos)
-            sensor_actor.listen(lambda data, sd=sensor_data: self.semantic_callback(data, sd))
             
         elif sensor_type == 'sensor.lidar.ray_cast':
             sensor_data['cloud_pub'] = self.create_publisher(
                 PointCloud2, f'/carla/ego_vehicle/sensor/lidar/{sensor_id}/point_cloud', self.sensor_qos)
-            sensor_actor.listen(lambda data, sd=sensor_data: self.lidar_callback(data, sd))
+                
+        elif sensor_type == 'sensor.lidar.ray_cast_semantic':
+            sensor_data['cloud_pub'] = self.create_publisher(
+                PointCloud2, f'/carla/ego_vehicle/ground_truth/lidar/{sensor_id}/point_cloud', self.sensor_qos)
             
         elif sensor_type == 'sensor.other.gnss':
             sensor_data['gnss_pub'] = self.create_publisher(
                 NavSatFix, f'/carla/ego_vehicle/sensor/gnss/{sensor_id}/fix', self.sensor_qos)
-            sensor_actor.listen(lambda data, sd=sensor_data: self.gnss_callback(data, sd))
             
         elif sensor_type == 'sensor.other.imu':
             sensor_data['imu_pub'] = self.create_publisher(
                 Imu, f'/carla/ego_vehicle/sensor/imu/{sensor_id}/data', self.sensor_qos)
-            sensor_actor.listen(lambda data, sd=sensor_data: self.imu_callback(data, sd))
+    
+    def _setup_sensor_callback(self, sensor_actor, sensor_type: str, queue: Queue):
+        """Setup sensor callback as pure producer (pushes to queue only)."""
+        def producer_callback(data):
+            # Pure producer: just push raw data with frame info to queue
+            item = SensorQueueItem(
+                frame=data.frame,
+                timestamp=data.timestamp,
+                data=data
+            )
+            try:
+                queue.put_nowait(item)
+            except:
+                # Queue full - drop oldest and add new
+                try:
+                    queue.get_nowait()
+                    queue.put_nowait(item)
+                except:
+                    pass
         
-        self.sensors[frame_id] = sensor_data
-        self.get_logger().info(f'Spawned sensor: {sensor_type} as {sensor_id} (frame: {frame_id})')
+        sensor_actor.listen(producer_callback)
     
-    # ==================== Sensor Callbacks ====================
+    # ==================== Time Utilities ====================
     
-    def rgb_callback(self, carla_image, sensor_data: dict):
-        """Process RGB camera data."""
+    def carla_timestamp_to_ros(self, carla_seconds: float) -> TimeMsg:
+        """Convert CARLA timestamp (seconds) to ROS Time message."""
+        sec = int(carla_seconds)
+        nanosec = int((carla_seconds - sec) * 1e9)
+        
+        time_msg = TimeMsg()
+        time_msg.sec = sec
+        time_msg.nanosec = nanosec
+        return time_msg
+    
+    def create_synchronized_header(self, frame_id: str, ros_time: TimeMsg) -> Header:
+        """Create a Header with synchronized timestamp."""
+        header = Header()
+        header.stamp = ros_time
+        header.frame_id = frame_id
+        return header
+    
+    # ==================== Main Tick-Wait-Publish Loop ====================
+    
+    def tick_wait_publish_loop(self):
+        """
+        Main synchronization loop: Tick-Wait-Publish.
+        
+        1. Apply vehicle control
+        2. Tick the world (advances simulation)
+        3. Wait for all sensor data matching current frame
+        4. Publish all ROS messages with synchronized timestamp
+        """
+        self.get_logger().info('Starting Tick-Wait-Publish loop')
+        
+        while self.running and rclpy.ok():
+            time_start = time.time()
+            try:
+                # ==================== 1. CONTROL ====================
+                if self.vehicle is not None and self.vehicle.is_alive:
+                    with self.control_lock:
+                        self.vehicle.apply_control(self.current_control)
+                
+                # ==================== 2. TICK ====================
+                self.current_frame = self.world.tick()
+                
+                # Get synchronized timestamp from world snapshot
+                snapshot = self.world.get_snapshot()
+                carla_time = snapshot.timestamp.elapsed_seconds
+                ros_time = self.carla_timestamp_to_ros(carla_time)
+                
+                # ==================== 3. PUBLISH CLOCK ====================
+                clock_msg = Clock()
+                clock_msg.clock = ros_time
+                self.clock_pub.publish(clock_msg)
+                
+                # ==================== 4. SYNC BLOCK - Wait for sensors ====================
+                time_start_wait = time.time()
+                sensor_data_packet = self.wait_for_sensors(self.current_frame)
+                self.get_logger().info(f'sensor data collection time: {time.time() - time_start_wait:.3f}s', throttle_duration_sec=10.0)
+                # ==================== 5. PUBLISH ====================
+                time_start_publish = time.time()
+                # Publish TF and Odometry first (they are always available)
+                self.publish_tf_synchronized(ros_time)
+                self.publish_odometry_synchronized(ros_time)
+                
+                # Publish sensor data with synchronized timestamp
+                self.publish_sensor_data(sensor_data_packet, ros_time)
+                self.get_logger().info(f'sensor data+odometry+tf publish time: {time.time() - time_start_publish:.3f}s', throttle_duration_sec=10.0)
+                self.get_logger().info(f'Tick time: {time.time() - time_start:.3f}s, Hz: {1.0 / (time.time() - time_start):.2f}, Frame: {self.current_frame}', throttle_duration_sec=10.0)
+            except Exception as e:
+                if self.running:
+                    self.get_logger().error(f'Error in tick loop: {e}')
+                    import traceback
+                    traceback.print_exc()
+    
+    def wait_for_sensors(self, target_frame: int) -> Dict[str, Any]:
+        """
+        Wait for all active sensors to return data matching target_frame.
+        
+        Uses drain logic: discard stale data (frame < target_frame),
+        accept matching data (frame == target_frame).
+        
+        Returns:
+            Dict mapping frame_id to raw CARLA sensor data
+        """
+        sensor_data = {}
+        wait_start = time.time()
+        deadline = wait_start + self.sensor_timeout
+        
+        # Track per-sensor wait times
+        sensor_wait_start = {frame_id: wait_start for frame_id in self.sensors.keys()}
+        sensor_wait_times = {}
+        
+        sensors_remaining = set(self.sensors.keys())
+        
+        while sensors_remaining and time.time() < deadline:
+            for frame_id in list(sensors_remaining):
+                queue = self.sensors[frame_id]['queue']
+                
+                try:
+                    # Non-blocking get with small timeout
+                    item: SensorQueueItem = queue.get(timeout=0.001)
+                    
+                    if item.frame < target_frame:
+                        # Stale data - discard and try again
+                        continue
+                    elif item.frame == target_frame:
+                        # Matching data - accept
+                        sensor_data[frame_id] = item.data
+                        sensor_wait_times[frame_id] = time.time() - sensor_wait_start[frame_id]
+                        sensors_remaining.discard(frame_id)
+                    else:
+                        # Future data (shouldn't happen in sync mode) - put back
+                        queue.put(item)
+                        
+                except Empty:
+                    continue
+        
+        # Log per-sensor wait times
+        if sensor_wait_times:
+            timing_str = ', '.join(f'{"/".join(fid.split("/")[-3:])}:{t*1000:.1f}ms' for fid, t in sorted(sensor_wait_times.items(), key=lambda x: -x[1]))
+            self.get_logger().info(f'Sensor wait times: {timing_str}', throttle_duration_sec=10.0)
+        
+        if sensors_remaining:
+            self.get_logger().warn(
+                f'Sensor timeout for frame {target_frame}: missing {sensors_remaining}'
+            )
+        
+        return sensor_data
+    
+    # ==================== Synchronized Publishing ====================
+    
+    def publish_tf_synchronized(self, ros_time: TimeMsg):
+        """Publish TF transform with synchronized timestamp."""
+        if self.vehicle is None or not self.vehicle.is_alive:
+            return
+        
+        transform = self.vehicle.get_transform()
+        
+        # Map -> ego_vehicle
+        tf_msg = TransformStamped()
+        tf_msg.header = self.create_synchronized_header('map', ros_time)
+        tf_msg.child_frame_id = 'ego_vehicle'
+        
+        # Position (flip Y for ROS)
+        tf_msg.transform.translation.x = transform.location.x
+        tf_msg.transform.translation.y = -transform.location.y
+        tf_msg.transform.translation.z = transform.location.z
+        
+        # Rotation (flip pitch and yaw for ROS)
+        roll = math.radians(transform.rotation.roll)
+        pitch = math.radians(transform.rotation.pitch)
+        yaw = math.radians(-transform.rotation.yaw)
+        tf_msg.transform.rotation = euler_to_quaternion(roll, pitch, yaw)
+        
+        self.tf_broadcaster.sendTransform(tf_msg)
+    
+    def publish_odometry_synchronized(self, ros_time: TimeMsg):
+        """Publish odometry with synchronized timestamp."""
+        if self.vehicle is None or not self.vehicle.is_alive:
+            return
+        
+        msg = carla_vehicle_to_odometry(self.vehicle, 'map', 'ego_vehicle')
+        msg.header.stamp = ros_time
+        self.odom_pub.publish(msg)
+    
+    def publish_sensor_data(self, sensor_data_packet: Dict[str, Any], ros_time: TimeMsg):
+        """
+        Process and publish all sensor data with synchronized timestamp.
+        
+        Uses ThreadPoolExecutor for parallel processing of camera/lidar data.
+        """
+        futures = []
+        
+        for frame_id, carla_data in sensor_data_packet.items():
+            if frame_id not in self.sensors:
+                continue
+            
+            sensor_info = self.sensors[frame_id]
+            sensor_type = sensor_info['type']
+            
+            # Submit heavy processing to thread pool
+            if 'sensor.camera' in sensor_type or 'sensor.lidar' in sensor_type:
+                future = self.publish_executor.submit(
+                    self._publish_sensor_threaded, frame_id, carla_data, sensor_info, sensor_type, ros_time
+                )
+                futures.append(future)
+            else:
+                # Light sensors (IMU, GNSS) - process inline
+                try:
+                    if sensor_type == 'sensor.other.gnss':
+                        self._publish_gnss(carla_data, sensor_info, ros_time)
+                    elif sensor_type == 'sensor.other.imu':
+                        self._publish_imu(carla_data, sensor_info, ros_time)
+                except Exception as e:
+                    self.get_logger().error(f'Error publishing {frame_id}: {e}')
+        
+        # Wait for all parallel tasks to complete
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                self.get_logger().error(f'Error in parallel publish: {e}')
+    
+    def _publish_sensor_threaded(self, frame_id: str, carla_data, sensor_info: dict, sensor_type: str, ros_time: TimeMsg):
+        """Thread-safe sensor publishing for heavy processing."""
+        try:
+            if 'sensor.camera.rgb' in sensor_type:
+                self._publish_rgb(carla_data, sensor_info, ros_time)
+            elif 'sensor.camera.depth' in sensor_type:
+                self._publish_depth(carla_data, sensor_info, ros_time)
+            elif 'sensor.camera.semantic_segmentation' in sensor_type:
+                self._publish_semantic(carla_data, sensor_info, ros_time)
+            elif sensor_type == 'sensor.lidar.ray_cast':
+                self._publish_lidar(carla_data, sensor_info, ros_time)
+            elif sensor_type == 'sensor.lidar.ray_cast_semantic':
+                self._publish_semantic_lidar(carla_data, sensor_info, ros_time)
+        except Exception as e:
+            self.get_logger().error(f'Error publishing {frame_id}: {e}')
+    
+    # ==================== Sensor Processing & Publishing ====================
+    
+    def _publish_rgb(self, carla_image, sensor_info: dict, ros_time: TimeMsg):
+        """Process and publish RGB camera data."""
         # Convert BGRA to RGB
         array = np.frombuffer(carla_image.raw_data, dtype=np.uint8)
         array = array.reshape((carla_image.height, carla_image.width, 4))
         rgb_array = array[:, :, :3][:, :, ::-1]  # BGRA -> RGB
         
-        # Use ROS time for TF synchronization
-        ros_stamp = self.get_clock().now().to_msg()
-        
-        # Create and publish Image message
+        # Create Image message
         msg = Image()
-        msg.header = create_header(sensor_data['frame_id'], carla_image.timestamp)
-        msg.header.stamp = ros_stamp
+        msg.header = self.create_synchronized_header(sensor_info['frame_id'], ros_time)
         msg.height = carla_image.height
         msg.width = carla_image.width
         msg.encoding = 'rgb8'
         msg.is_bigendian = False
         msg.step = carla_image.width * 3
-        msg.data = rgb_array.tobytes()
+        msg.data = np.ascontiguousarray(rgb_array).tobytes()
         
-        sensor_data['image_pub'].publish(msg)
+        sensor_info['image_pub'].publish(msg)
         
-        # Publish camera info
-        config = sensor_data['config']
-        info_msg = create_camera_info(
-            config.get('image_size_x', carla_image.width),
-            config.get('image_size_y', carla_image.height),
-            config.get('fov', 90.0),
-            sensor_data['frame_id'],
-            carla_image.timestamp
-        )
-        info_msg.header.stamp = ros_stamp
-        sensor_data['info_pub'].publish(info_msg)
+        # Use cached CameraInfo (only create once per sensor)
+        frame_id = sensor_info['frame_id']
+        if frame_id not in self.cached_camera_info:
+            config = sensor_info['config']
+            self.cached_camera_info[frame_id] = create_camera_info(
+                config.get('image_size_x', carla_image.width),
+                config.get('image_size_y', carla_image.height),
+                config.get('fov', 90.0),
+                frame_id,
+                0.0  # Timestamp will be overwritten
+            )
+        
+        info_msg = self.cached_camera_info[frame_id]
+        info_msg.header = self.create_synchronized_header(frame_id, ros_time)
+        sensor_info['info_pub'].publish(info_msg)
     
-    def depth_callback(self, carla_image, sensor_data: dict):
-        """Process depth camera data."""
-        # Convert to depth in meters
+    def _publish_depth(self, carla_image, sensor_info: dict, ros_time: TimeMsg):
+        """Process and publish depth camera data with optimized conversion."""
+        # Parse raw buffer once
         array = np.frombuffer(carla_image.raw_data, dtype=np.uint8)
         array = array.reshape((carla_image.height, carla_image.width, 4))
         
-        # CARLA depth encoding: depth = (R + G*256 + B*256*256) / (256^3 - 1) * 1000
-        normalized = (array[:, :, 2].astype(np.float32) + 
-                     array[:, :, 1].astype(np.float32) * 256.0 +
-                     array[:, :, 0].astype(np.float32) * 256.0 * 256.0)
-        normalized /= (256.0 * 256.0 * 256.0 - 1.0)
-        depth_meters = normalized * 1000.0  # Convert to meters
+        # Single-pass vectorized depth conversion (avoid 3 separate astype calls)
+        # Combine BGR channels into 24-bit depth value, convert to meters
+        depth_raw = array[:, :, :3].astype(np.float32)
+        depth_meters = (depth_raw[:, :, 2] + 
+                       depth_raw[:, :, 1] * 256.0 + 
+                       depth_raw[:, :, 0] * 65536.0) / 16777215.0 * 1000.0
         
-        # Use ROS time for TF synchronization
-        ros_stamp = self.get_clock().now().to_msg()
+        msg = carla_depth_to_ros(depth_meters, sensor_info['frame_id'], carla_image.timestamp)
+        msg.header = self.create_synchronized_header(sensor_info['frame_id'], ros_time)
+        sensor_info['image_pub'].publish(msg)
         
-        # Create and publish Image message (32FC1)
-        msg = carla_depth_to_ros(depth_meters, sensor_data['frame_id'], carla_image.timestamp)
-        msg.header.stamp = ros_stamp
-        sensor_data['image_pub'].publish(msg)
+        # Use cached CameraInfo
+        frame_id = sensor_info['frame_id']
+        if frame_id not in self.cached_camera_info:
+            config = sensor_info['config']
+            self.cached_camera_info[frame_id] = create_camera_info(
+                config.get('image_size_x', carla_image.width),
+                config.get('image_size_y', carla_image.height),
+                config.get('fov', 90.0),
+                frame_id,
+                0.0
+            )
         
-        # Publish camera info
-        config = sensor_data['config']
-        info_msg = create_camera_info(
-            config.get('image_size_x', carla_image.width),
-            config.get('image_size_y', carla_image.height),
-            config.get('fov', 90.0),
-            sensor_data['frame_id'],
-            carla_image.timestamp
-        )
-        info_msg.header.stamp = ros_stamp
-        sensor_data['info_pub'].publish(info_msg)
+        info_msg = self.cached_camera_info[frame_id]
+        info_msg.header = self.create_synchronized_header(frame_id, ros_time)
+        sensor_info['info_pub'].publish(info_msg)
     
-    def semantic_callback(self, carla_image, sensor_data: dict):
-        """Process semantic segmentation camera data."""
-        # Get semantic labels (red channel contains class ID)
+    def _publish_semantic(self, carla_image, sensor_info: dict, ros_time: TimeMsg):
+        """Process and publish semantic segmentation camera data."""
         array = np.frombuffer(carla_image.raw_data, dtype=np.uint8)
         array = array.reshape((carla_image.height, carla_image.width, 4))
         semantic_labels = array[:, :, 2]  # Red channel has class ID
         
-        # Use ROS time for TF synchronization
-        ros_stamp = self.get_clock().now().to_msg()
+        msg = carla_semantic_to_ros(semantic_labels, sensor_info['frame_id'], carla_image.timestamp)
+        msg.header = self.create_synchronized_header(sensor_info['frame_id'], ros_time)
+        sensor_info['image_pub'].publish(msg)
         
-        # Create and publish Image message (mono8)
-        msg = carla_semantic_to_ros(semantic_labels, sensor_data['frame_id'], carla_image.timestamp)
-        msg.header.stamp = ros_stamp
-        sensor_data['image_pub'].publish(msg)
+        # Use cached CameraInfo
+        frame_id = sensor_info['frame_id']
+        if frame_id not in self.cached_camera_info:
+            config = sensor_info['config']
+            self.cached_camera_info[frame_id] = create_camera_info(
+                config.get('image_size_x', carla_image.width),
+                config.get('image_size_y', carla_image.height),
+                config.get('fov', 90.0),
+                frame_id,
+                0.0
+            )
         
-        # Publish camera info
-        config = sensor_data['config']
-        info_msg = create_camera_info(
-            config.get('image_size_x', carla_image.width),
-            config.get('image_size_y', carla_image.height),
-            config.get('fov', 90.0),
-            sensor_data['frame_id'],
-            carla_image.timestamp
-        )
-        info_msg.header.stamp = ros_stamp
-        sensor_data['info_pub'].publish(info_msg)
+        info_msg = self.cached_camera_info[frame_id]
+        info_msg.header = self.create_synchronized_header(frame_id, ros_time)
+        sensor_info['info_pub'].publish(info_msg)
     
-    def lidar_callback(self, carla_lidar, sensor_data: dict):
-        """Process LiDAR point cloud data."""
-        t0 = time.perf_counter()
-
-        # Convert to numpy array (x, y, z, intensity)
-        # Use bytes() to ensure proper conversion like original carla-ros-bridge
-        lidar_data = np.frombuffer(bytes(carla_lidar.raw_data), dtype=np.float32)
+    def _publish_lidar(self, carla_lidar, sensor_info: dict, ros_time: TimeMsg):
+        """Process and publish LiDAR point cloud data."""
+        # Direct buffer access without bytes() copy
+        lidar_data = np.frombuffer(carla_lidar.raw_data, dtype=np.float32)
         lidar_data = lidar_data.reshape((-1, 4)).copy()
         
-        # CARLA LiDAR uses left-handed coordinate system, ROS uses right-handed
-        # We take the opposite of y axis
+        # CARLA LiDAR uses left-handed, ROS uses right-handed (flip Y)
         lidar_data[:, 1] *= -1
         
-        num_points = lidar_data.shape[0]
-
-        t1 = time.perf_counter()
-
-        # Create and publish PointCloud2 message with ROS time (for TF sync)
-        msg = carla_lidar_to_ros(lidar_data, sensor_data['frame_id'], carla_lidar.timestamp)
-        msg.header.stamp = self.get_clock().now().to_msg()
-        
-        t2 = time.perf_counter()
-
-        sensor_data['cloud_pub'].publish(msg)
-
-        t3 = time.perf_counter()
-        
-        # Log the results
-        prep_time = (t1 - t0) * 1000  # ms
-        conv_time = (t2 - t1) * 1000  # ms
-        pub_time  = (t3 - t2) * 1000  # ms
-        
-        # self.get_logger().info(
-        #     f'LiDAR Profiling: Points={num_points} | Prep={prep_time:.2f}ms | Conv={conv_time:.2f}ms | Publish (Overhead)={pub_time:.2f}ms'
-        # )
+        msg = carla_lidar_to_ros(lidar_data, sensor_info['frame_id'], carla_lidar.timestamp)
+        msg.header = self.create_synchronized_header(sensor_info['frame_id'], ros_time)
+        sensor_info['cloud_pub'].publish(msg)
     
-    def gnss_callback(self, carla_gnss, sensor_data: dict):
-        """Process GNSS data."""
+    def _publish_semantic_lidar(self, carla_lidar, sensor_info: dict, ros_time: TimeMsg):
+        """Process and publish semantic LiDAR point cloud data."""
+        semantic_dtype = np.dtype([
+            ('x', np.float32),
+            ('y', np.float32),
+            ('z', np.float32),
+            ('cos_inc_angle', np.float32),
+            ('object_idx', np.uint32),
+            ('object_tag', np.uint32),
+        ])
+
+        # Direct buffer access without bytes() copy
+        raw = np.frombuffer(carla_lidar.raw_data, dtype=semantic_dtype)
+        if raw.size == 0:
+            return
+
+        x = raw['x']
+        y = -raw['y']  # Flip Y for ROS
+        z = raw['z']
+        labels = raw['object_tag']
+
+        points = np.stack((x, y, z), axis=-1)
+
+        msg = carla_semantic_lidar_to_ros(points, labels, sensor_info['frame_id'], carla_lidar.timestamp)
+        msg.header = self.create_synchronized_header(sensor_info['frame_id'], ros_time)
+        sensor_info['cloud_pub'].publish(msg)
+    
+    def _publish_gnss(self, carla_gnss, sensor_info: dict, ros_time: TimeMsg):
+        """Process and publish GNSS data."""
         msg = NavSatFix()
-        msg.header = create_header(sensor_data['frame_id'], carla_gnss.timestamp)
+        msg.header = self.create_synchronized_header(sensor_info['frame_id'], ros_time)
         msg.latitude = carla_gnss.latitude
         msg.longitude = carla_gnss.longitude
         msg.altitude = carla_gnss.altitude
         msg.status.status = 0  # STATUS_FIX
         msg.status.service = 1  # SERVICE_GPS
-        sensor_data['gnss_pub'].publish(msg)
+        sensor_info['gnss_pub'].publish(msg)
     
-    def imu_callback(self, carla_imu, sensor_data: dict):
-        """Process IMU data."""
+    def _publish_imu(self, carla_imu, sensor_info: dict, ros_time: TimeMsg):
+        """Process and publish IMU data."""
         msg = Imu()
-        msg.header = create_header(sensor_data['frame_id'], carla_imu.timestamp)
+        msg.header = self.create_synchronized_header(sensor_info['frame_id'], ros_time)
         
-        # Linear acceleration
+        # Linear acceleration (flip Y)
         msg.linear_acceleration.x = carla_imu.accelerometer.x
-        msg.linear_acceleration.y = -carla_imu.accelerometer.y  # Flip Y
+        msg.linear_acceleration.y = -carla_imu.accelerometer.y
         msg.linear_acceleration.z = carla_imu.accelerometer.z
         
-        # Angular velocity
+        # Angular velocity (flip Y and Z)
         msg.angular_velocity.x = carla_imu.gyroscope.x
-        msg.angular_velocity.y = -carla_imu.gyroscope.y  # Flip Y
-        msg.angular_velocity.z = -carla_imu.gyroscope.z  # Flip Z
+        msg.angular_velocity.y = -carla_imu.gyroscope.y
+        msg.angular_velocity.z = -carla_imu.gyroscope.z
         
         # Orientation from compass
-        # CARLA compass is degrees from north, convert to quaternion
-        yaw = math.radians(-carla_imu.compass)  # Flip for ROS convention
+        yaw = math.radians(-carla_imu.compass)
         msg.orientation = euler_to_quaternion(0.0, 0.0, yaw)
         
-        sensor_data['imu_pub'].publish(msg)
+        sensor_info['imu_pub'].publish(msg)
     
-    # ==================== Control ====================
-    
-    def control_callback(self, msg: VehicleControl):
-        """Handle vehicle control commands."""
-        with self.control_lock:
-            self.current_control.throttle = max(0.0, min(1.0, msg.throttle))
-            self.current_control.brake = max(0.0, min(1.0, msg.brake))
-            self.current_control.steer = max(-1.0, min(1.0, -msg.steer))
-            self.current_control.hand_brake = msg.hand_brake
-            self.current_control.reverse = msg.reverse
-            self.current_control.manual_gear_shift = msg.manual_gear_shift
-            self.current_control.gear = msg.gear
-    
-    # ==================== Tick ====================
-    
-    def tick_callback(self):
-        """Main tick callback for synchronous mode."""
-        if self.vehicle is None or not self.vehicle.is_alive:
-            return
-        
-        # Apply control
-        with self.control_lock:
-            self.vehicle.apply_control(self.current_control)
-        
-        # Tick the world
-        self.world.tick()
-        
-        # Publish odometry and TF
-        self.publish_odometry()
-        self.publish_tf()
-    
-    def publish_odometry(self):
-        """Publish vehicle odometry."""
-        if self.vehicle is None or not self.vehicle.is_alive:
-            return
-        
-        timestamp = self.world.get_snapshot().timestamp.elapsed_seconds
-        
-        msg = carla_vehicle_to_odometry(self.vehicle, 'map', 'ego_vehicle')
-        msg.header.stamp = self.get_clock().now().to_msg()
-        self.odom_pub.publish(msg)
-        
-        # Also publish TF in async mode
-        self.publish_tf()
+    # ==================== Static TF ====================
     
     def publish_static_sensor_tfs(self):
-        """Publish static transforms for all sensors (called once after spawning)."""
+        """Publish static transforms for all sensors (called once)."""
         static_transforms = []
+        ros_time = self.carla_timestamp_to_ros(0.0)
         
         for sensor_id, sensor_data in self.sensors.items():
             rel_tf = TransformStamped()
-            rel_tf.header.stamp = self.get_clock().now().to_msg()
-            rel_tf.header.frame_id = 'ego_vehicle'
-            rel_tf.child_frame_id = sensor_data['frame_id']  # Use the full frame path
+            rel_tf.header = self.create_synchronized_header('ego_vehicle', ros_time)
+            rel_tf.child_frame_id = sensor_data['frame_id']
             
-            # Use the spawn point from config for relative position
+            # Use spawn point from config for relative position
             sp = sensor_data['config'].get('spawn_point', {})
             rel_tf.transform.translation.x = sp.get('x', 0.0)
             rel_tf.transform.translation.y = -sp.get('y', 0.0)  # Flip Y
@@ -574,24 +817,31 @@ class CarlaBridgeNode(Node):
             self.static_tf_broadcaster.sendTransform(static_transforms)
             self.get_logger().info(f'Published {len(static_transforms)} static sensor transforms')
     
-    def publish_tf(self):
-        """Publish TF transforms (only dynamic transforms like map->ego_vehicle)."""
-        if self.vehicle is None or not self.vehicle.is_alive:
-            return
-        
-        timestamp = self.world.get_snapshot().timestamp.elapsed_seconds
-        transform = self.vehicle.get_transform()
-        
-        # Map -> ego_vehicle (dynamic - vehicle moves)
-        tf_msg = carla_transform_to_ros(transform, 'map', 'ego_vehicle', timestamp)
-        tf_msg.header.stamp = self.get_clock().now().to_msg()
-        self.tf_broadcaster.sendTransform(tf_msg)
+    # ==================== Control Callback ====================
+    
+    def control_callback(self, msg: VehicleControl):
+        """Handle vehicle control commands."""
+        with self.control_lock:
+            self.current_control.throttle = max(0.0, min(1.0, msg.throttle))
+            self.current_control.brake = max(0.0, min(1.0, msg.brake))
+            self.current_control.steer = max(-1.0, min(1.0, -msg.steer))
+            self.current_control.hand_brake = msg.hand_brake
+            self.current_control.reverse = msg.reverse
+            self.current_control.manual_gear_shift = msg.manual_gear_shift
+            self.current_control.gear = msg.gear
     
     # ==================== Cleanup ====================
     
     def destroy_node(self):
         """Clean up CARLA actors before shutting down."""
         self.get_logger().info('Shutting down CARLA Bridge...')
+        
+        # Stop the main loop
+        self.running = False
+        
+        # Wait for thread to finish
+        if hasattr(self, 'main_loop_thread') and self.main_loop_thread.is_alive():
+            self.main_loop_thread.join(timeout=2.0)
         
         # Destroy sensors
         for sensor_id, sensor_data in self.sensors.items():
@@ -606,7 +856,7 @@ class CarlaBridgeNode(Node):
             self.get_logger().info('Destroyed vehicle')
         
         # Reset world settings
-        if self.world is not None and self.synchronous_mode:
+        if self.world is not None:
             settings = self.world.get_settings()
             settings.synchronous_mode = False
             self.world.apply_settings(settings)

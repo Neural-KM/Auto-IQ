@@ -22,12 +22,12 @@ from typing import List, Tuple, Optional
 # Import common types from autoiq_common
 from autoiq_common.types import VehicleState, TrajectoryPoint
 
-from planning.frenet_utils import (
+from planning.utils.frenet_utils import (
     WaypointConverter, 
     QuinticPolynomial, 
     QuarticPolynomial,
 )
-from planning.behavior_planner import BehaviorState, BehaviorOutput
+from planning.core.behavior_planner import BehaviorState, BehaviorOutput
 
 
 # VehicleState and TrajectoryPoint are now imported from autoiq_common.types

@@ -74,6 +74,7 @@ def generate_launch_description():
         name='carla_bridge',
         output='screen',
         parameters=[{
+            'use_sim_time': True,
             'host': LaunchConfiguration('host'),
             'port': LaunchConfiguration('port'),
             'timeout': LaunchConfiguration('timeout'),

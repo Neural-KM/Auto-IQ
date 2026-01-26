@@ -10,3 +10,4 @@ networkx
 empy
 catkin_pkg
 lark
+scikit-image

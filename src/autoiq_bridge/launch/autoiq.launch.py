@@ -23,6 +23,7 @@ def generate_launch_description():
     planning_pkg = get_package_share_directory('planning')
     control_pkg = get_package_share_directory('control')
     visualization_pkg = get_package_share_directory('visualization')
+    mapping_pkg = get_package_share_directory('mapping')
     
     # Config files
     rviz_config = os.path.join(autoiq_bridge_pkg, 'config', 'autoiq.rviz')
@@ -35,6 +36,7 @@ def generate_launch_description():
         DeclareLaunchArgument('enable_control', default_value='true'),
         DeclareLaunchArgument('enable_visualization', default_value='true'),
         DeclareLaunchArgument('enable_rviz', default_value='true'),
+        DeclareLaunchArgument('enable_mapping', default_value='true'),
     ]
     
     # ==================== Include Launch Files ====================
@@ -88,6 +90,14 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('enable_rviz')),
         arguments=['-d', rviz_config] if os.path.exists(rviz_config) else []
     )
+
+    # Mapping
+    mapping_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(mapping_pkg, 'launch', 'local_costmap.launch.py')
+        ),
+        condition=IfCondition(LaunchConfiguration('enable_mapping')),
+    )
     
     return LaunchDescription(
         args + [
@@ -97,5 +107,6 @@ def generate_launch_description():
             control_launch,
             visualization_launch,
             rviz_node,
+            mapping_launch
         ]
     )

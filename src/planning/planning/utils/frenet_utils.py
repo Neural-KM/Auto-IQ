@@ -43,10 +43,12 @@ class QuarticPolynomial:
             self.a4 = 0
 
     def calc_point(self, t):
+        """Evaluate polynomial at scalar or array t."""
         return self.a0 + self.a1 * t + self.a2 * t ** 2 + \
                self.a3 * t ** 3 + self.a4 * t ** 4
 
     def calc_first_derivative(self, t):
+        """Evaluate first derivative at scalar or array t."""
         return self.a1 + 2 * self.a2 * t + \
                3 * self.a3 * t ** 2 + 4 * self.a4 * t ** 3
 
@@ -78,21 +80,18 @@ class QuinticPolynomial:
                       vxe - self.a1 - 2 * self.a2 * time,
                       axe - 2 * self.a2])
         
-        try:
-            x = np.linalg.solve(A, b)
-            self.a3 = x[0]
-            self.a4 = x[1]
-            self.a5 = x[2]
-        except np.linalg.LinAlgError:
-            self.a3 = 0
-            self.a4 = 0
-            self.a5 = 0
+        x = np.linalg.solve(A, b)
+        self.a3 = x[0]
+        self.a4 = x[1]
+        self.a5 = x[2]
 
     def calc_point(self, t):
+        """Evaluate polynomial at scalar or array t."""
         return self.a0 + self.a1 * t + self.a2 * t ** 2 + \
                self.a3 * t ** 3 + self.a4 * t ** 4 + self.a5 * t ** 5
 
     def calc_first_derivative(self, t):
+        """Evaluate first derivative at scalar or array t."""
         return self.a1 + 2 * self.a2 * t + \
                3 * self.a3 * t ** 2 + 4 * self.a4 * t ** 3 + 5 * self.a5 * t ** 4
 
@@ -242,9 +241,7 @@ class WaypointConverter:
         """
         if len(self.wx) == 0:
             return 0.0, 0.0
-            
-        if self.spline is None:
-            return self._xy_to_frenet_linear(x, y)
+
         
         # Find closest point using search + refinement
         s, d = self._xy_to_frenet_spline(x, y)
@@ -329,43 +326,6 @@ class WaypointConverter:
         d = -math.sin(yaw) * dx + math.cos(yaw) * dy
         
         return s, d
-    
-    def _xy_to_frenet_linear(self, x, y):
-        """Fallback linear interpolation for short paths."""
-        # Find closest segment
-        min_dist = float('inf')
-        best_s = 0
-        best_d = 0
-        
-        for i in range(len(self.wx) - 1):
-            x0, y0 = self.wx[i], self.wy[i]
-            x1, y1 = self.wx[i+1], self.wy[i+1]
-            
-            # Project onto segment
-            dx = x1 - x0
-            dy = y1 - y0
-            seg_len_sq = dx*dx + dy*dy
-            
-            if seg_len_sq < 1e-6:
-                continue
-                
-            t = max(0, min(1, ((x - x0)*dx + (y - y0)*dy) / seg_len_sq))
-            
-            proj_x = x0 + t * dx
-            proj_y = y0 + t * dy
-            
-            dist = math.hypot(x - proj_x, y - proj_y)
-            
-            if dist < min_dist:
-                min_dist = dist
-                seg_len = math.sqrt(seg_len_sq)
-                best_s = self.s_values[i] + t * seg_len
-                
-                # Signed distance
-                cross = dx * (y - y0) - dy * (x - x0)
-                best_d = math.copysign(dist, cross)
-        
-        return best_s, best_d
 
     def frenet_to_xy(self, s, d):
         """
@@ -378,8 +338,7 @@ class WaypointConverter:
         Returns:
             (x, y, yaw): Cartesian position and heading
         """
-        if self.spline is None:
-            return self._frenet_to_xy_linear(s, d)
+
         
         # Clamp s to valid range
         s = np.clip(s, 0, self.spline.get_total_length())
@@ -398,37 +357,41 @@ class WaypointConverter:
         
         return x, y, yaw
     
-    def _frenet_to_xy_linear(self, s, d):
-        """Fallback linear interpolation for short paths."""
-        # Find segment
-        idx = bisect.bisect_right(self.s_values, s) - 1
-        idx = max(0, min(idx, len(self.s_values) - 2))
+    def frenet_to_xy_vectorized(self, s_arr: np.ndarray, d_arr: np.ndarray):
+        """
+        Vectorized conversion from Frenet (s, d) to Cartesian (x, y, yaw).
         
-        x0, y0 = self.wx[idx], self.wy[idx]
-        x1, y1 = self.wx[idx+1], self.wy[idx+1]
-        s0, s1 = self.s_values[idx], self.s_values[idx+1]
+        Uses direct spline interpolation for efficiency instead of per-point calls.
         
-        # Interpolation ratio
-        if s1 - s0 < 1e-6:
-            t = 0
-        else:
-            t = (s - s0) / (s1 - s0)
+        Args:
+            s_arr: 1D array of arc lengths
+            d_arr: 1D array of lateral offsets
+            
+        Returns:
+            Tuple of (x_arr, y_arr, yaw_arr) as numpy arrays
+        """
+        # Clamp s to valid range
+        s_max = self.spline.get_total_length()
+        s_clamped = np.clip(s_arr, 0, s_max)
         
-        # Reference point
-        rx = x0 + t * (x1 - x0)
-        ry = y0 + t * (y1 - y0)
+        # Evaluate spline at all s values (scipy splines are vectorized)
+        rx = self.spline.sx(s_clamped)
+        ry = self.spline.sy(s_clamped)
         
-        # Heading
-        yaw = math.atan2(y1 - y0, x1 - x0)
+        # Get derivatives for yaw calculation
+        dx_ds = self.spline.sx(s_clamped, 1)
+        dy_ds = self.spline.sy(s_clamped, 1)
+        yaw_arr = np.arctan2(dy_ds, dx_ds)
         
-        # Normal and offset
-        nx = -math.sin(yaw)
-        ny = math.cos(yaw)
+        # Normal vector (perpendicular to tangent, pointing left)
+        sin_yaw = np.sin(yaw_arr)
+        cos_yaw = np.cos(yaw_arr)
         
-        x = rx + d * nx
-        y = ry + d * ny
+        # Apply lateral offset: x = rx - d * sin(yaw), y = ry + d * cos(yaw)
+        x_arr = rx - d_arr * sin_yaw
+        y_arr = ry + d_arr * cos_yaw
         
-        return x, y, yaw
+        return x_arr, y_arr, yaw_arr
     
     def reset_filter(self):
         """Reset the internal filter state."""

@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
             'mpc_node = control.nodes.mpc_node:main',
             'pure_pursuit_node = control.nodes.pure_pursuit_node:main',
+            'keyboard_teleop_node = control.nodes.keyboard_teleop_node:main',
         ],
     },
 )

@@ -1,0 +1,35 @@
+# WITHOUT JIT
+[local_costmap_node-1] [INFO] [1769286126.734092377] [local_costmap_node]: =========CALLBACK START==========
+[local_costmap_node-1] [INFO] [1769286126.734578606] [local_costmap_node]: Grid roll time: 0.0 ms
+[local_costmap_node-1] [INFO] [1769286126.735114724] [local_costmap_node]: Point cloud parse time: 0.2 ms
+[local_costmap_node-1] [INFO] [1769286126.735899396] [local_costmap_node]: Point cloud transform time: 0.4 ms
+[local_costmap_node-1] [INFO] [1769286126.736777762] [local_costmap_node]: Starting Costmap Update
+[local_costmap_node-1] [INFO] [1769286126.737848899] [local_costmap_node]: Raycast prep time: 0.7 ms
+[local_costmap_node-1] [INFO] [1769286126.748340449] [local_costmap_node]: Shadow buffer time: 10.2 ms
+[local_costmap_node-1] [INFO] [1769286126.761621148] [local_costmap_node]: Deduplication time: 12.7 ms
+[local_costmap_node-1] [INFO] [1769286126.777975295] [local_costmap_node]: Shadow filter time: 15.9 ms
+[local_costmap_node-1] [INFO] [1769286126.889968651] [local_costmap_node]: Raycast time: 111.1 ms
+[local_costmap_node-1] [INFO] [1769286126.913582142] [local_costmap_node]: Log-odds update time: 23.1 ms
+[local_costmap_node-1] [INFO] [1769286126.914119621] [local_costmap_node]: Costmap update time: 177.3 ms
+[local_costmap_node-1] [INFO] [1769286126.915402765] [local_costmap_node]: Pointcloud callback execution time: 180.9ms (41941 points)
+[local_costmap_node-1] [INFO] [1769286126.915695583] [local_costmap_node]: =========CALLBACK END==========
+
+# WITH JIT 
+[local_costmap_node-1] [INFO] [1769286177.082012273] [local_costmap_node]: =========CALLBACK END==========
+[local_costmap_node-1] [INFO] [1769286177.088074160] [local_costmap_node]: =========CALLBACK START==========
+[local_costmap_node-1] [INFO] [1769286177.088485019] [local_costmap_node]: Grid roll time: 0.0 ms
+[local_costmap_node-1] [INFO] [1769286177.089014118] [local_costmap_node]: Point cloud parse time: 0.2 ms
+[local_costmap_node-1] [INFO] [1769286177.089740989] [local_costmap_node]: Point cloud transform time: 0.3 ms
+[local_costmap_node-1] [INFO] [1769286177.090698671] [local_costmap_node]: Starting Costmap Update
+[local_costmap_node-1] [INFO] [1769286177.091499582] [local_costmap_node]: Raycast prep time: 0.6 ms
+[local_costmap_node-1] [INFO] [1769286177.091848082] [local_costmap_node]: Shadow buffer time: 0.1 ms
+[local_costmap_node-1] [INFO] [1769286177.103129725] [local_costmap_node]: Deduplication time: 10.9 ms
+[local_costmap_node-1] [INFO] [1769286177.103656291] [local_costmap_node]: Shadow filter time: 0.2 ms
+[local_costmap_node-1] [INFO] [1769286177.106276768] [local_costmap_node]: Raycast time: 2.0 ms
+[local_costmap_node-1] [INFO] [1769286177.129108226] [local_costmap_node]: Log-odds update time: 22.1 ms
+[local_costmap_node-1] [INFO] [1769286177.129780944] [local_costmap_node]: Costmap update time: 39.0 ms
+[local_costmap_node-1] [INFO] [1769286177.131202954] [local_costmap_node]: Pointcloud callback execution time: 42.7ms (41941 points)
+[local_costmap_node-1] [INFO] [1769286177.131566627] [local_costmap_node]: =========CALLBACK END==========
+[local_costmap_node-1] [INFO] [1769286177.145457795] [local_costmap_node]: =========CALLBACK START==========
+
+

@@ -37,8 +37,8 @@ from typing import List
 
 import carla
 
-from planning.global_planner import GlobalPlanner, RoadOption
-from planning.behavior_planner import (
+from planning.core.global_planner import GlobalPlanner, RoadOption
+from planning.core.behavior_planner import (
     BehaviorPlanner,
     BehaviorPlannerConfig,
     BehaviorState,
@@ -46,7 +46,7 @@ from planning.behavior_planner import (
     LaneAvailability,
 )
 
-from planning.motion_planner import (
+from planning.core.motion_planner import (
     MotionPlanner, 
     MotionPlannerConfig,
 )
@@ -95,6 +95,7 @@ class PlanningNode(Node):
         self.lane_change_speed_factor = self.get_parameter('lane_change_speed_factor').value
         self.lane_change_time = self.get_parameter('lane_change_time').value
         self.sampling_resolution = self.get_parameter('sampling_resolution').value
+        
         
         # ==================== Connect to CARLA ====================
         self.get_logger().info(f'Connecting to CARLA at {carla_host}:{carla_port}...')

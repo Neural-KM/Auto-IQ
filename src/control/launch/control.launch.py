@@ -12,7 +12,7 @@ def generate_launch_description():
         DeclareLaunchArgument('carla_host', default_value='localhost'),
         DeclareLaunchArgument('carla_port', default_value='2000'),
         DeclareLaunchArgument('carla_timeout', default_value='10.0'),
-        DeclareLaunchArgument('controller', default_value='mpc',
+        DeclareLaunchArgument('controller', default_value='pure_pursuit',
                               description="'mpc' or 'pure_pursuit'"),
         
         # MPC Node
@@ -25,6 +25,7 @@ def generate_launch_description():
                 PythonExpression(["'", LaunchConfiguration('controller'), "' == 'mpc'"])
             ),
             parameters=[{
+                'use_sim_time': True,
                 'carla_host': LaunchConfiguration('carla_host'),
                 'carla_port': LaunchConfiguration('carla_port'),
                 'carla_timeout': LaunchConfiguration('carla_timeout'),
@@ -41,6 +42,7 @@ def generate_launch_description():
                 PythonExpression(["'", LaunchConfiguration('controller'), "' == 'pure_pursuit'"])
             ),
             parameters=[{
+                'use_sim_time': True,
                 'carla_host': LaunchConfiguration('carla_host'),
                 'carla_port': LaunchConfiguration('carla_port'),
                 'carla_timeout': LaunchConfiguration('carla_timeout'),
