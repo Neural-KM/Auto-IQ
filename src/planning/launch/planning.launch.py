@@ -14,7 +14,7 @@ def generate_launch_description():
         DeclareLaunchArgument('target_speed', default_value='30.0'),
         DeclareLaunchArgument('use_ground_truth', default_value='true'),
         DeclareLaunchArgument('planner_executable', default_value='planning_sampling_based_node'),
-        
+        DeclareLaunchArgument('costmap_topic', default_value='/mapping/ipm_costmap'),
         Node(
             package='planning',
             executable=LaunchConfiguration('planner_executable'),
@@ -27,6 +27,7 @@ def generate_launch_description():
                 'carla_timeout': LaunchConfiguration('carla_timeout'),
                 'target_speed': LaunchConfiguration('target_speed'),
                 'use_ground_truth': LaunchConfiguration('use_ground_truth'),
+                'costmap_topic': LaunchConfiguration('costmap_topic'),
             }]
         ),
     ])
