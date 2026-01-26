@@ -38,7 +38,10 @@ import time
 
 # Import semantic labels from perception module (CARLA convention)
 from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME, colorize_mask
-from mapping.utils.ipm_funcs import reverse_project_grid, apply_column_drop_skirt
+from mapping.utils.ipm_funcs import (
+    reverse_project_grid, 
+    apply_column_drop_skirt)
+from mapping.utils.geometry import mark_ego_footprint, mark_circular_clear_zone
 # ================= CONFIGURATION =================
 ROAD_LABEL_ID = SEMANTIC_BY_NAME['road']           # 1 in CARLA
 ROAD_LINE_LABEL_ID = SEMANTIC_BY_NAME['road_line'] # 24 in CARLA
@@ -52,7 +55,6 @@ UNKNOWN = -1
 FREE = 0
 OCCUPIED = 100
 
-
 class InversePerspectiveMapperNode2(Node):
     """
     ROS2 Node for generating occupancy grid using Reverse Projection IPM.
@@ -64,6 +66,8 @@ class InversePerspectiveMapperNode2(Node):
     1) The road below a car is seen as drivable because 
         semantics and reverse IPM are doing "too well".
         Handling this by vertically diluting the obstacle before IPM
+    2) Marking the space blocked by hood as free which should be actually be handled by a another camera in the front
+
     """
     
     def __init__(self):
@@ -83,6 +87,12 @@ class InversePerspectiveMapperNode2(Node):
         # Morphology parameters (in cells)
         self.declare_parameter('morphology_iterations', 2)  # Dilation then equal erosion (closing)
         
+        # Ego vehicle footprint parameters (meters)
+        self.declare_parameter('vehicle_length', 3)
+        self.declare_parameter('vehicle_width', 1.5)
+        self.declare_parameter('rear_to_base_link', 1.7)  # Distance from base_link to vehicle center
+        self.declare_parameter('clear_zone_radius', 5.0)  # Circular free zone around vehicle (meters)
+        
         # Get parameter values
         semantic_topic = self.get_parameter('semantic_topic').value
         camera_info_topic = self.get_parameter('camera_info_topic').value
@@ -93,6 +103,10 @@ class InversePerspectiveMapperNode2(Node):
         self.grid_size = self.get_parameter('grid_size').value
         self.resolution = self.get_parameter('resolution').value
         self.morphology_iterations = self.get_parameter('morphology_iterations').value
+        self.vehicle_length = self.get_parameter('vehicle_length').value
+        self.vehicle_width = self.get_parameter('vehicle_width').value
+        self.rear_to_base_link = self.get_parameter('rear_to_base_link').value
+        self.clear_zone_radius = self.get_parameter('clear_zone_radius').value
         
         # Derive grid cells from size and resolution
         self.grid_cells = int(self.grid_size / self.resolution)
@@ -240,9 +254,13 @@ class InversePerspectiveMapperNode2(Node):
         fx, fy = self.K[0, 0], self.K[1, 1]
         cx, cy = self.K[0, 2], self.K[1, 2]
         
-        # 4. Apply column drop skirt to semantic image
-        semantic_img = apply_column_drop_skirt(semantic_img, obstacle_ids=list(VEHICLE_LABEL_IDS), drop_pixels=5, hood_mask_rows=135)
+        # 4. Apply column drop skirt to semantic image to avoid detecting drivable area under the car
+        hood_mask_rows = 135  # Rows to mask at bottom of image (camera+position-specific)
+        semantic_img = apply_column_drop_skirt(semantic_img, obstacle_ids=list(VEHICLE_LABEL_IDS), drop_pixels=5, hood_mask_rows=hood_mask_rows)
+        
+        # Create debug image after drop skirt
         colorized_dropped = colorize_mask(semantic_img)
+        colorized_dropped[-hood_mask_rows:, :] = [128, 128, 128]  # Gray out hood-masked area
         self.debug_image_pub.publish(Image(
             header=msg.header,
             height=colorized_dropped.shape[0],
@@ -274,8 +292,27 @@ class InversePerspectiveMapperNode2(Node):
         # 5. Apply morphological operations on obstacles
         grid = self._apply_morphology(grid)
         
-        # 6. Publish OccupancyGrid
-        self._publish_grid(grid, msg.header.stamp)
+        # # 6. Mark ego vehicle footprint as FREE
+        # grid = mark_ego_footprint(
+        #     grid=grid,
+        #     resolution=self.resolution,
+        #     vehicle_length=self.vehicle_length,
+        #     vehicle_width=self.vehicle_width,
+        #     rear_to_base=self.rear_to_base_link,
+        #     FREE=FREE
+        # )
+        
+        # 7. Mark circular clear zone around vehicle
+        if self.clear_zone_radius > 0:
+            grid = mark_circular_clear_zone(
+                grid=grid,
+                radius=self.clear_zone_radius,
+                resolution=self.resolution,
+                FREE=FREE
+            )
+        
+        # 8. Publish OccupancyGrid
+        self._publish_grid(grid=grid, stamp=msg.header.stamp)
         
         t_end = time.perf_counter()
         
