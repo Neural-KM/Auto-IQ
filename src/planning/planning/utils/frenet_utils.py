@@ -43,10 +43,12 @@ class QuarticPolynomial:
             self.a4 = 0
 
     def calc_point(self, t):
+        """Evaluate polynomial at scalar or array t."""
         return self.a0 + self.a1 * t + self.a2 * t ** 2 + \
                self.a3 * t ** 3 + self.a4 * t ** 4
 
     def calc_first_derivative(self, t):
+        """Evaluate first derivative at scalar or array t."""
         return self.a1 + 2 * self.a2 * t + \
                3 * self.a3 * t ** 2 + 4 * self.a4 * t ** 3
 
@@ -78,21 +80,18 @@ class QuinticPolynomial:
                       vxe - self.a1 - 2 * self.a2 * time,
                       axe - 2 * self.a2])
         
-        try:
-            x = np.linalg.solve(A, b)
-            self.a3 = x[0]
-            self.a4 = x[1]
-            self.a5 = x[2]
-        except np.linalg.LinAlgError:
-            self.a3 = 0
-            self.a4 = 0
-            self.a5 = 0
+        x = np.linalg.solve(A, b)
+        self.a3 = x[0]
+        self.a4 = x[1]
+        self.a5 = x[2]
 
     def calc_point(self, t):
+        """Evaluate polynomial at scalar or array t."""
         return self.a0 + self.a1 * t + self.a2 * t ** 2 + \
                self.a3 * t ** 3 + self.a4 * t ** 4 + self.a5 * t ** 5
 
     def calc_first_derivative(self, t):
+        """Evaluate first derivative at scalar or array t."""
         return self.a1 + 2 * self.a2 * t + \
                3 * self.a3 * t ** 2 + 4 * self.a4 * t ** 3 + 5 * self.a5 * t ** 4
 
@@ -357,6 +356,42 @@ class WaypointConverter:
         y = ry + d * ny
         
         return x, y, yaw
+    
+    def frenet_to_xy_vectorized(self, s_arr: np.ndarray, d_arr: np.ndarray):
+        """
+        Vectorized conversion from Frenet (s, d) to Cartesian (x, y, yaw).
+        
+        Uses direct spline interpolation for efficiency instead of per-point calls.
+        
+        Args:
+            s_arr: 1D array of arc lengths
+            d_arr: 1D array of lateral offsets
+            
+        Returns:
+            Tuple of (x_arr, y_arr, yaw_arr) as numpy arrays
+        """
+        # Clamp s to valid range
+        s_max = self.spline.get_total_length()
+        s_clamped = np.clip(s_arr, 0, s_max)
+        
+        # Evaluate spline at all s values (scipy splines are vectorized)
+        rx = self.spline.sx(s_clamped)
+        ry = self.spline.sy(s_clamped)
+        
+        # Get derivatives for yaw calculation
+        dx_ds = self.spline.sx(s_clamped, 1)
+        dy_ds = self.spline.sy(s_clamped, 1)
+        yaw_arr = np.arctan2(dy_ds, dx_ds)
+        
+        # Normal vector (perpendicular to tangent, pointing left)
+        sin_yaw = np.sin(yaw_arr)
+        cos_yaw = np.cos(yaw_arr)
+        
+        # Apply lateral offset: x = rx - d * sin(yaw), y = ry + d * cos(yaw)
+        x_arr = rx - d_arr * sin_yaw
+        y_arr = ry + d_arr * cos_yaw
+        
+        return x_arr, y_arr, yaw_arr
     
     def reset_filter(self):
         """Reset the internal filter state."""

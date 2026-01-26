@@ -1,0 +1,15 @@
+# Before vectorization
+[planning_sampling_based_node-4] [INFO] [1769461537.076961930] [PlannerNode]: Planning Time: 26.6 ms
+[planning_sampling_based_node-4] [INFO] [1769461537.198389638] [PlannerNode]: Planning Time: 30.4 ms
+[planning_sampling_based_node-4] [INFO] [1769461537.300249211] [PlannerNode]: Planning Time: 26.2 ms
+[planning_sampling_based_node-4] [INFO] [1769461537.414076931] [PlannerNode]: Planning Time: 28.3 ms
+[planning_sampling_based_node-4] [INFO] [1769461537.519850973] [PlannerNode]: Planning Time: 30.3 ms
+[planning_sampling_based_node-4] [INFO] [1769461537.628415794] [Pla
+
+#  After vectorization
+[planning_sampling_based_node-4] [INFO] [1769463667.602643234] [PlannerNode]: Planning Time: 7.0 ms
+[planning_sampling_based_node-4] [INFO] [1769463667.709122954] [PlannerNode]: Planning Time: 4.0 ms
+[inverse_perspective_mapper_node_v2-9] [INFO] [1769463667.756574652] [local_costmap_node]: IPM V2: 17.0ms | Free: 4723, Occupied: 5417, Unknown: 29860
+[planning_sampling_based_node-4] [INFO] [1769463667.817407147] [PlannerNode]: Planning Time: 4.3 ms
+[planning_sampling_based_node-4] [INFO] [1769463667.925096418] [PlannerNode]: Planning Time: 5.1 ms
+[planning_sampling_based_node-4] [INFO] [1769463668.039673228] [PlannerNode]: Planning Time: 4.6 ms
