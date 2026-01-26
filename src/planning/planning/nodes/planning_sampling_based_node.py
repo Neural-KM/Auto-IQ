@@ -102,17 +102,11 @@ class PlanningNode(Node):
 
     def _inflate_to_cspace(self, grid: np.ndarray, radius: float, resolution: float) -> np.ndarray:
         """
-        Inflate obstacles by vehicle radius to create configuration space.
+        Inflate obstacles to create configuration space.
         
-        This allows the planner to treat the vehicle as a point.
-        
-        Args:
-            grid: Occupancy grid (values 0-100, -1 for unknown)
-            radius: Vehicle radius in meters
-            resolution: Grid cell size in meters
-            
-        Returns:
-            Inflated occupancy grid
+        Color Mapping for RViz 'Costmap' Scheme:
+        - 100: Lethal Obstacle (Original) -> Purple
+        - 99:  Inscribed Radius (Inflation) -> Cyan
         """
         # Calculate kernel radius in cells
         radius_cells = int(np.ceil(radius / resolution))
@@ -120,19 +114,25 @@ class PlanningNode(Node):
             return grid
         
         # Create circular structuring element
-        kernel_size = 2 * radius_cells + 1
         y, x = np.ogrid[-radius_cells:radius_cells+1, -radius_cells:radius_cells+1]
         circular_kernel = (x**2 + y**2) <= radius_cells**2
         
         # Create binary obstacle mask (occupied cells)
-        obstacle_mask = grid > 50  # Threshold for obstacles
+        obstacle_mask = grid > 50
         
-        # Dilate obstacles
+        # Dilate obstacles to create the full C-space
         inflated_mask = binary_dilation(obstacle_mask, structure=circular_kernel)
         
-        # Apply inflation to grid: set dilated cells to occupied (100)
         result = grid.copy()
-        result[inflated_mask & (grid <= 50)] = 100
+        
+        # 1. Mark the "Halo" (Inflation) as 99 (Cyan)
+        # These are cells that are in the dilated mask but NOT in the original mask
+        halo_mask = inflated_mask & (~obstacle_mask)
+        result[halo_mask] = 99
+        
+        # 2. Ensure Original Obstacles are 100 (Purple)
+        # This overwrites any 99s that might have overlapped (though logically disjoint here)
+        result[obstacle_mask] = 100
         
         return result
 
