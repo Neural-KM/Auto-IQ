@@ -11,13 +11,14 @@ def generate_launch_description():
         DeclareLaunchArgument('carla_host', default_value='localhost'),
         DeclareLaunchArgument('carla_port', default_value='2000'),
         DeclareLaunchArgument('carla_timeout', default_value='10.0'),
-        DeclareLaunchArgument('target_speed', default_value='40.0'),
+        DeclareLaunchArgument('target_speed', default_value='30.0'),
         DeclareLaunchArgument('use_ground_truth', default_value='true'),
+        DeclareLaunchArgument('planner_executable', default_value='planning_sampling_based_node'),
         
         Node(
             package='planning',
-            executable='planning_node',
-            name='planning_node',
+            executable=LaunchConfiguration('planner_executable'),
+            name='PlannerNode',
             output='screen',
             parameters=[{
                 'use_sim_time': True,

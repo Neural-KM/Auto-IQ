@@ -322,7 +322,7 @@ class InversePerspectiveMapperNode2(Node):
         n_unknown = np.sum(grid == UNKNOWN)
         self.get_logger().info(
             f'IPM V2: {(t_end - t_start)*1000:.1f}ms | '
-            f'Free: {n_free}, Occupied: {n_occupied}, Unknown: {n_unknown}'
+            f'Free: {n_free}, Occupied: {n_occupied}, Unknown: {n_unknown}', throttle_duration_sec=5.0
         )
 
     def _apply_morphology(self, grid: np.ndarray) -> np.ndarray:

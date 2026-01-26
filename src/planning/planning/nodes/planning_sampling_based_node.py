@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import time
 import rclpy
 from rclpy.node import Node
 import numpy as np
@@ -8,6 +9,8 @@ from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped, PointStamped
 from std_msgs.msg import String, Int32
 from autoiq_msgs.msg import Trajectory, TrajectoryPoint
+import tf2_ros
+from tf2_ros import TransformException
 
 from autoiq_common.types import VehicleState
 from autoiq_common.converters import vehicle_state_from_odometry
@@ -15,7 +18,7 @@ import carla
 
 # Import your planners
 from planning.core.global_planner import GlobalPlanner
-from planning.core.planner_unified import OptimizationMotionPlanner, PlannerConfig
+from planning.core.planner_unified import SamplingBasedPlanner, PlannerConfig
 
 class PlanningNode(Node):
     def __init__(self):
@@ -37,31 +40,36 @@ class PlanningNode(Node):
         # --- Initialize Planners ---
         self.global_planner = GlobalPlanner(self.carla_map, sampling_resolution=2.0)
         
-        self.motion_planner = OptimizationMotionPlanner()
+        self.motion_planner = SamplingBasedPlanner()
         
         # --- State Variables ---
         self.vehicle_state = VehicleState()
         self.latest_costmap = None # Holds numpy array of grid
-        self.costmap_origin_x = 0.0  # World position of cell [0,0]
+        self.costmap_origin_x = 0.0  # Position of cell [0,0] in costmap frame
         self.costmap_origin_y = 0.0
-        self.costmap_resolution = 0.2
+        self.costmap_resolution = 0.4
+        self.costmap_frame_id = None  # Set from OccupancyGrid message
         self.is_active = False
         
+        # --- TF2 for frame transforms ---
+        self.tf_buffer = tf2_ros.Buffer(cache_time=rclpy.duration.Duration(seconds=1.0))
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        
         # --- ROS2 Subscribers ---
-        self.create_subscription(Odometry, '/carla/ego_vehicle/ground_truth/odometry', self.odom_cb, 10)
-        self.create_subscription(PoseStamped, '/planning/goal_pose', self.goal_cb, 10)
+        self.create_subscription(Odometry, '/carla/ego_vehicle/ground_truth/odometry', self.odom_cb, 1)
+        self.create_subscription(PoseStamped, '/planning/goal_pose', self.goal_cb, 1)
         self.goal_index_sub = self.create_subscription(
             Int32, '/planning/goal_index',
             self.goal_index_callback, 10)
-        self.create_subscription(OccupancyGrid, '/mapping/local_costmap', self.costmap_cb, 10)
+        self.create_subscription(OccupancyGrid, '/mapping/ipm_costmap', self.costmap_cb, 1)
         
         # --- ROS2 Publishers ---
-        self.traj_pub = self.create_publisher(Trajectory, '/planning/trajectory', 10)
-        self.global_route_pub = self.create_publisher(Path, '/planning/global_route', 10)
+        self.traj_pub = self.create_publisher(Trajectory, '/planning/trajectory', 1)
+        self.global_route_pub = self.create_publisher(Path, '/planning/global_route', 1)
         
         # --- Timer Loop (10 Hz) ---
         self.create_timer(0.1, self.planning_loop)
-        self.get_logger().info('Discrete Optimization Planner Ready.')
+        self.get_logger().info('Discrete sampling Planner Ready.')
 
     def odom_cb(self, msg):
         self.vehicle_state = vehicle_state_from_odometry(msg)
@@ -69,12 +77,12 @@ class PlanningNode(Node):
     def costmap_cb(self, msg):
         # Store grid data and metadata for the planning loop
         grid = np.array(msg.data, dtype=np.int8)
-        if msg.info.width > 0 and msg.info.height > 0:
-            grid = grid.reshape((msg.info.height, msg.info.width))
+        grid = grid.reshape((msg.info.height, msg.info.width))
         self.latest_costmap = grid
         self.costmap_origin_x = msg.info.origin.position.x
         self.costmap_origin_y = msg.info.origin.position.y
         self.costmap_resolution = msg.info.resolution
+        self.costmap_frame_id = msg.header.frame_id
 
     def goal_cb(self, msg):
         # Convert ROS Goal -> CARLA Location
@@ -127,23 +135,60 @@ class PlanningNode(Node):
             self.is_active = False
             self.get_logger().info("Destination Reached.")
             return
-
-        # 3. Run Optimization Planner
-        # This will sample 5 paths, check the grid, and return the best one
+        
+        # 3. Get transform from map frame to costmap frame
+        map_to_costmap = self._get_map_to_costmap_transform()
+        if map_to_costmap is None:
+            return
+        
+        t_sampling_start = time.perf_counter()
+        # 4. Run Sampling based Planner
         trajectory = self.motion_planner.plan(
             self.vehicle_state,
             self.target_speed, 
             self.latest_costmap,
             self.costmap_origin_x,
             self.costmap_origin_y,
-            self.costmap_resolution
+            self.costmap_resolution,
+            map_to_costmap
         )
-        
-        # 4. Publish
+        self.get_logger().info(f'Planning Time: {(time.perf_counter() - t_sampling_start)*1000:.1f} ms')
+        # 5. Publish
         if trajectory:
             self._publish_trajectory(trajectory)
         else:
             self.get_logger().warn("No valid path found!")
+    
+    def _get_map_to_costmap_transform(self):
+        """
+        Get transform from map frame to costmap frame.
+        
+        Returns:
+            Tuple of (tx, ty, yaw) or None if lookup fails
+        """
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                'map',
+                self.costmap_frame_id,  # Target frame
+                                   # Source frame
+                rclpy.time.Time()        # Latest available
+            )
+            
+            tx = transform.transform.translation.x
+            ty = transform.transform.translation.y
+            
+            # Extract yaw from quaternion
+            q = transform.transform.rotation
+            # yaw = atan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
+            siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+            cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+            yaw = math.atan2(siny_cosp, cosy_cosp)
+            
+            return (tx, ty, yaw)
+            
+        except TransformException as e:
+            self.get_logger().warn(f'TF lookup map->{self.costmap_frame_id} failed: {e}')
+            return None
 
     def _publish_trajectory(self, points):
         msg = Trajectory()

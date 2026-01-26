@@ -28,7 +28,7 @@ setup(
     entry_points={
         'console_scripts': [
             'planning_node = planning.nodes.planning_node:main',
-            'planning_sampling_based_node = planning.nodes.planning_sampling_based:main',
+            'planning_sampling_based_node = planning.nodes.planning_sampling_based_node:main',
         ],
     },
 )
