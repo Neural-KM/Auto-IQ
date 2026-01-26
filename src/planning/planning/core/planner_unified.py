@@ -15,16 +15,18 @@ from planning.utils.frenet_utils import (
 class PlannerConfig:
     """Configuration for Discrete Sampling Planner."""
     dt: float = 0.1                # Time step
-    prediction_horizon: float = 10.0 # Lookahead time
+    prediction_horizon: float = 5.0 # Lookahead time
     
-    # The Discrete Set of Choices: [Center, Left Lane, Right Lane, Nudge Left, Nudge Right]
-    d_samples: List[float] = field(default_factory=lambda: [0.0, -4.0, -2.0, 2.0,-1.0, 1.0,
-                                                                4.0])
+    # Lateral offset samples (final d values)
+    d_samples: List[float] = field(default_factory=lambda: [0.0, -4.0, -2.0, 2.0, -1.0, 1.0, 4.0])
+    
+    # Lane change time samples (how fast to reach target d)
+    t_samples: List[float] = field(default_factory=lambda: [2.0, 3.0, 5.0])
     
     # Cost Weights
     w_collision: float = 1000.0    # Safety is priority
     w_ref: float = 1.0             # Preference for lane center
-    # w_smooth: float = 5.0          # Penalize lateral movement
+    w_time: float = 0.1            # Prefer faster lane changes (when safe)
     
     lethal_thresh: int = 80        # Probability [0-100]
 
@@ -74,27 +76,31 @@ class SamplingBasedPlanner:
         diff_yaw = vehicle_state.yaw - path_yaw
         cur_d_dot = vehicle_state.speed * math.sin(diff_yaw)
 
-        # 2. Generate Candidates
+        # 2. Generate Candidates (sample both target_d and lane change time)
         candidates = []
         for target_d in self.config.d_samples:
-            # Generate path from current (s, d) to target (s+dist, target_d)
-            traj = self._generate_path(
-                cur_s, cur_d, cur_d_dot, 
-                target_d, target_speed, vehicle_state.speed
-            )
-            if traj:
-                candidates.append(traj)
+            for t_lc in self.config.t_samples:
+                # Generate path from current (s, d) to target (s+dist, target_d)
+                traj = self._generate_path(
+                    vehicle_state,
+                    cur_s, cur_d, cur_d_dot, 
+                    target_d, t_lc, target_speed
+                )
+                if traj:
+                    candidates.append((traj, t_lc))
 
         # 3. Evaluate Costs
         best_cost = float('inf')
         best_traj = []
 
-        for traj in candidates:
+        for traj, t_lc in candidates:
             cost = self._calculate_cost(
                 traj, occupancy_grid,
                 grid_origin_x, grid_origin_y, grid_resolution,
                 map_to_costmap_tf
             )
+            # Add time penalty (prefer faster lane changes when collision-free)
+            cost += t_lc * self.config.w_time
             
             if cost < best_cost:
                 best_cost = cost
@@ -107,26 +113,52 @@ class SamplingBasedPlanner:
             # Fallback: Emergency Stop if all paths are blocked
             return self._generate_stop(vehicle_state)
 
-    def _generate_path(self, s0, d0, d_dot0, target_d, target_v, current_v):
-        """Generates a smooth polynomial trajectory."""
+    def _generate_path(self, vehicle_state, s0, d0, d_dot0, target_d, t_lane_change, target_v):
+        """
+        Generates a smooth polynomial trajectory.
+        
+        Args:
+            vehicle_state: Current vehicle state (used for first point)
+            s0, d0, d_dot0: Current Frenet state
+            target_d: Target lateral offset
+            t_lane_change: Time to complete lane change
+            target_v: Target longitudinal velocity
+        """
         T = self.config.prediction_horizon
         dt = self.config.dt
         points = []
         
-        # Lateral: Quintic Polynomial (Smooth jerk-minimized lane change)
-        lat_qp = QuinticPolynomial(d0, d_dot0, 0.0, target_d, 0.0, 0.0, T)
+        # Lateral: Quintic Polynomial (lane change completes at t_lane_change)
+        lat_qp = QuinticPolynomial(d0, d_dot0, 0.0, target_d, 0.0, 0.0, t_lane_change)
         
         # Longitudinal: Quartic Polynomial (Smooth velocity profile)
-        lon_qp = QuarticPolynomial(s0, current_v, 0.0, target_v, 0.0, T)
+        lon_qp = QuarticPolynomial(s0, vehicle_state.speed, 0.0, target_v, 0.0, T)
         
-        for t in np.arange(0, T, dt):
+        for i, t in enumerate(np.arange(0, T, dt)):
             s_t = lon_qp.calc_point(t)
-            d_t = lat_qp.calc_point(t)
+            # After lane change time, d stays at target
+            d_t = lat_qp.calc_point(min(t, t_lane_change))
+            d_dot_t = lat_qp.calc_first_derivative(min(t, t_lane_change))
             v_t = lon_qp.calc_first_derivative(t)
             
             try:
                 # Convert back to Global Coordinates
-                x, y, yaw = self.wp_converter.frenet_to_xy(s_t, d_t)
+                x, y, ref_yaw = self.wp_converter.frenet_to_xy(s_t, d_t)
+                
+                # First point: use exact vehicle position to avoid shift
+                if i == 0:
+                    x = vehicle_state.x
+                    y = vehicle_state.y
+                    yaw = vehicle_state.yaw
+                else:
+                    # Correct yaw for lateral velocity
+                    # True heading = ref_yaw + atan2(d_dot, s_dot)
+                    s_dot_t = lon_qp.calc_first_derivative(t)
+                    if abs(s_dot_t) > 0.1:
+                        yaw = ref_yaw + math.atan2(d_dot_t, s_dot_t)
+                    else:
+                        yaw = ref_yaw
+                
                 points.append(TrajectoryPoint(
                     x=x,
                     y=y,
