@@ -163,3 +163,98 @@ def apply_column_drop_skirt(semantic_img, obstacle_ids, drop_pixels, hood_mask_r
                 semantic_img[r, c] = fill_val
 
     return semantic_img
+
+@jit(nopython=True, cache=True)
+def project_pixels_to_ground(u_arr, v_arr, fx, fy, cx, cy, 
+                             R_cam2map, t_cam2map, ground_z):
+    """
+    Project image pixels to ground plane (Z=ground_z) in map frame.
+    
+    CARLA uses camera_link frame convention (X=forward, Y=left, Z=up),
+    but pixel unprojection assumes optical frame (X=right, Y=down, Z=forward).
+    
+    We convert: optical [norm_x, norm_y, 1] -> link [1, -norm_x, -norm_y]
+    
+    Math:
+    1. Pixel to Ray (Optical Frame): ray_optical = [(u-cx)/fx, (v-cy)/fy, 1]
+    2. Convert to Camera Link Frame: ray_link = [1, -norm_x, -norm_y]
+    3. Ray to Map Frame: ray_map = R * ray_link
+    4. Intersection with Ground (Z=ground_z):
+       s = (ground_z - tz) / dz
+    """
+    n_points = len(u_arr)
+    out_x = np.empty(n_points, dtype=np.float32)
+    out_y = np.empty(n_points, dtype=np.float32)
+    valid_mask = np.zeros(n_points, dtype=np.bool_)
+    
+    # Extract translation (camera origin in map frame)
+    tx, ty, tz = t_cam2map[0], t_cam2map[1], t_cam2map[2]
+    
+    for i in range(n_points):
+        u = u_arr[i]
+        v = v_arr[i]
+        
+        # 1. Unproject to normalized ray in Camera Optical Frame
+        # Optical: X=right, Y=down, Z=forward
+        norm_x = (u - cx) / fx
+        norm_y = (v - cy) / fy
+        
+        # 2. Convert from Optical Frame to Camera Link Frame
+        # CARLA camera_link: X=forward, Y=left, Z=up
+        # Optical X (right) = -Link Y (left)
+        # Optical Y (down) = -Link Z (up)  
+        # Optical Z (forward) = Link X (forward)
+        # So: link = [optical_z, -optical_x, -optical_y] = [1, -norm_x, -norm_y]
+        link_x = 1.0
+        link_y = -norm_x
+        link_z = -norm_y
+        
+        # 3. Rotate Ray Direction to Map Frame
+        # dir = R * [link_x, link_y, link_z]
+        dx = R_cam2map[0,0]*link_x + R_cam2map[0,1]*link_y + R_cam2map[0,2]*link_z
+        dy = R_cam2map[1,0]*link_x + R_cam2map[1,1]*link_y + R_cam2map[1,2]*link_z
+        dz = R_cam2map[2,0]*link_x + R_cam2map[2,1]*link_y + R_cam2map[2,2]*link_z
+        
+        # 4. Intersect with Ground Plane (Z=ground_z)
+        # We need s such that: tz + s * dz = ground_z  =>  s = (ground_z - tz) / dz
+        # For rays pointing down (dz < 0) with camera above ground (tz > ground_z), s > 0
+        
+        if abs(dz) > 1e-4:  # Avoid division by zero (horizon rays)
+            s = (ground_z - tz) / dz
+            
+            # Intersection must be in front of the ray (s > 0)
+            if s > 0:
+                gx = tx + s * dx
+                gy = ty + s * dy
+                
+                # Filter points extremely far away which cause grid artifacts
+                if s < 100.0: 
+                    out_x[i] = gx
+                    out_y[i] = gy
+                    valid_mask[i] = True
+                    
+    return out_x, out_y, valid_mask
+
+@jit(nopython=True, cache=True)
+def fill_grid_from_points(x_arr, y_arr, valid_mask, grid, 
+                          origin_x, origin_y, resolution, width, height, FREE):
+    """
+    Mark grid cells as FREE (0) based on ground points.
+    Initializes grid with UNKNOWN (-1) or OBSTACLE (100) before filling.
+    """
+    n_points = len(x_arr)
+    
+    for i in range(n_points):
+        if not valid_mask[i]:
+            continue
+            
+        # Convert World (x, y) to Grid (c, r)
+        c = int((x_arr[i] - origin_x) / resolution)
+        r = int((y_arr[i] - origin_y) / resolution)
+        
+        if 0 <= c < width and 0 <= r < height:
+            # Mark as FREE
+            grid[r, c] = FREE
+           
+            # if c+1 < width: grid[r, c+1] = FREE
+            # if r+1 < height: grid[r+1, c] = FREE
