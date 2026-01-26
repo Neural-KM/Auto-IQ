@@ -4,7 +4,6 @@ import rclpy
 from rclpy.node import Node
 import numpy as np
 import math
-from scipy.ndimage import binary_dilation, generate_binary_structure
 
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped, PointStamped
@@ -15,6 +14,7 @@ from tf2_ros import TransformException
 
 from autoiq_common.types import VehicleState
 from autoiq_common.converters import vehicle_state_from_odometry
+from mapping.utils.geometry import inflate_to_cspace
 import carla
 
 # Import your planners
@@ -85,7 +85,7 @@ class PlanningNode(Node):
         
         # Inflate obstacles to create C-space (configuration space)
         resolution = msg.info.resolution
-        grid = self._inflate_to_cspace(grid, self.vehicle_radius, resolution)
+        grid = inflate_to_cspace(grid, self.vehicle_radius, resolution)
         
         self.latest_costmap = grid
         self.costmap_origin_x = msg.info.origin.position.x
@@ -99,42 +99,6 @@ class PlanningNode(Node):
         cspace_msg.info = msg.info
         cspace_msg.data = grid.flatten().tolist()
         self.cspace_pub.publish(cspace_msg)
-
-    def _inflate_to_cspace(self, grid: np.ndarray, radius: float, resolution: float) -> np.ndarray:
-        """
-        Inflate obstacles to create configuration space.
-        
-        Color Mapping for RViz 'Costmap' Scheme:
-        - 100: Lethal Obstacle (Original) -> Purple
-        - 99:  Inscribed Radius (Inflation) -> Cyan
-        """
-        # Calculate kernel radius in cells
-        radius_cells = int(np.ceil(radius / resolution))
-        if radius_cells < 1:
-            return grid
-        
-        # Create circular structuring element
-        y, x = np.ogrid[-radius_cells:radius_cells+1, -radius_cells:radius_cells+1]
-        circular_kernel = (x**2 + y**2) <= radius_cells**2
-        
-        # Create binary obstacle mask (occupied cells)
-        obstacle_mask = grid > 50
-        
-        # Dilate obstacles to create the full C-space
-        inflated_mask = binary_dilation(obstacle_mask, structure=circular_kernel)
-        
-        result = grid.copy()
-        
-        # 1. Mark the "Halo" (Inflation) as 99 (Cyan)
-        # These are cells that are in the dilated mask but NOT in the original mask
-        halo_mask = inflated_mask & (~obstacle_mask)
-        result[halo_mask] = 99
-        
-        # 2. Ensure Original Obstacles are 100 (Purple)
-        # This overwrites any 99s that might have overlapped (though logically disjoint here)
-        result[obstacle_mask] = 100
-        
-        return result
 
     def goal_cb(self, msg):
         # Convert ROS Goal -> CARLA Location

@@ -2,6 +2,60 @@
 Geometric utilities for occupancy grid operations.
 """
 import numpy as np
+from scipy.ndimage import binary_dilation
+
+
+def inflate_to_cspace(grid: np.ndarray, radius: float, resolution: float,
+                      obstacle_threshold: int = 50,
+                      lethal_value: int = 100,
+                      inscribed_value: int = 99) -> np.ndarray:
+    """
+    Inflate obstacles by vehicle radius to create configuration space (C-space).
+    
+    This allows the planner to treat the vehicle as a point by expanding
+    obstacles to account for the vehicle's footprint.
+    
+    Visualization (RViz 'Costmap' scheme):
+    - lethal_value (100): Original obstacles -> Purple
+    - inscribed_value (99): Inflation halo -> Cyan
+    
+    Args:
+        grid: Occupancy grid (values 0-100, -1 for unknown)
+        radius: Vehicle radius in meters
+        resolution: Grid cell size in meters
+        obstacle_threshold: Value above which a cell is considered an obstacle
+        lethal_value: Value for original obstacle cells
+        inscribed_value: Value for inflated (halo) cells
+            
+    Returns:
+        Inflated occupancy grid with expanded obstacles
+    """
+    # Calculate kernel radius in cells
+    radius_cells = int(np.ceil(radius / resolution))
+    if radius_cells < 1:
+        return grid
+    
+    # Create circular structuring element
+    y, x = np.ogrid[-radius_cells:radius_cells+1, -radius_cells:radius_cells+1]
+    circular_kernel = (x**2 + y**2) <= radius_cells**2
+    
+    # Create binary obstacle mask (occupied cells)
+    obstacle_mask = grid > obstacle_threshold
+    
+    # Dilate obstacles to create the full C-space
+    inflated_mask = binary_dilation(obstacle_mask, structure=circular_kernel)
+    
+    result = grid.copy()
+    
+    # Mark the "Halo" (inflation) with inscribed value
+    # These are cells that are in the dilated mask but NOT in the original mask
+    halo_mask = inflated_mask & (~obstacle_mask)
+    result[halo_mask] = inscribed_value
+    
+    # Ensure original obstacles keep lethal value
+    result[obstacle_mask] = lethal_value
+    
+    return result
 
 
 def mark_ego_footprint(
