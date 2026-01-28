@@ -27,7 +27,6 @@ import argparse
 import sys
 import time
 from pathlib import Path
-from datetime import datetime
 
 import numpy as np
 import cv2
