@@ -25,7 +25,7 @@ from rclpy.node import Node
 
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped, PointStamped
-from std_msgs.msg import String, Int32, ColorRGBA
+from std_msgs.msg import String, Int32
 from visualization_msgs.msg import Marker
 
 from autoiq_msgs.msg import ObstacleArray, Trajectory, TrajectoryPoint
