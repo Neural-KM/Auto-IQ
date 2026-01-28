@@ -310,6 +310,7 @@ Examples:
                     num_str = f.stem.rsplit('_', 1)[-1]
                     numbers.append(int(num_str))
                 except ValueError:
+                    # Ignore files that do not match the expected "<base_name>_<number>.png" pattern
                     pass
             next_num = max(numbers) + 1 if numbers else 1
         else:
