@@ -216,6 +216,7 @@ def main(args=None):
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
+        # Allow clean shutdown on Ctrl+C; resources are released in the finally block.
         pass
     finally:
         node.destroy_node()
