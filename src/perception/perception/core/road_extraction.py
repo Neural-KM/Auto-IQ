@@ -66,6 +66,16 @@ DEFAULT_BEV_X_RANGE = (-10.0, 10.0)   # meters left/right from vehicle center
 DEFAULT_BEV_Y_RANGE = (3.0, 30.0)     # meters forward (near to far)
 DEFAULT_PIXELS_PER_METER = 30.0       # resolution: 1 meter = 30 pixels
 
+
+# Road class index in Cityscapes
+ROAD_CLASS_ID = 0
+
+# Default output directory
+DEFAULT_OUTPUT_DIR = Path('/home/autoiq/nakul/Auto-IQ/data/rosbag_images_15jan/inference')
+DEFAULT_SENSOR_CONFIG = Path('/home/autoiq/nakul/Auto-IQ/config/carla_sensors.yaml')
+
+
+
 class RoadExtractor:
     """
     Extracts road mask from images using SegFormer segmentation.

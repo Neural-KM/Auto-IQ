@@ -1,5 +1,6 @@
-
-
+import cv2
+import numpy as np
+from typing import Tuple, Optional
 def convert_to_bev(
     image: np.ndarray,
     fov: float = 110.0,
@@ -139,9 +140,4 @@ def convert_to_bev(
         return bev_img, bev_size, M
     else:
         return bev_img, bev_size, None
-
-
-# Road class index in Cityscapes
-ROAD_CLASS_ID = 0
-
 
