@@ -243,6 +243,7 @@ class PlanningNode(Node):
             p = PoseStamped()
             p.pose.position.x = wp.transform.location.x
             p.pose.position.y = -wp.transform.location.y
+            p.pose.position.z = wp.transform.location.z
             msg.poses.append(p)
         self.global_route_pub.publish(msg)
 
