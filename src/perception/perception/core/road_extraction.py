@@ -66,44 +66,53 @@ DEFAULT_BEV_X_RANGE = (-10.0, 10.0)   # meters left/right from vehicle center
 DEFAULT_BEV_Y_RANGE = (3.0, 30.0)     # meters forward (near to far)
 DEFAULT_PIXELS_PER_METER = 30.0       # resolution: 1 meter = 30 pixels
 
-##uses the instrinsics and extrinsics to compute the bev transform
-
-def compute_bev_transform(
-    width: int, 
-    height: int, 
-    fov: float = 110.0, 
-    pitch: float = 0.0, 
+def convert_to_bev(
+    image: np.ndarray,
+    fov: float = 110.0,
+    pitch: float = 0.0,
     camera_height: float = 1.2,
     bev_x_range: Tuple[float, float] = None,
     bev_y_range: Tuple[float, float] = None,
-    pixels_per_meter: float = None
-) -> Tuple[np.ndarray, Tuple[int, int]]:
+    pixels_per_meter: float = None,
+    return_transform: bool = False
+) -> Tuple[np.ndarray, Tuple[int, int], Optional[np.ndarray]]:
     """
-    Compute perspective transform matrix for Bird's Eye View using camera parameters.
+    Convert an image to Bird's Eye View using camera intrinsics and extrinsics.
     
-    The output BEV dimensions are AUTO-CALCULATED from the x/y ranges and pixels_per_meter
-    to ensure equal scale in both X and Y directions (no distortion).
+    This function computes the perspective transform matrix from camera parameters
+    and applies it to transform the image to a Bird's Eye View. The output BEV 
+    dimensions are AUTO-CALCULATED from the x/y ranges and pixels_per_meter to 
+    ensure equal scale in both X and Y directions (no distortion).
     
     Args:
-        width: Input image width
-        height: Input image height
+        image: Input image (H, W, 3) or (H, W)
         fov: Camera horizontal field of view in degrees
         pitch: Camera pitch angle in degrees (positive = looking down)
         camera_height: Camera height above ground in meters
-        bev_x_range: (x_min, x_max) range in meters (left/right from vehicle center)
-        bev_y_range: (y_min, y_max) range in meters (forward distance from camera)
+        bev_x_range: (x_min, x_max) range in meters (left/right from vehicle center).
+                     Uses DEFAULT_BEV_X_RANGE if None.
+        bev_y_range: (y_min, y_max) range in meters (forward distance from camera).
+                     Uses DEFAULT_BEV_Y_RANGE if None.
         pixels_per_meter: Resolution of BEV output (pixels per meter). Higher = more detail.
+                         Uses DEFAULT_PIXELS_PER_METER if None.
+        return_transform: If True, also returns the 3x3 perspective transform matrix.
         
     Returns:
-        M: 3x3 perspective transform matrix
+        bev_img: BEV transformed image
         bev_size: (width, height) of output BEV image (auto-calculated)
+        M: 3x3 perspective transform matrix (only if return_transform=True, else None)
         
     Example:
-        # With bev_x_range=(-15, 15) and bev_y_range=(3, 30) at 30 px/m:
+        # Basic usage
+        bev_img, bev_size, _ = convert_to_bev(image, fov=110, pitch=5, camera_height=1.2)
+        
+        # With custom ranges at 30 px/m: bev_x_range=(-15, 15), bev_y_range=(3, 30)
         # X span = 30m -> bev_width = 900 pixels
         # Y span = 27m -> bev_height = 810 pixels
         # Scale is equal: 1 pixel = 3.33 cm in both directions
     """
+    height, width = image.shape[:2]
+    
     # Use defaults if not specified
     if bev_x_range is None:
         bev_x_range = DEFAULT_BEV_X_RANGE
@@ -184,44 +193,18 @@ def compute_bev_transform(
         [0, bev_height],                  # Near left -> bottom-left
     ])
     
+    # Compute perspective transform matrix
     M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-    return M, (bev_width, bev_height)
-
-def convert_to_bev(
-    image: np.ndarray,
-    fov: float = 110.0,
-    pitch: float = 0.0,
-    camera_height: float = 1.2,
-    bev_x_range: Tuple[float, float] = None,
-    bev_y_range: Tuple[float, float] = None,
-    pixels_per_meter: float = None
-) -> Tuple[np.ndarray, Tuple[int, int]]:
-    """
-    Convert an image to Bird's Eye View.
     
-    Args:
-        image: Input image (H, W, 3) or (H, W)
-        fov: Camera horizontal field of view in degrees
-        pitch: Camera pitch angle in degrees
-        camera_height: Camera height above ground in meters
-        bev_x_range: (x_min, x_max) range in meters (left/right). Uses DEFAULT_BEV_X_RANGE if None.
-        bev_y_range: (y_min, y_max) range in meters (forward distance). Uses DEFAULT_BEV_Y_RANGE if None.
-        pixels_per_meter: Resolution of BEV output. Uses DEFAULT_PIXELS_PER_METER if None.
-        
-    Returns:
-        bev_img: BEV transformed image
-        bev_size: (width, height) of the BEV image
-    """
-    height, width = image.shape[:2]
+    # Apply transform to image
+    bev_img = cv2.warpPerspective(image, M, (bev_width, bev_height), flags=cv2.INTER_LINEAR)
     
-    M, bev_size = compute_bev_transform(
-        width, height, fov, pitch, camera_height,
-        bev_x_range, bev_y_range, pixels_per_meter
-    )
+    bev_size = (bev_width, bev_height)
     
-    bev_img = cv2.warpPerspective(image, M, bev_size, flags=cv2.INTER_LINEAR)
-    
-    return bev_img, bev_size
+    if return_transform:
+        return bev_img, bev_size, M
+    else:
+        return bev_img, bev_size, None
 
 
 # Road class index in Cityscapes
@@ -432,23 +415,21 @@ class RoadExtractor:
         print("  Step 2: Separating road from image...")
         road_only = cv2.bitwise_and(image, image, mask=original_road_mask)
         
-        # 3. Compute BEV transform (Using Camera Geometry)
+        # 3. Convert separated road image to BEV (Using Camera Geometry)
         # Dimensions are auto-calculated from ranges and pixels_per_meter
-        M, bev_size = compute_bev_transform(
-            width, height,
+        print("  Step 3: Converting separated road to BEV...")
+        bev_road_image, bev_size, M = convert_to_bev(
+            road_only,
             fov=fov,
             pitch=pitch,
             camera_height=camera_height,
             bev_x_range=bev_x_range,
             bev_y_range=bev_y_range,
-            pixels_per_meter=pixels_per_meter
+            pixels_per_meter=pixels_per_meter,
+            return_transform=True
         )
         
         print(f"  BEV size: {bev_size[0]}x{bev_size[1]} pixels (auto-calculated for equal scale)")
-        
-        # 4. Convert separated road image to BEV
-        print("  Step 3: Converting separated road to BEV...")
-        bev_road_image = cv2.warpPerspective(road_only, M, bev_size, flags=cv2.INTER_LINEAR)
         
         # Also transform road mask to BEV for reference
         bev_road_mask = cv2.warpPerspective(
@@ -625,8 +606,9 @@ class RoadExtractor:
         fov: float = 110.0,
         pitch: float = 0.0,
         camera_height: float = 1.2,
-        bev_width: int = 800,
-        bev_height: int = 800
+        bev_x_range: Tuple[float, float] = None,
+        bev_y_range: Tuple[float, float] = None,
+        pixels_per_meter: float = None
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Extract road from Bird's Eye View transformed image.
@@ -636,17 +618,18 @@ class RoadExtractor:
             fov: Camera horizontal field of view in degrees
             pitch: Camera pitch angle in degrees
             camera_height: Camera height above ground in meters
-            bev_width: Output BEV image width
-            bev_height: Output BEV image height
+            bev_x_range: (x_min, x_max) range in meters (left/right). Uses DEFAULT_BEV_X_RANGE if None.
+            bev_y_range: (y_min, y_max) range in meters (forward distance). Uses DEFAULT_BEV_Y_RANGE if None.
+            pixels_per_meter: Resolution - pixels per meter. Uses DEFAULT_PIXELS_PER_METER if None.
             
         Returns:
             bev_image: Bird's Eye View transformed image
             bev_road_mask: Road mask in BEV space
         """
         # Convert to Bird's Eye View
-        bev_image = convert_to_bev(
+        bev_image, _, _ = convert_to_bev(
             image, fov, pitch, camera_height,
-            bev_width, bev_height
+            bev_x_range, bev_y_range, pixels_per_meter
         )
         
         # Extract road mask from BEV image
