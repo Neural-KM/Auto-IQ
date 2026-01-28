@@ -54,7 +54,7 @@ import yaml
 from pathlib import Path
 from typing import Optional, Tuple
 
-from perception.core.segformer import SegFormer, CITYSCAPES_CLASSES, CITYSCAPES_PALETTE
+from perception.core.segformer import SegFormer, CITYSCAPES_PALETTE
 
 
 # ============================================================================
