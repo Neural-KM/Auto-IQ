@@ -11,7 +11,7 @@ Core Methods:
     extract_road_with_confidence() - Road mask with confidence filtering
     visualize_road()            - Unified visualization (overlay/colored/mask_only modes)
     extract_lanes()             - Lane detection on perspective images
-    extract_lanes_bev()         - Lane detection with Bird's Eye View transform (recommended)
+    extract_lanes_bev()         - Lane detection with Bird's Eye View transform (default)
 
 Usage:
     python -m perception.core.road_extraction --image path/to/image.jpg --output path/to/output/
@@ -26,8 +26,9 @@ Output Flags:
     --overlay             Save road overlay on original image
     --all                 Save all outputs (enables all above flags)
 
-Bird's Eye View (BEV) Mode:
-    --bev                 Enable Bird's Eye View transformation
+Bird's Eye View (BEV) Mode (DEFAULT):
+    BEV mode is enabled by default for better lane detection accuracy.
+    --no-bev              Disable BEV, use perspective mode instead
     --fov                 Camera FOV in degrees (default: 110)
     --pitch               Camera pitch in degrees (default: 0)
     --camera-height       Camera height in meters (default: 1.2)
@@ -35,24 +36,31 @@ Bird's Eye View (BEV) Mode:
     --bev-x-min/max       BEV lateral range in meters
     --bev-y-min/max       BEV forward range in meters
 
+Logging:
+    --verbose, -v         Enable debug logging
+    --quiet, -q           Suppress info messages, only show warnings/errors
+
 Examples:
-    # Single image - extract road mask
+    # Single image - BEV mode (default)
     python -m perception.core.road_extraction --image input.jpg --output ./output/
     
     # Single image with all outputs
-    python -m perception.core.road_extraction --image input.jpg --colored --overlay --all
-    
-    # Bird's Eye View lane detection (RECOMMENDED for lane detection)
-    python -m perception.core.road_extraction --image input.jpg --bev --save-lanes --save-lane-overlay --show
+    python -m perception.core.road_extraction --image input.jpg --all
     
     # BEV with custom camera parameters
-    python -m perception.core.road_extraction --image input.jpg --bev --fov 90 --pitch 5 --camera-height 1.5 --all
+    python -m perception.core.road_extraction --image input.jpg --fov 90 --pitch 5 --camera-height 1.5 --all
+    
+    # Disable BEV, use perspective mode
+    python -m perception.core.road_extraction --image input.jpg --no-bev --save-lanes --save-lane-overlay
     
     # Batch process folder
     python -m perception.core.road_extraction --folder /data/images/ --output ./road_masks/
     
     # Use larger model for better accuracy
     python -m perception.core.road_extraction --image input.jpg --model b5
+    
+    # Quiet mode (only warnings/errors)
+    python -m perception.core.road_extraction --folder /data/images/ --all -q
 """
 
 import logging
