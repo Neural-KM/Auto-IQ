@@ -3,8 +3,15 @@
 Road Extraction from SegFormer Segmentation
 =============================================
 
-This module uses SegFormer to extract only the road mask from images.
+This module uses SegFormer to extract road masks and lane markings from images.
 Cityscapes class 0 = road
+
+Core Methods:
+    extract_road_mask()         - Binary road mask from SegFormer
+    extract_road_with_confidence() - Road mask with confidence filtering
+    visualize_road()            - Unified visualization (overlay/colored/mask_only modes)
+    extract_lanes()             - Lane detection on perspective images
+    extract_lanes_bev()         - Lane detection with Bird's Eye View transform (recommended)
 
 Usage:
     python -m perception.core.road_extraction --image path/to/image.jpg --output path/to/output/
@@ -12,11 +19,11 @@ Usage:
 
 Output Flags:
     --save-mask           Save binary road mask
-    --save-lanes          Save extracted lane binary mask (grayscale threshold)
+    --save-lanes          Save extracted lane binary mask
     --save-lane-overlay   Save lane overlay (Red lanes)
     --save-road-gray      Save grayscale road texture
     --colored             Save colored road visualization
-    --overlay             Save road overlay
+    --overlay             Save road overlay on original image
     --all                 Save all outputs (enables all above flags)
 
 Bird's Eye View (BEV) Mode:
@@ -24,15 +31,16 @@ Bird's Eye View (BEV) Mode:
     --fov                 Camera FOV in degrees (default: 110)
     --pitch               Camera pitch in degrees (default: 0)
     --camera-height       Camera height in meters (default: 1.2)
-    --bev-width           BEV output width (default: 1000)
-    --bev-height          BEV output height (default: 1000)
+    --pixels-per-meter    BEV resolution (default: 30)
+    --bev-x-min/max       BEV lateral range in meters
+    --bev-y-min/max       BEV forward range in meters
 
 Examples:
     # Single image - extract road mask
     python -m perception.core.road_extraction --image input.jpg --output ./output/
     
     # Single image with all outputs
-    python -m perception.core.road_extraction --image input.jpg --colored --overlay --road-only
+    python -m perception.core.road_extraction --image input.jpg --colored --overlay --all
     
     # Bird's Eye View lane detection (RECOMMENDED for lane detection)
     python -m perception.core.road_extraction --image input.jpg --bev --save-lanes --save-lane-overlay --show
@@ -161,49 +169,42 @@ class RoadExtractor:
         
         return road_mask, road_confidence
     
-    def extract_road_colored(self, image: np.ndarray) -> np.ndarray:
-        """
-        Extract road and return colored visualization.
-        
-        Args:
-            image: RGB image (H, W, 3)
-            
-        Returns:
-            RGB image with road colored (purple) and rest black
-        """
-        road_mask = self.extract_road_mask(image)
-        
-        # Create colored output
-        colored = np.zeros_like(image)
-        colored[road_mask == 255] = CITYSCAPES_PALETTE[CONFIG.road_class_id]  # Purple for road
-        
-        return colored
-    
-    def extract_road_overlay(
+    def visualize_road(
         self, 
         image: np.ndarray, 
+        mode: str = 'overlay',
         alpha: float = 0.5,
         road_color: Tuple[int, int, int] = (128, 64, 128)
     ) -> np.ndarray:
         """
-        Overlay road mask on original image.
+        Visualize road extraction results.
         
         Args:
             image: RGB image (H, W, 3)
-            alpha: Blend factor for overlay
-            road_color: RGB color for road overlay
+            mode: Visualization mode:
+                - 'overlay': Blend road color on original image
+                - 'colored': Road colored, rest black
+                - 'mask_only': Return original pixels only where road is detected
+            alpha: Blend factor for overlay mode (0-1)
+            road_color: RGB color for road visualization
             
         Returns:
-            RGB image with road overlay
+            RGB visualization image
         """
         road_mask = self.extract_road_mask(image)
         
-        # Create overlay
-        overlay = image.copy()
-        overlay[road_mask == 255] = road_color
-        
-        # Blend
-        result = cv2.addWeighted(image, 1 - alpha, overlay, alpha, 0)
+        if mode == 'colored':
+            # Road colored, rest black
+            result = np.zeros_like(image)
+            result[road_mask == 255] = road_color
+        elif mode == 'mask_only':
+            # Original pixels where road is detected
+            result = cv2.bitwise_and(image, image, mask=road_mask)
+        else:  # 'overlay' (default)
+            # Blend road color on original image
+            overlay = image.copy()
+            overlay[road_mask == 255] = road_color
+            result = cv2.addWeighted(image, 1 - alpha, overlay, alpha, 0)
         
         return result
     
@@ -464,48 +465,6 @@ class RoadExtractor:
         
         return lane_mask_clean
     
-    def extract_road_bev(
-        self, 
-        image: np.ndarray,
-        fov: float = None,
-        pitch: float = None,
-        camera_height: float = None,
-        bev_x_range: Tuple[float, float] = None,
-        bev_y_range: Tuple[float, float] = None,
-        pixels_per_meter: float = None
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Extract road from Bird's Eye View transformed image.
-        
-        Args:
-            image: RGB image (H, W, 3)
-            fov: Camera horizontal field of view in degrees. Uses CONFIG.camera.fov if None.
-            pitch: Camera pitch angle in degrees. Uses CONFIG.camera.pitch if None.
-            camera_height: Camera height above ground in meters. Uses CONFIG.camera.height if None.
-            bev_x_range: (x_min, x_max) range in meters (left/right). Uses CONFIG.bev.x_range if None.
-            bev_y_range: (y_min, y_max) range in meters (forward distance). Uses CONFIG.bev.y_range if None.
-            pixels_per_meter: Resolution - pixels per meter. Uses CONFIG.bev.pixels_per_meter if None.
-            
-        Returns:
-            bev_image: Bird's Eye View transformed image
-            bev_road_mask: Road mask in BEV space
-        """
-        # Use CONFIG defaults if not provided
-        fov = fov if fov is not None else CONFIG.camera.fov
-        pitch = pitch if pitch is not None else CONFIG.camera.pitch
-        camera_height = camera_height if camera_height is not None else CONFIG.camera.height
-        
-        # Convert to Bird's Eye View
-        bev_image, _, _ = convert_to_bev(
-            image, fov, pitch, camera_height,
-            bev_x_range, bev_y_range, pixels_per_meter
-        )
-        
-        # Extract road mask from BEV image
-        bev_road_mask = self.extract_road_mask(bev_image)
-        
-        return bev_image, bev_road_mask
-    
     def extract_lanes(self, image: np.ndarray) -> np.ndarray:
         """
         Extract lane markings using Adaptive Thresholding on the Road ROI.
@@ -716,14 +675,14 @@ def process_single_image(extractor: RoadExtractor, args):
     
     # Save colored road (optional)
     if args.colored:
-        colored = extractor.extract_road_colored(image_rgb)
+        colored = extractor.visualize_road(image_rgb, mode='colored')
         colored_bgr = cv2.cvtColor(colored, cv2.COLOR_RGB2BGR)
         colored_path = out_dir / f'{base_name}_road_colored.png'
         cv2.imwrite(str(colored_path), colored_bgr)
         print(f'Saved colored road: {colored_path}')
     # Save overlay (optional)
     if args.overlay:
-        overlay = extractor.extract_road_overlay(image_rgb, alpha=args.alpha)
+        overlay = extractor.visualize_road(image_rgb, mode='overlay', alpha=args.alpha)
         overlay_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
         overlay_path = out_dir / f'{base_name}_road_overlay.png'
         cv2.imwrite(str(overlay_path), overlay_bgr)
@@ -826,14 +785,14 @@ def process_folder(extractor: RoadExtractor, args):
         
         # Save colored road (optional)
         if args.colored:
-            colored = extractor.extract_road_colored(image_rgb)
+            colored = extractor.visualize_road(image_rgb, mode='colored')
             colored_bgr = cv2.cvtColor(colored, cv2.COLOR_RGB2BGR)
             colored_path = out_dir / f'{base_name}_road_colored.png'
             cv2.imwrite(str(colored_path), colored_bgr)
         
         # Save overlay (optional)
         if args.overlay:
-            overlay = extractor.extract_road_overlay(image_rgb, alpha=args.alpha)
+            overlay = extractor.visualize_road(image_rgb, mode='overlay', alpha=args.alpha)
             overlay_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
             overlay_path = out_dir / f'{base_name}_road_overlay.png'
             cv2.imwrite(str(overlay_path), overlay_bgr)
