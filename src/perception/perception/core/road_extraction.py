@@ -711,8 +711,10 @@ def main():
     # =========================================================================
     # Bird's Eye View (BEV) Options
     # =========================================================================
-    parser.add_argument('--bev', action='store_true', 
-                        help='Convert to Bird\'s Eye View before processing')
+    parser.add_argument('--bev', action='store_true', default=True, dest='bev',
+                        help='Enable Bird\'s Eye View mode (default: enabled)')
+    parser.add_argument('--no-bev', action='store_false', dest='bev',
+                        help='Disable Bird\'s Eye View, use perspective mode')
     parser.add_argument('--fov', type=float, default=None,
                         help='Camera horizontal field of view in degrees (default: 110 or from config)')
     parser.add_argument('--pitch', type=float, default=None,
