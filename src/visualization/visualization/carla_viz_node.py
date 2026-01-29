@@ -314,13 +314,13 @@ class CarlaVizNode(Node):
         
         self.semantic_image_pub.publish(out_msg)
     
-    def _transform_obstacles_to_world(self, obstacle_array: ObstacleArray) -> List[Obstacle]:
-        """
-        Transform obstacles from ego frame to world frame.
-        """
-        marker_array = self._obstacles_to_marker_array(
-            self.ground_truth_obstacles, 'ground_truth_obstacles', (0.0, 1.0, 0.0))
-        self.gt_obstacles_marker_pub.publish(marker_array)
+    # def _transform_obstacles_to_world(self, obstacle_array: ObstacleArray) -> List[Obstacle]:
+    #     """
+    #     Transform obstacles from ego frame to world frame.
+    #     """
+    #     marker_array = self._obstacles_to_marker_array(
+    #         self.ground_truth_obstacles, 'ground_truth_obstacles', (0.0, 1.0, 0.0))
+    #     self.gt_obstacles_marker_pub.publish(marker_array)
     
     def detected_obstacles_callback(self, msg: ObstacleArrayMsg):
         """Receive detected obstacles."""
