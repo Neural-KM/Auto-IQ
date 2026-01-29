@@ -71,8 +71,8 @@ DEFAULT_PIXELS_PER_METER = 30.0       # resolution: 1 meter = 30 pixels
 ROAD_CLASS_ID = 0
 
 # Default output directory
-DEFAULT_OUTPUT_DIR = Path('/home/autoiq/nakul/Auto-IQ/data/rosbag_images_15jan/inference')
-DEFAULT_SENSOR_CONFIG = Path('/home/autoiq/nakul/Auto-IQ/config/carla_sensors.yaml')
+DEFAULT_OUTPUT_DIR = Path('/Auto-IQ/data/rosbag_images_15jan/inference')
+DEFAULT_SENSOR_CONFIG = Path('/Auto-IQ/config/carla_sensors.yaml')
 
 
 
@@ -812,6 +812,7 @@ def process_folder(extractor: RoadExtractor, args):
         
         # Save binary mask
         if args.save_mask:
+            road_mask = extractor.extract_road_mask(image_rgb)
             mask_path = out_dir / f'{base_name}_road_mask.png'
             cv2.imwrite(str(mask_path), road_mask)
         
@@ -960,6 +961,13 @@ def main():
         args.save_lane_overlay = True
         args.save_road_gray = True
         args.colored = True
+        args.overlay = True
+
+    # Default behavior if no output flags are provided
+    if not (args.save_mask or args.save_lanes or args.save_lane_overlay or 
+            args.save_road_gray or args.colored or args.overlay or args.road_only or args.show):
+        print("Note: No output format specified. Defaulting to --save-mask and --overlay.")
+        args.save_mask = True
         args.overlay = True
     
     # Initialize extractor
