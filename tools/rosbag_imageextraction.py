@@ -161,7 +161,7 @@ def main(args=None):
     # You can customize these parameters
     topic_name_1 = '/zed_multi/zed_left/right/image_rect_color'  # Change this to your first image topic
     topic_name_2 = '/zed_multi/zed_right/left/image_rect_color'  # Change this to your second image topic
-    output_dir = '/home/autoiq/nakul/Auto-IQ/data/rosbag_images_15jan/Images_15jan_bot_transit'   # Change this to your desired output directory
+    output_dir = '/Auto-IQ/data/rosbag_images_15jan/Images_15jan_bot_transit'   # Change this to your desired output directory
     
     image_subscriber = ImageSubscriber(
         topic_name_1=topic_name_1,
