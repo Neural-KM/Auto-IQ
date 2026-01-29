@@ -55,6 +55,7 @@ Examples:
     python -m perception.core.road_extraction --image input.jpg --model b5
 """
 
+import logging
 import numpy as np
 import cv2
 import argparse
@@ -65,6 +66,9 @@ from typing import Optional, Tuple
 
 from perception.core.segformer import SegFormer, CITYSCAPES_PALETTE
 
+# Configure module logger
+logger = logging.getLogger(__name__)
+from perception.utils.lane_detection import _extract_lanes_from_bev
 from perception.utils.bev_transform import convert_to_bev
 
 # ============================================================================
@@ -274,16 +278,16 @@ class RoadExtractor:
         height, width = image.shape[:2]
         
         # 1. Run SegFormer on ORIGINAL image → get road mask
-        print("  Step 1: Running SegFormer to get road mask...")
+        logger.debug("Step 1: Running SegFormer to get road mask...")
         original_road_mask = self.extract_road_mask(image)
         
         # 2. Separate road from image (keep only road pixels)
-        print("  Step 2: Separating road from image...")
+        logger.debug("Step 2: Separating road from image...")
         road_only = cv2.bitwise_and(image, image, mask=original_road_mask)
         
         # 3. Convert separated road image to BEV (Using Camera Geometry)
         # Dimensions are auto-calculated from ranges and pixels_per_meter
-        print("  Step 3: Converting separated road to BEV...")
+        logger.debug("Step 3: Converting separated road to BEV...")
         bev_road_image, bev_size, M = convert_to_bev(
             road_only,
             fov=fov,
@@ -295,7 +299,7 @@ class RoadExtractor:
             return_transform=True
         )
         
-        print(f"  BEV size: {bev_size[0]}x{bev_size[1]} pixels (auto-calculated for equal scale)")
+        logger.debug("BEV size: %dx%d pixels (auto-calculated for equal scale)", bev_size[0], bev_size[1])
         
         # Also transform road mask to BEV for reference
         bev_road_mask = cv2.warpPerspective(
@@ -304,166 +308,12 @@ class RoadExtractor:
         )
         
         # 5. Find lane markings in BEV image
-        print("  Step 4: Detecting lane markings in BEV...")
+        logger.debug("Step 4: Detecting lane markings in BEV...")
         bev_lane_mask = self._extract_lanes_from_bev(bev_road_image, bev_road_mask)
         
         return road_only, bev_road_image, bev_lane_mask, original_road_mask, bev_road_mask, bev_size
     
-    def _extract_lanes_from_bev(
-        self, 
-        bev_image: np.ndarray, 
-        bev_road_mask: np.ndarray
-    ) -> np.ndarray:
-        """
-        Extract lane markings from BEV image using improved multi-scale adaptive thresholding.
-        
-        Args:
-            bev_image: BEV transformed RGB image
-            bev_road_mask: Binary road mask in BEV space
-            
-        Returns:
-            Binary lane mask (H, W) where 255 = lane markings
-        """
-        # Extract road ROI
-        road_only = cv2.bitwise_and(bev_image, bev_image, mask=bev_road_mask)
-        
-        # Convert to grayscale
-        gray = cv2.cvtColor(road_only, cv2.COLOR_RGB2GRAY)
-        
-        # =====================================================================
-        # IMPROVEMENT 1: Use CLAHE (Contrast Limited Adaptive Histogram Equalization)
-        # This enhances local contrast making lane markings more visible
-        # against varying road surfaces (shadows, different asphalt colors)
-        # =====================================================================
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced_gray = clahe.apply(gray)
-        
-        # Fill non-road areas with mean road intensity (prevents edge artifacts)
-        road_pixels = enhanced_gray[bev_road_mask == 255]
-        if len(road_pixels) == 0:
-            raise ValueError("No road pixels found in BEV road mask. Cannot extract lane markings.")
-        mean_val = np.mean(road_pixels)
-        filled_gray = enhanced_gray.copy()
-        filled_gray[bev_road_mask == 0] = int(mean_val)
-        
-        # =====================================================================
-        # IMPROVEMENT 2: Multi-scale Gaussian blur for noise reduction
-        # Light blur preserves lane edges, heavier blur removes small noise
-        # =====================================================================
-        blurred_light = cv2.GaussianBlur(filled_gray, (3, 3), 0)  # Preserve fine details
-        blurred_medium = cv2.GaussianBlur(filled_gray, (5, 5), 0)  # Balance
-        
-        # =====================================================================
-        # IMPROVEMENT 3: Multi-scale Adaptive Thresholding
-        # Different block sizes capture lanes at different distances/scales
-        # Small block (11): Captures thin/distant lane markings
-        # Medium block (21): General lane detection  
-        # Large block (31): Captures wide lane markings, less affected by noise
-        # =====================================================================
-        
-        # Small scale - good for thin lane markings
-        lane_mask_small = cv2.adaptiveThreshold(
-            blurred_light,
-            255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY,
-            11,   # Small block size
-            -8    # C value: detect pixels brighter than local mean + 8
-        )
-        
-        # Medium scale - balanced detection
-        lane_mask_medium = cv2.adaptiveThreshold(
-            blurred_medium,
-            255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY,
-            21,   # Medium block size
-            -12   # C value
-        )
-        
-        # Large scale - for thick lane markings, robust to noise
-        lane_mask_large = cv2.adaptiveThreshold(
-            blurred_medium,
-            255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY,
-            31,   # Large block size
-            -15   # C value
-        )
-        
-        # =====================================================================
-        # IMPROVEMENT 4: Statistical thresholding with Otsu
-        # Otsu automatically finds optimal threshold - good for high contrast lanes
-        # =====================================================================
-        if len(road_pixels) > 100:
-            # Apply Otsu only on road pixels for better threshold estimation
-            _, lane_mask_otsu = cv2.threshold(
-                filled_gray, 0, 255, 
-                cv2.THRESH_BINARY + cv2.THRESH_OTSU
-            )
-        else:
-            lane_mask_otsu = np.zeros_like(gray)
-        
-        # =====================================================================
-        # IMPROVEMENT 5: Top-hat transform to extract bright regions
-        # This is excellent for extracting lane markings (bright on dark road)
-        # Removes large-scale illumination variations
-        # =====================================================================
-        kernel_tophat = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
-        tophat = cv2.morphologyEx(filled_gray, cv2.MORPH_TOPHAT, kernel_tophat)
-        
-        # Threshold the top-hat result
-        if len(road_pixels) > 0:
-            tophat_thresh = np.mean(tophat[bev_road_mask == 255]) + 2.0 * np.std(tophat[bev_road_mask == 255])
-            _, lane_mask_tophat = cv2.threshold(tophat, max(tophat_thresh, 20), 255, cv2.THRESH_BINARY)
-        else:
-            lane_mask_tophat = np.zeros_like(gray)
-        
-        # =====================================================================
-        # IMPROVEMENT 6: Smart combination using weighted voting
-        # Instead of simple OR, use voting - pixel is lane if detected by
-        # at least 2 methods (reduces false positives)
-        # =====================================================================
-        # Convert to binary 0/1 for voting
-        votes = (
-            (lane_mask_small > 0).astype(np.uint8) +
-            (lane_mask_medium > 0).astype(np.uint8) +
-            (lane_mask_large > 0).astype(np.uint8) +
-            (lane_mask_otsu > 0).astype(np.uint8) +
-            (lane_mask_tophat > 0).astype(np.uint8)
-        )
-        
-        # Require at least 3 votes (detected by 3+ methods)
-        lane_mask = ((votes >= 2) * 255).astype(np.uint8)
-        
-        # =====================================================================
-        # IMPROVEMENT 7: Enhanced morphological cleanup
-        # =====================================================================
-        # Remove small isolated noise (opening)
-        kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        lane_mask = cv2.morphologyEx(lane_mask, cv2.MORPH_OPEN, kernel_open)
-        
-        # Connect nearby lane segments (closing with rectangular kernel for lanes)
-        kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 7))  # Vertical bias for lanes
-        lane_mask = cv2.morphologyEx(lane_mask, cv2.MORPH_CLOSE, kernel_close)
-        
-        # =====================================================================
-        # IMPROVEMENT 8: Remove small blobs using connected components
-        # Lanes have minimum area - remove tiny noise blobs
-        # =====================================================================
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(lane_mask, connectivity=8)
-        min_area = 50  # Minimum lane marking area in pixels
-        
-        # Create clean mask keeping only components above minimum area
-        lane_mask_clean = np.zeros_like(lane_mask)
-        for i in range(1, num_labels):  # Skip background (label 0)
-            if stats[i, cv2.CC_STAT_AREA] >= min_area:
-                lane_mask_clean[labels == i] = 255
-        
-        # Enforce road mask
-        lane_mask_clean = cv2.bitwise_and(lane_mask_clean, bev_road_mask)
-        
-        return lane_mask_clean
+    
     
     def extract_lanes(self, image: np.ndarray) -> np.ndarray:
         """
@@ -515,17 +365,17 @@ def process_single_image(extractor: RoadExtractor, args):
     img_path = Path(args.image)
     
     if not img_path.exists():
-        print(f'Error: Image not found: {img_path}')
+        logger.error('Image not found: %s', img_path)
         return 1
     
     # Load image
     image_bgr = cv2.imread(str(img_path))
     if image_bgr is None:
-        print(f'Error: Could not load image: {img_path}')
+        logger.error('Could not load image: %s', img_path)
         return 1
     
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    print(f'Processing: {img_path.name} ({image_rgb.shape[1]}x{image_rgb.shape[0]})')
+    logger.info('Processing: %s (%dx%d)', img_path.name, image_rgb.shape[1], image_rgb.shape[0])
     
     # Determine output paths
     if args.output:
@@ -545,9 +395,9 @@ def process_single_image(extractor: RoadExtractor, args):
         bev_x_range = (args.bev_x_min, args.bev_x_max)
         bev_y_range = (args.bev_y_min, args.bev_y_max)
         
-        print(f'Pipeline: SegFormer → Road Mask → Separate Road → BEV → Lane Detection')
-        print(f'BEV range: X=[{args.bev_x_min}, {args.bev_x_max}]m, Y=[{args.bev_y_min}, {args.bev_y_max}]m')
-        print(f'Resolution: {args.pixels_per_meter} pixels/meter')
+        logger.info('Pipeline: SegFormer → Road Mask → Separate Road → BEV → Lane Detection')
+        logger.info('BEV range: X=[%s, %s]m, Y=[%s, %s]m', args.bev_x_min, args.bev_x_max, args.bev_y_min, args.bev_y_max)
+        logger.info('Resolution: %s pixels/meter', args.pixels_per_meter)
         
         # Run the pipeline
         road_only, bev_road_image, bev_lane_mask, original_road_mask, bev_road_mask, bev_size = extractor.extract_lanes_bev(
@@ -560,35 +410,35 @@ def process_single_image(extractor: RoadExtractor, args):
             pixels_per_meter=args.pixels_per_meter
         )
         
-        print(f'Final BEV size: {bev_size[0]}x{bev_size[1]} pixels')
+        logger.info('Final BEV size: %dx%d pixels', bev_size[0], bev_size[1])
         
         # Save separated road image (perspective)
         road_only_bgr = cv2.cvtColor(road_only, cv2.COLOR_RGB2BGR)
         road_only_path = out_dir / f'{base_name}_road_only.png'
         cv2.imwrite(str(road_only_path), road_only_bgr)
-        print(f'Saved separated road: {road_only_path}')
+        logger.info('Saved separated road: %s', road_only_path)
         
         # Save BEV road image (separated road in bird's eye view)
         bev_bgr = cv2.cvtColor(bev_road_image, cv2.COLOR_RGB2BGR)
         bev_path = out_dir / f'{base_name}_bev.png'
         cv2.imwrite(str(bev_path), bev_bgr)
-        print(f'Saved BEV road image: {bev_path}')
+        logger.info('Saved BEV road image: %s', bev_path)
         
         # Save original road mask (from SegFormer on perspective image)
         if args.save_mask:
             orig_mask_path = out_dir / f'{base_name}_road_mask.png'
             cv2.imwrite(str(orig_mask_path), original_road_mask)
-            print(f'Saved original road mask: {orig_mask_path}')
+            logger.info('Saved original road mask: %s', orig_mask_path)
             
             bev_mask_path = out_dir / f'{base_name}_bev_road_mask.png'
             cv2.imwrite(str(bev_mask_path), bev_road_mask)
-            print(f'Saved BEV road mask: {bev_mask_path}')
+            logger.info('Saved BEV road mask: %s', bev_mask_path)
         
         # Save BEV lane mask
         if args.save_lanes:
             bev_lane_path = out_dir / f'{base_name}_bev_lanes.png'
             cv2.imwrite(str(bev_lane_path), bev_lane_mask)
-            print(f'Saved BEV lane mask: {bev_lane_path}')
+            logger.info('Saved BEV lane mask: %s', bev_lane_path)
         
         # Save BEV lane overlay
         if args.save_lane_overlay:
@@ -605,7 +455,7 @@ def process_single_image(extractor: RoadExtractor, args):
             bev_lane_overlay_bgr = cv2.cvtColor(bev_lane_overlay_blended, cv2.COLOR_RGB2BGR)
             bev_lane_overlay_path = out_dir / f'{base_name}_bev_lanes_overlay.png'
             cv2.imwrite(str(bev_lane_overlay_path), bev_lane_overlay_bgr)
-            print(f'Saved BEV lane overlay: {bev_lane_overlay_path}')
+            logger.info('Saved BEV lane overlay: %s', bev_lane_overlay_path)
         
         # Save BEV road overlay
         if args.overlay:
@@ -620,7 +470,7 @@ def process_single_image(extractor: RoadExtractor, args):
             bev_road_overlay_bgr = cv2.cvtColor(bev_road_overlay_blended, cv2.COLOR_RGB2BGR)
             bev_road_overlay_path = out_dir / f'{base_name}_bev_road_overlay.png'
             cv2.imwrite(str(bev_road_overlay_path), bev_road_overlay_bgr)
-            print(f'Saved BEV road overlay: {bev_road_overlay_path}')
+            logger.info('Saved BEV road overlay: %s', bev_road_overlay_path)
         
         # Save BEV grayscale road texture (road pixels only in grayscale)
         if args.save_road_gray:
@@ -628,7 +478,7 @@ def process_single_image(extractor: RoadExtractor, args):
             bev_road_gray = cv2.cvtColor(bev_road_image, cv2.COLOR_RGB2GRAY)
             bev_road_gray_path = out_dir / f'{base_name}_bev_road_grayscale.png'
             cv2.imwrite(str(bev_road_gray_path), bev_road_gray)
-            print(f'Saved BEV grayscale road: {bev_road_gray_path}')
+            logger.info('Saved BEV grayscale road: %s', bev_road_gray_path)
         
         # Display BEV results if requested
         if args.show:
@@ -671,7 +521,7 @@ def process_single_image(extractor: RoadExtractor, args):
     if args.save_mask:
         mask_path = out_dir / f'{base_name}_road_mask.png'
         cv2.imwrite(str(mask_path), road_mask)
-        print(f'Saved road mask: {mask_path}')
+        logger.info('Saved road mask: %s', mask_path)
     
     # Save colored road (optional)
     if args.colored:
@@ -679,14 +529,14 @@ def process_single_image(extractor: RoadExtractor, args):
         colored_bgr = cv2.cvtColor(colored, cv2.COLOR_RGB2BGR)
         colored_path = out_dir / f'{base_name}_road_colored.png'
         cv2.imwrite(str(colored_path), colored_bgr)
-        print(f'Saved colored road: {colored_path}')
+        logger.info('Saved colored road: %s', colored_path)
     # Save overlay (optional)
     if args.overlay:
         overlay = extractor.visualize_road(image_rgb, mode='overlay', alpha=args.alpha)
         overlay_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
         overlay_path = out_dir / f'{base_name}_road_overlay.png'
         cv2.imwrite(str(overlay_path), overlay_bgr)
-        print(f'Saved overlay: {overlay_path}')
+        logger.info('Saved overlay: %s', overlay_path)
     
     # Save lane markings and overlays
     if args.save_lanes or args.save_lane_overlay:
@@ -696,7 +546,7 @@ def process_single_image(extractor: RoadExtractor, args):
         if args.save_lanes:
             lane_path = out_dir / f'{base_name}_lanes.png'
             cv2.imwrite(str(lane_path), lane_mask)
-            print(f'Saved separated lanes (Grayscale Threshold): {lane_path}')
+            logger.info('Saved separated lanes (Grayscale Threshold): %s', lane_path)
             
         # Save Lane Overlay
         if args.save_lane_overlay:
@@ -710,7 +560,7 @@ def process_single_image(extractor: RoadExtractor, args):
             lane_overlay_bgr = cv2.cvtColor(lane_overlay_blended, cv2.COLOR_RGB2BGR)
             lane_overlay_path = out_dir / f'{base_name}_lanes_overlay.png'
             cv2.imwrite(str(lane_overlay_path), lane_overlay_bgr)
-            print(f'Saved lane overlay: {lane_overlay_path}')
+            logger.info('Saved lane overlay: %s', lane_overlay_path)
     
     # Save Grayscale Road Texture (Requested)
     if args.save_road_gray:
@@ -718,7 +568,7 @@ def process_single_image(extractor: RoadExtractor, args):
         road_gray = cv2.cvtColor(road_rgb, cv2.COLOR_RGB2GRAY)
         road_gray_path = out_dir / f'{base_name}_road_grayscale.png'
         cv2.imwrite(str(road_gray_path), road_gray)
-        print(f'Saved grayscale road: {road_gray_path}')
+        logger.info('Saved grayscale road: %s', road_gray_path)
 
     # Display if requested
     if args.show:
@@ -738,7 +588,7 @@ def process_folder(extractor: RoadExtractor, args):
     folder = Path(args.folder)
     
     if not folder.exists():
-        print(f'Error: Folder not found: {folder}')
+        logger.error('Folder not found: %s', folder)
         return 1
     
     # Find all images
@@ -751,10 +601,10 @@ def process_folder(extractor: RoadExtractor, args):
     images = sorted(set(images))
     
     if not images:
-        print(f'No images found in: {folder}')
+        logger.error('No images found in: %s', folder)
         return 1
     
-    print(f'Found {len(images)} images to process')
+    logger.info('Found %d images to process', len(images))
     
     # Output directory
     if args.output:
@@ -766,11 +616,11 @@ def process_folder(extractor: RoadExtractor, args):
     
     # Process each image
     for i, img_path in enumerate(images):
-        print(f'[{i+1}/{len(images)}] Processing: {img_path.name}')
+        logger.info('[%d/%d] Processing: %s', i+1, len(images), img_path.name)
         
         image_bgr = cv2.imread(str(img_path))
         if image_bgr is None:
-            print(f'  Skipping: Could not load image')
+            logger.warning('Skipping: Could not load image: %s', img_path.name)
             continue
         
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
@@ -805,7 +655,7 @@ def process_folder(extractor: RoadExtractor, args):
             if args.save_lanes:
                 lane_path = out_dir / f'{base_name}_lanes.png'
                 cv2.imwrite(str(lane_path), lane_mask)
-                print(f'Saved separated lanes (Grayscale Threshold): {lane_path}')
+                logger.debug('Saved separated lanes: %s', lane_path)
 
             # Save Lane Overlay
             if args.save_lane_overlay:
@@ -827,7 +677,7 @@ def process_folder(extractor: RoadExtractor, args):
             road_gray_path = out_dir / f'{base_name}_road_grayscale.png'
             cv2.imwrite(str(road_gray_path), road_gray)
     
-    print(f'\nDone! Results saved to: {out_dir}')
+    logger.info('Done! Results saved to: %s', out_dir)
     return 0
 
 
@@ -890,7 +740,23 @@ def main():
     
     # Display
     parser.add_argument('--show', action='store_true', help='Display results')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose/debug logging')
+    parser.add_argument('--quiet', '-q', action='store_true', help='Suppress info messages, only show warnings/errors')
     args = parser.parse_args()
+    
+    # Configure logging based on verbosity flags
+    if args.quiet:
+        log_level = logging.WARNING
+    elif args.verbose:
+        log_level = logging.DEBUG
+    else:
+        log_level = logging.INFO
+    
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%H:%M:%S'
+    )
     
     # Load defaults from dataclass config, optionally override from carla_sensors.yaml
     config_fov = CONFIG.camera.fov
@@ -910,9 +776,9 @@ def main():
                         config_pitch = float(cam_cfg['rotation'][0])
                     if 'location' in cam_cfg and len(cam_cfg['location']) >= 3:
                         config_height = float(cam_cfg['location'][2])
-                    print(f"Loaded camera config from {config_path}: FOV={config_fov}, Pitch={config_pitch}, Height={config_height}")
+                    logger.info("Loaded camera config from %s: FOV=%s, Pitch=%s, Height=%s", config_path, config_fov, config_pitch, config_height)
         except Exception as e:
-            print(f"Warning: Failed to load config from {config_path}: {e}")
+            logger.warning("Failed to load config from %s: %s", config_path, e)
 
     # Set values if not provided by CLI
     if args.fov is None:
@@ -934,12 +800,12 @@ def main():
     # Default behavior if no output flags are provided
     if not (args.save_mask or args.save_lanes or args.save_lane_overlay or 
             args.save_road_gray or args.colored or args.overlay or args.road_only or args.show):
-        print("Note: No output format specified. Defaulting to --save-mask and --overlay.")
+        logger.info("No output format specified. Defaulting to --save-mask and --overlay.")
         args.save_mask = True
         args.overlay = True
     
     # Initialize extractor
-    print(f'Loading SegFormer-{args.model} for road extraction...')
+    logger.info('Loading SegFormer-%s for road extraction...', args.model)
     extractor = RoadExtractor(model_name=args.model, device=args.device)
     
     # Process
