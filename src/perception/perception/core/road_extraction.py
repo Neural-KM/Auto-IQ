@@ -51,29 +51,54 @@ import numpy as np
 import cv2
 import argparse
 import yaml
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Tuple
 
 from perception.core.segformer import SegFormer, CITYSCAPES_PALETTE
 
 from perception.utils.bev_transform import convert_to_bev
+
 # ============================================================================
-# Bird's Eye View (BEV) Transform Functions
+# Configuration (Dataclasses - frozen for immutability)
 # ============================================================================
 
-# Default BEV parameters (single source of truth)
-DEFAULT_BEV_X_RANGE = (-10.0, 10.0)   # meters left/right from vehicle center
-DEFAULT_BEV_Y_RANGE = (3.0, 30.0)     # meters forward (near to far)
-DEFAULT_PIXELS_PER_METER = 30.0       # resolution: 1 meter = 30 pixels
+@dataclass(frozen=True)
+class BEVConfig:
+    """Bird's Eye View transform parameters."""
+    x_range: Tuple[float, float] = (-10.0, 10.0)   # meters left/right from vehicle center
+    y_range: Tuple[float, float] = (3.0, 30.0)     # meters forward (near to far)
+    pixels_per_meter: float = 30.0                  # resolution: 1 meter = 30 pixels
 
 
-# Road class index in Cityscapes
-ROAD_CLASS_ID = 0
+@dataclass(frozen=True)
+class CameraConfig:
+    """Camera intrinsic/extrinsic parameters."""
+    fov: float = 110.0          # horizontal field of view in degrees
+    pitch: float = 0.0          # camera pitch in degrees
+    height: float = 1.2         # camera height above ground in meters
 
-# Default output directory
-DEFAULT_OUTPUT_DIR = Path('/Auto-IQ/data/rosbag_images_15jan/inference')
-DEFAULT_SENSOR_CONFIG = Path('/Auto-IQ/config/carla_sensors.yaml')
 
+@dataclass(frozen=True)
+class OutputConfig:
+    """Output paths configuration."""
+    default_dir: Path = field(default_factory=lambda: Path('/Auto-IQ/data/rosbag_images_15jan/inference'))
+    sensor_config: Path = field(default_factory=lambda: Path('/Auto-IQ/config/carla_sensors.yaml'))
+
+
+@dataclass(frozen=True)
+class RoadExtractionConfig:
+    """Main configuration for road extraction module."""
+    model: str = 'b0'                    # SegFormer variant: b0, b1, b2, b3, b4, b5
+    device: Optional[str] = None         # 'cuda', 'cpu', or None for auto-detect
+    road_class_id: int = 0               # Cityscapes class ID for road
+    bev: BEVConfig = field(default_factory=BEVConfig)
+    camera: CameraConfig = field(default_factory=CameraConfig)
+    output: OutputConfig = field(default_factory=OutputConfig)
+
+
+# Default configuration instance
+CONFIG = RoadExtractionConfig()
 
 
 class RoadExtractor:
@@ -105,7 +130,7 @@ class RoadExtractor:
         segmentation = self.segformer.predict(image)
         
         # Extract road pixels (class 0)
-        road_mask = (segmentation == ROAD_CLASS_ID).astype(np.uint8) * 255
+        road_mask = (segmentation == CONFIG.road_class_id).astype(np.uint8) * 255
         
         return road_mask
     
@@ -128,7 +153,7 @@ class RoadExtractor:
         segmentation, confidence = self.segformer.predict_with_confidence(image)
         
         # Road pixels with high confidence
-        is_road = segmentation == ROAD_CLASS_ID
+        is_road = segmentation == CONFIG.road_class_id
         is_confident = confidence >= threshold
         
         road_mask = (is_road & is_confident).astype(np.uint8) * 255
@@ -150,7 +175,7 @@ class RoadExtractor:
         
         # Create colored output
         colored = np.zeros_like(image)
-        colored[road_mask == 255] = CITYSCAPES_PALETTE[ROAD_CLASS_ID]  # Purple for road
+        colored[road_mask == 255] = CITYSCAPES_PALETTE[CONFIG.road_class_id]  # Purple for road
         
         return colored
     
@@ -228,9 +253,9 @@ class RoadExtractor:
             fov: Camera horizontal field of view in degrees
             pitch: Camera pitch angle in degrees
             camera_height: Camera height above ground in meters
-            bev_x_range: (x_min, x_max) range in meters (left/right). Uses DEFAULT_BEV_X_RANGE if None.
-            bev_y_range: (y_min, y_max) range in meters (forward distance). Uses DEFAULT_BEV_Y_RANGE if None.
-            pixels_per_meter: Resolution - pixels per meter. Uses DEFAULT_PIXELS_PER_METER if None.
+            bev_x_range: (x_min, x_max) range in meters (left/right). Uses CONFIG.bev.x_range if None.
+            bev_y_range: (y_min, y_max) range in meters (forward distance). Uses CONFIG.bev.y_range if None.
+            pixels_per_meter: Resolution - pixels per meter. Uses CONFIG.bev.pixels_per_meter if None.
             
         Returns:
             road_only: Separated road image (original perspective)
@@ -453,9 +478,9 @@ class RoadExtractor:
             fov: Camera horizontal field of view in degrees
             pitch: Camera pitch angle in degrees
             camera_height: Camera height above ground in meters
-            bev_x_range: (x_min, x_max) range in meters (left/right). Uses DEFAULT_BEV_X_RANGE if None.
-            bev_y_range: (y_min, y_max) range in meters (forward distance). Uses DEFAULT_BEV_Y_RANGE if None.
-            pixels_per_meter: Resolution - pixels per meter. Uses DEFAULT_PIXELS_PER_METER if None.
+            bev_x_range: (x_min, x_max) range in meters (left/right). Uses CONFIG.bev.x_range if None.
+            bev_y_range: (y_min, y_max) range in meters (forward distance). Uses CONFIG.bev.y_range if None.
+            pixels_per_meter: Resolution - pixels per meter. Uses CONFIG.bev.pixels_per_meter if None.
             
         Returns:
             bev_image: Bird's Eye View transformed image
@@ -538,7 +563,7 @@ def process_single_image(extractor: RoadExtractor, args):
     if args.output:
         out_dir = Path(args.output)
     else:
-        out_dir = DEFAULT_OUTPUT_DIR
+        out_dir = CONFIG.output.default_dir
         
     out_dir.mkdir(parents=True, exist_ok=True)
     
@@ -767,7 +792,7 @@ def process_folder(extractor: RoadExtractor, args):
     if args.output:
         out_dir = Path(args.output)
     else:
-        out_dir = DEFAULT_OUTPUT_DIR
+        out_dir = CONFIG.output.default_dir
         
     out_dir.mkdir(parents=True, exist_ok=True)
     
@@ -876,34 +901,35 @@ def main():
                         help='Camera pitch angle in degrees (default: 0 or from config)')
     parser.add_argument('--camera-height', type=float, default=None, dest='camera_height',
                         help='Camera height above ground in meters (default: 1.2 or from config)')
-    parser.add_argument('--bev-x-min', type=float, default=DEFAULT_BEV_X_RANGE[0], dest='bev_x_min',
-                        help=f'BEV left boundary in meters (default: {DEFAULT_BEV_X_RANGE[0]})')
-    parser.add_argument('--bev-x-max', type=float, default=DEFAULT_BEV_X_RANGE[1], dest='bev_x_max',
-                        help=f'BEV right boundary in meters (default: {DEFAULT_BEV_X_RANGE[1]})')
-    parser.add_argument('--bev-y-min', type=float, default=DEFAULT_BEV_Y_RANGE[0], dest='bev_y_min',
-                        help=f'BEV near boundary in meters (default: {DEFAULT_BEV_Y_RANGE[0]})')
-    parser.add_argument('--bev-y-max', type=float, default=DEFAULT_BEV_Y_RANGE[1], dest='bev_y_max',
-                        help=f'BEV far boundary in meters (default: {DEFAULT_BEV_Y_RANGE[1]})')
-    parser.add_argument('--pixels-per-meter', type=float, default=DEFAULT_PIXELS_PER_METER, dest='pixels_per_meter',
-                        help=f'BEV resolution in pixels per meter (default: {DEFAULT_PIXELS_PER_METER}). Higher = more detail.')
+    parser.add_argument('--bev-x-min', type=float, default=CONFIG.bev.x_range[0], dest='bev_x_min',
+                        help=f'BEV left boundary in meters (default: {CONFIG.bev.x_range[0]})')
+    parser.add_argument('--bev-x-max', type=float, default=CONFIG.bev.x_range[1], dest='bev_x_max',
+                        help=f'BEV right boundary in meters (default: {CONFIG.bev.x_range[1]})')
+    parser.add_argument('--bev-y-min', type=float, default=CONFIG.bev.y_range[0], dest='bev_y_min',
+                        help=f'BEV near boundary in meters (default: {CONFIG.bev.y_range[0]})')
+    parser.add_argument('--bev-y-max', type=float, default=CONFIG.bev.y_range[1], dest='bev_y_max',
+                        help=f'BEV far boundary in meters (default: {CONFIG.bev.y_range[1]})')
+    parser.add_argument('--pixels-per-meter', type=float, default=CONFIG.bev.pixels_per_meter, dest='pixels_per_meter',
+                        help=f'BEV resolution in pixels per meter (default: {CONFIG.bev.pixels_per_meter}). Higher = more detail.')
     
     # Model options
-    parser.add_argument('--model', type=str, default='b0', 
+    parser.add_argument('--model', type=str, default=CONFIG.model, 
                         choices=['b0', 'b1', 'b2', 'b3', 'b4', 'b5'],
-                        help='SegFormer model variant (default: b0)')
+                        help=f'SegFormer model variant (default: {CONFIG.model})')
     parser.add_argument('--device', type=str, choices=['cuda', 'cpu'],
+                        default=CONFIG.device,
                         help='Device to use (default: auto-detect)')
     
     # Display
     parser.add_argument('--show', action='store_true', help='Display results')
     args = parser.parse_args()
     
-    # Load defaults from config if available
-    config_fov = 110.0
-    config_pitch = 0.0
-    config_height = 1.2
+    # Load defaults from dataclass config, optionally override from carla_sensors.yaml
+    config_fov = CONFIG.camera.fov
+    config_pitch = CONFIG.camera.pitch
+    config_height = CONFIG.camera.height
     
-    config_path = Path(args.config) if args.config else DEFAULT_SENSOR_CONFIG
+    config_path = Path(args.config) if args.config else CONFIG.output.sensor_config
     if config_path.exists():
         try:
             with open(config_path, 'r') as f:
