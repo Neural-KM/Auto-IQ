@@ -231,9 +231,9 @@ class RoadExtractor:
     def extract_lanes_bev(
         self, 
         image: np.ndarray,
-        fov: float = 110.0,
-        pitch: float = 0.0,
-        camera_height: float = 1.2,
+        fov: float = None,
+        pitch: float = None,
+        camera_height: float = None,
         bev_x_range: Tuple[float, float] = None,
         bev_y_range: Tuple[float, float] = None,
         pixels_per_meter: float = None
@@ -250,9 +250,9 @@ class RoadExtractor:
         
         Args:
             image: RGB image (H, W, 3)
-            fov: Camera horizontal field of view in degrees
-            pitch: Camera pitch angle in degrees
-            camera_height: Camera height above ground in meters
+            fov: Camera horizontal field of view in degrees. Uses CONFIG.camera.fov if None.
+            pitch: Camera pitch angle in degrees. Uses CONFIG.camera.pitch if None.
+            camera_height: Camera height above ground in meters. Uses CONFIG.camera.height if None.
             bev_x_range: (x_min, x_max) range in meters (left/right). Uses CONFIG.bev.x_range if None.
             bev_y_range: (y_min, y_max) range in meters (forward distance). Uses CONFIG.bev.y_range if None.
             pixels_per_meter: Resolution - pixels per meter. Uses CONFIG.bev.pixels_per_meter if None.
@@ -265,6 +265,11 @@ class RoadExtractor:
             bev_road_mask: Road mask in BEV space
             bev_size: (width, height) of the BEV output
         """
+        # Use CONFIG defaults if not provided
+        fov = fov if fov is not None else CONFIG.camera.fov
+        pitch = pitch if pitch is not None else CONFIG.camera.pitch
+        camera_height = camera_height if camera_height is not None else CONFIG.camera.height
+        
         height, width = image.shape[:2]
         
         # 1. Run SegFormer on ORIGINAL image → get road mask
@@ -462,9 +467,9 @@ class RoadExtractor:
     def extract_road_bev(
         self, 
         image: np.ndarray,
-        fov: float = 110.0,
-        pitch: float = 0.0,
-        camera_height: float = 1.2,
+        fov: float = None,
+        pitch: float = None,
+        camera_height: float = None,
         bev_x_range: Tuple[float, float] = None,
         bev_y_range: Tuple[float, float] = None,
         pixels_per_meter: float = None
@@ -474,9 +479,9 @@ class RoadExtractor:
         
         Args:
             image: RGB image (H, W, 3)
-            fov: Camera horizontal field of view in degrees
-            pitch: Camera pitch angle in degrees
-            camera_height: Camera height above ground in meters
+            fov: Camera horizontal field of view in degrees. Uses CONFIG.camera.fov if None.
+            pitch: Camera pitch angle in degrees. Uses CONFIG.camera.pitch if None.
+            camera_height: Camera height above ground in meters. Uses CONFIG.camera.height if None.
             bev_x_range: (x_min, x_max) range in meters (left/right). Uses CONFIG.bev.x_range if None.
             bev_y_range: (y_min, y_max) range in meters (forward distance). Uses CONFIG.bev.y_range if None.
             pixels_per_meter: Resolution - pixels per meter. Uses CONFIG.bev.pixels_per_meter if None.
@@ -485,6 +490,11 @@ class RoadExtractor:
             bev_image: Bird's Eye View transformed image
             bev_road_mask: Road mask in BEV space
         """
+        # Use CONFIG defaults if not provided
+        fov = fov if fov is not None else CONFIG.camera.fov
+        pitch = pitch if pitch is not None else CONFIG.camera.pitch
+        camera_height = camera_height if camera_height is not None else CONFIG.camera.height
+        
         # Convert to Bird's Eye View
         bev_image, _, _ = convert_to_bev(
             image, fov, pitch, camera_height,
