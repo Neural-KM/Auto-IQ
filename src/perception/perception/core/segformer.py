@@ -89,20 +89,6 @@ SEGFORMER_MODELS = {
     'b5': 'nvidia/segformer-b5-finetuned-cityscapes-1024-1024',
 }
 
-'''
-============================================================
-Model    | Images | Avg(ms)   | Median(ms)  | FPS    
-------------------------------------------------------------
-b0       | 42     | 10.55     | 10.49       | 94.82  
-b1       | 42     | 60.35     | 60.08       | 16.57  
-b2       | 42     | 18.29     | 18.13       | 54.66  
-b3       | 42     | 22.17     | 22.03       | 45.10  
-b4       | 42     | 27.26     | 26.63       | 36.69  
-b5       | 42     | 191.58    | 191.56      | 5.22   
-
-Ran on all images:: /data/rosbag_images_15jan/Images_15jan_bot_transit/topic_1 
-
-'''
 class SegFormer:
     """
     SegFormer semantic segmentation inference class.
