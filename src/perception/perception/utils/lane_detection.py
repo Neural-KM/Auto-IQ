@@ -2,7 +2,6 @@ import cv2
 import numpy as np
 
 def _extract_lanes_from_bev(
-        self, 
         bev_image: np.ndarray, 
         bev_road_mask: np.ndarray
     ) -> np.ndarray:

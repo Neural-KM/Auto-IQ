@@ -317,7 +317,7 @@ class RoadExtractor:
         
         # 5. Find lane markings in BEV image
         logger.debug("Step 4: Detecting lane markings in BEV...")
-        bev_lane_mask = self._extract_lanes_from_bev(bev_road_image, bev_road_mask)
+        bev_lane_mask = _extract_lanes_from_bev(bev_road_image, bev_road_mask)
         
         return road_only, bev_road_image, bev_lane_mask, original_road_mask, bev_road_mask, bev_size
     
