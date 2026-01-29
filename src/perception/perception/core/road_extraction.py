@@ -199,32 +199,6 @@ class RoadExtractor:
         
         return result
 
-    def extract_lanes(self, image: np.ndarray) -> np.ndarray:
-        """
-        Extract lane markings using Adaptive Thresholding on the Road ROI.
-        
-        Args:
-            image: RGB image (H, W, 3)
-            
-        Returns:
-            Binary mask (H, W) where 255 = lane markings
-        """
-        # 1. Get road mask
-        road_mask = self.extract_road_mask(image)
-        
-        # 2. Extract road ROI
-        road_only = cv2.bitwise_and(image, image, mask=road_mask)
-        
-        # 3. Convert to Grayscale
-        gray = cv2.cvtColor(road_only, cv2.COLOR_RGB2GRAY)
-        
-        # 4. Apply Adaptive Thresholding
-        # To make adaptive thresholding work correctly near mask boundaries, 
-        # we fill the non-road area with the mean road intensity.
-        mean_road_val = cv2.mean(gray, mask=road_mask)[0]
-        filled_gray = gray.copy()
-        filled_gray[road_mask == 0] = int(mean_road_val)
-    
     # =========================================================================
     # Bird's Eye View (BEV) Methods
     # =========================================================================
