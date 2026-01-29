@@ -334,10 +334,9 @@ class RoadExtractor:
         
         # Fill non-road areas with mean road intensity (prevents edge artifacts)
         road_pixels = enhanced_gray[bev_road_mask == 255]
-        if len(road_pixels) > 0:
-            mean_val = np.mean(road_pixels)
-        else:
-            mean_val = 128
+        if len(road_pixels) == 0:
+            raise ValueError("No road pixels found in BEV road mask. Cannot extract lane markings.")
+        mean_val = np.mean(road_pixels)
         filled_gray = enhanced_gray.copy()
         filled_gray[bev_road_mask == 0] = int(mean_val)
         
