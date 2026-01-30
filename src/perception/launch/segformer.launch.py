@@ -43,8 +43,5 @@ def generate_launch_description():
                 'input_topic': LaunchConfiguration('input_topic'),
                 'resize_output': True,
             }],
-            remappings=[
-                # Add any topic remappings here if needed
-            ]
         ),
     ])
