@@ -48,38 +48,8 @@ from typing import Optional, Tuple, Union
 
 from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
 
-from perception.data_classes.semantic_labels import get_class_name
+from perception.data_classes.semantic_labels import get_class_name, SEMANTIC_COLOR_LUT
 
-
-# Cityscapes color palette (19 classes)
-CITYSCAPES_PALETTE = np.array([
-    [128, 64, 128],    # 0: road (purple)
-    [244, 35, 232],    # 1: sidewalk (pink)
-    [70, 70, 70],      # 2: building (dark gray)
-    [102, 102, 156],   # 3: wall (blue-gray)
-    [190, 153, 153],   # 4: fence (beige)
-    [153, 153, 153],   # 5: pole (gray)
-    [250, 170, 30],    # 6: traffic light (orange)
-    [220, 220, 0],     # 7: traffic sign (yellow)
-    [107, 142, 35],    # 8: vegetation (olive)
-    [152, 251, 152],   # 9: terrain (light green)
-    [70, 130, 180],    # 10: sky (steel blue)
-    [220, 20, 60],     # 11: person (crimson)
-    [255, 0, 0],       # 12: rider (red)
-    [0, 0, 142],       # 13: car (dark blue)
-    [0, 0, 70],        # 14: truck (navy)
-    [0, 60, 100],      # 15: bus (dark cyan)
-    [0, 80, 100],      # 16: train (teal)
-    [0, 0, 230],       # 17: motorcycle (blue)
-    [119, 11, 32],     # 18: bicycle (maroon)
-], dtype=np.uint8)
-
-CITYSCAPES_CLASSES = [
-    'road', 'sidewalk', 'building', 'wall', 'fence', 'pole',
-    'traffic light', 'traffic sign', 'vegetation', 'terrain',
-    'sky', 'person', 'rider', 'car', 'truck', 'bus',
-    'train', 'motorcycle', 'bicycle'
-]
 
 # Available model variants (sorted by size/accuracy)
 SEGFORMER_MODELS = {
@@ -219,16 +189,22 @@ class SegFormer:
     @staticmethod
     def colorize(mask: np.ndarray) -> np.ndarray:
         """
-        Convert class indices to RGB colors using Cityscapes palette.
+        Convert class indices to RGB colors using semantic_labels palette.
         
         Args:
-            mask: Segmentation mask (H, W) with class indices 0-18
+            mask: Segmentation mask (H, W) with Cityscapes class indices 0-18
             
         Returns:
             RGB image (H, W, 3)
+        
+        Note:
+            Cityscapes class IDs are offset by +1 to map to CARLA labels
+            (Cityscapes 0=road -> CARLA 1=road, etc.)
         """
-        mask = np.clip(mask, 0, len(CITYSCAPES_PALETTE) - 1)
-        return CITYSCAPES_PALETTE[mask]
+        # Offset by +1 to map Cityscapes classes to CARLA semantic labels
+        # Cityscapes: 0=road, 1=sidewalk, ... | CARLA: 0=unlabeled, 1=road, 2=sidewalk, ...
+        offset_mask = np.clip(mask + 1, 0, 255)
+        return SEMANTIC_COLOR_LUT[offset_mask]
     
     @staticmethod
     def overlay(
