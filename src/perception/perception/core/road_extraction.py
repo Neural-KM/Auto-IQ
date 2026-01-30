@@ -132,23 +132,23 @@ class RoadExtractor:
         """
         self.segformer = SegFormer(model_name=model_name, device=device)
     
-    def extract_road_mask(self, image: np.ndarray) -> np.ndarray:
+    def extract_road_mask(self, segmentation: np.ndarray) -> np.ndarray:
+
         """
-        Extract binary road mask from image.
+        Extract binary road mask from segmentation map.
+        
+        NOTE: SegFormer inference should be done upstream (in ROS node or caller).
+        This function only extracts the road class from the segmentation output.
+        It has not been used in the code can be used if segmentation is pre-computed otherwise redundant.
         
         Args:
-            image: RGB image as numpy array (H, W, 3), uint8
+            segmentation: Segmentation map from SegFormer (H, W), class IDs
             
         Returns:
             Binary mask (H, W) where 255 = road, 0 = non-road
         """
-        # Get segmentation prediction
-        segmentation = self.segformer.predict(image)
-        
-        # Extract road pixels (class 0)
-        road_mask = (segmentation == CONFIG.road_class_id).astype(np.uint8) * 255
-        
-        return road_mask
+        # Extract road pixels (Cityscapes class 0 = road)
+        return (segmentation == CONFIG.road_class_id).astype(np.uint8) * 255
     
     def extract_road_with_confidence(
         self, 
@@ -199,7 +199,9 @@ class RoadExtractor:
         Returns:
             RGB visualization image
         """
-        road_mask = self.extract_road_mask(image)
+        # Run SegFormer inference and extract road mask
+        segmentation = self.segformer.predict(image)
+        road_mask = (segmentation == CONFIG.road_class_id).astype(np.uint8) * 255
         
         if mode == 'colored':
             # Road colored, rest black
@@ -226,12 +228,14 @@ class RoadExtractor:
         Returns:
             RGB image with only road pixels visible, rest black
         """
-        road_mask = self.extract_road_mask(image)
+        # Run SegFormer inference to get segmentation map
+        segmentation = self.segformer.predict(image)
         
-        # Separate road from the real image using the mask
-        result = cv2.bitwise_and(image, image, mask=road_mask)
+        # Extract road mask (Cityscapes class 0 = road, 255 = road, 0 = non-road)
+        road_mask = (segmentation == CONFIG.road_class_id).astype(np.uint8) * 255
         
-        return result
+        # Apply mask to isolate road pixels, rest becomes black
+        return cv2.bitwise_and(image, image, mask=road_mask)
 
     # =========================================================================
     # Inverse Perspective Mapping (IPM) Methods
@@ -281,9 +285,12 @@ class RoadExtractor:
         
         height, width = image.shape[:2]
         
-        # 1. Run SegFormer on ORIGINAL image → get road mask
+        # 1. Run SegFormer on ORIGINAL image → get segmentation map
         print("Step 1: Running SegFormer to get road mask...")
-        original_road_mask = self.extract_road_mask(image)
+        segmentation = self.segformer.predict(image)
+        
+        # Extract road mask (Cityscapes class 0 = road)
+        original_road_mask = (segmentation == CONFIG.road_class_id).astype(np.uint8) * 255
         
         # 2. Separate road from image (keep only road pixels)
         print("Step 2: Separating road from image...")
@@ -329,8 +336,9 @@ class RoadExtractor:
         Returns:
             Binary mask (H, W) where 255 = lane markings
         """
-        # 1. Get road mask
-        road_mask = self.extract_road_mask(image)
+        # 1. Run SegFormer inference and extract road mask
+        segmentation = self.segformer.predict(image)
+        road_mask = (segmentation == CONFIG.road_class_id).astype(np.uint8) * 255
         
         # 2. Extract road ROI
         road_only = cv2.bitwise_and(image, image, mask=road_mask)
