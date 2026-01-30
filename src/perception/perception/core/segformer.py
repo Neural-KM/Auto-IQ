@@ -48,7 +48,7 @@ from typing import Optional, Tuple, Union
 
 from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
 
-from perception.data_classes.semantic_labels import get_class_name, SEMANTIC_COLOR_LUT
+from perception.data_classes.semantic_labels import get_class_name, get_class_stats, SEMANTIC_COLOR_LUT
 
 
 # Available model variants (sorted by size/accuracy)
@@ -226,30 +226,6 @@ class SegFormer:
         colored = SegFormer.colorize(mask)
         blended = cv2.addWeighted(image, 1 - alpha, colored, alpha, 0)
         return blended
-    
-    def get_class_stats(self, mask: np.ndarray) -> dict:
-        """
-        Get pixel statistics for each class in the segmentation.
-        
-        Args:
-            mask: Segmentation mask (H, W)
-            
-        Returns:
-            Dict mapping class names to pixel counts and percentages
-        """
-        total_pixels = mask.size
-        unique, counts = np.unique(mask, return_counts=True)
-        
-        stats = {}
-        for class_id, count in zip(unique, counts):
-            class_name = get_class_name(class_id) or 'unknown'
-            stats[class_name] = {
-                'class_id': int(class_id),
-                'pixel_count': int(count),
-                'percentage': float(count / total_pixels * 100)
-            }
-        
-        return stats
 
 
 def main():
@@ -355,7 +331,8 @@ def process_single_image(segformer, args):
     
     # Print stats if requested
     if args.stats:
-        stats = segformer.get_class_stats(mask)
+        # Offset by +1 to map Cityscapes classes (0=road) to CARLA labels (1=road)
+        stats = get_class_stats(mask + 1)
         print('Class distribution:')
         for name, info in sorted(stats.items(), key=lambda x: -x[1]['percentage']):
             print(f'  {name}: {info["percentage"]:.1f}%')
@@ -471,7 +448,8 @@ def process_batch_folder(segformer, args):
             
             # Print top classes if stats requested
             if args.stats:
-                stats = segformer.get_class_stats(mask)
+                # Offset by +1 to map Cityscapes classes (0=road) to CARLA labels (1=road)
+                stats = get_class_stats(mask + 1)
                 top_class = list(sorted(stats.items(), key=lambda x: -x[1]['percentage'])[0])
                 print(f' | Top: {top_class[0]} ({top_class[1]["percentage"]:.1f}%)', end='')
             
