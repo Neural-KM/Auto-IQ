@@ -42,6 +42,7 @@ def generate_launch_description():
                 'publish_colored': LaunchConfiguration('publish_colored'),
                 'input_topic': LaunchConfiguration('input_topic'),
                 'resize_output': True,
+                'use_sim_time': True,  # Use simulation time from /clock
             }],
         ),
     ])
