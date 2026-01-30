@@ -97,15 +97,29 @@ class SegFormerNode(Node):
         Process incoming RGB image through SegFormer.
         
         Args:
-            msg: ROS2 Image message (expected encoding: rgb8 or bgr8)
+            msg: ROS2 Image message (expected: bgra8 from CARLA)
         """
         start_time = time.perf_counter()
         
-        # Convert ROS Image to numpy array
-        try:
-            image_np = self._ros_image_to_numpy(msg)
-        except ValueError as e:
-            self.get_logger().error(f'Image conversion failed: {e}')
+        # Log encoding on first few messages to verify
+        if self._inference_count < 3:
+            self.get_logger().info(f'Received image: {msg.width}x{msg.height}, encoding={msg.encoding}')
+        
+        # Convert CARLA bgra8 image to RGB numpy array
+        # CARLA cameras publish bgra8 encoding
+        if msg.encoding == 'bgra8':
+            image_bgra = np.frombuffer(msg.data, dtype=np.uint8).reshape(
+                msg.height, msg.width, 4)
+            image_np = cv2.cvtColor(image_bgra, cv2.COLOR_BGRA2RGB)
+        elif msg.encoding == 'bgr8':
+            image_bgr = np.frombuffer(msg.data, dtype=np.uint8).reshape(
+                msg.height, msg.width, 3)
+            image_np = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        elif msg.encoding == 'rgb8':
+            image_np = np.frombuffer(msg.data, dtype=np.uint8).reshape(
+                msg.height, msg.width, 3)
+        else:
+            self.get_logger().error(f'Unsupported encoding: {msg.encoding}')
             return
         
         original_height, original_width = image_np.shape[:2]
@@ -150,36 +164,6 @@ class SegFormerNode(Node):
             self.get_logger().info(
                 f'SegFormer: {inference_time:.1f}ms (avg: {avg_time:.1f}ms, ~{fps:.1f} FPS)'
             )
-    
-    def _ros_image_to_numpy(self, msg: Image) -> np.ndarray:
-        """
-        Convert ROS2 Image message to numpy array.
-        
-        Args:
-            msg: ROS2 Image message
-            
-        Returns:
-            RGB numpy array (H, W, 3)
-        """
-        if msg.encoding == 'rgb8':
-            image = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, 3)
-        elif msg.encoding == 'bgr8':
-            image = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, 3)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        elif msg.encoding == 'bgra8':
-            image = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, 4)
-            image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGB)
-        elif msg.encoding == 'rgba8':
-            image = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, 4)
-            image = image[:, :, :3]  # Drop alpha
-        else:
-            raise ValueError(f'Unsupported image encoding: {msg.encoding}')
-        
-        return image
     
     def _numpy_to_ros_image(self, array: np.ndarray, header, encoding: str) -> Image:
         """
