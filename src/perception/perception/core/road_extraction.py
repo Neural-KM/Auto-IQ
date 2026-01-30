@@ -3,64 +3,36 @@
 Road Extraction from SegFormer Segmentation
 =============================================
 
-This module uses SegFormer to extract road masks and lane markings from images.
-Cityscapes class 0 = road
+This module provides the RoadExtractor class for extracting road masks and lane 
+markings from images using SegFormer semantic segmentation (Cityscapes class 0 = road).
 
-Core Methods:
-    extract_road_mask()         - Binary road mask from SegFormer
-    extract_road_with_confidence() - Road mask with confidence filtering
-    visualize_road()            - Unified visualization (overlay/colored/mask_only modes)
-    extract_lanes()             - Lane detection on perspective images
-    extract_lanes_ipm()         - Lane detection with Inverse Perspective Mapping (default)
+RoadExtractor Class:
+    Parameters:
+        model_name (str): SegFormer variant - 'b0', 'b1', 'b2', 'b3', 'b4', 'b5'
+                          Larger models (b4, b5) provide better accuracy but slower inference.
+        device (str): 'cuda', 'cpu', or None for auto-detection.
+    
+    Core Methods:
+        extract_road_mask(segmentation)     - Binary road mask from pre-computed segmentation
+        extract_road_with_confidence(image) - Road mask with confidence filtering
+        extract_road_only(image)            - Original image with only road pixels visible
+        visualize_road(image, mode)         - Visualization (overlay/colored/mask_only modes)
+        extract_lanes(image)                - Lane detection on perspective images
+        extract_lanes_ipm(image, ...)       - Lane detection with Inverse Perspective Mapping
 
-Usage:
-    python -m perception.core.road_extraction --image path/to/image.jpg --output path/to/output/
-    python -m perception.core.road_extraction --folder path/to/images/ --output path/to/output/
+Configuration:
+    RoadExtractionConfig dataclass provides default settings for:
+        - IPMConfig: x_range, y_range, pixels_per_meter
+        - CameraConfig: fov, pitch, height
+        - OutputConfig: default_dir, sensor_config path
 
-Output Flags:
-    --save-mask           Save binary road mask
-    --save-lanes          Save extracted lane binary mask
-    --save-lane-overlay   Save lane overlay (Red lanes)
-    --save-road-gray      Save grayscale road texture
-    --colored             Save colored road visualization
-    --overlay             Save road overlay on original image
-    --all                 Save all outputs (enables all above flags)
-
-Inverse Perspective Mapping (IPM) Mode (DEFAULT):
-    IPM mode is enabled by default for better lane detection accuracy.
-    --no-ipm              To run it without taking IPM
-    --fov                 Camera FOV in degrees (default: 110)
-    --pitch               Camera pitch in degrees (default: 0)
-    --camera-height       Camera height in meters (default: 1.2)
-    --pixels-per-meter    IPM resolution (default: 30)
-    --ipm-x-min/max       IPM lateral range in meters
-    --ipm-y-min/max       IPM forward range in meters
-
-Logging:
-    --verbose, -v         Enable debug logging
-    --quiet, -q           Suppress info messages, only show warnings/errors
-
-Examples:
-    # Single image - IPM mode (default)
-    python -m perception.core.road_extraction --image input.jpg --output ./output/
+Example:
+    from perception.core.road_extraction import RoadExtractor
     
-    # Single image with all outputs
-    python -m perception.core.road_extraction --image input.jpg --all
-    
-    # IPM with custom camera parameters
-    python -m perception.core.road_extraction --image input.jpg --fov 90 --pitch 5 --camera-height 1.5 --all
-    
-    # To run it without taking IPM
-    python -m perception.core.road_extraction --image input.jpg --no-ipm --save-lanes --save-lane-overlay
-    
-    # Batch process folder
-    python -m perception.core.road_extraction --folder /data/images/ --output ./road_masks/
-    
-    # Use larger model for better accuracy
-    python -m perception.core.road_extraction --image input.jpg --model b5
-    
-    # Quiet mode (only warnings/errors)
-    python -m perception.core.road_extraction --folder /data/images/ --all -q
+    extractor = RoadExtractor(model_name='b0', device='cuda')
+    road_only, ipm_road, ipm_lanes, road_mask, ipm_mask, size = extractor.extract_lanes_ipm(
+        image, fov=110, pitch=5, camera_height=1.2
+    )
 """
 
 import numpy as np
@@ -307,7 +279,6 @@ class RoadExtractor:
             bev_x_range=ipm_x_range,
             bev_y_range=ipm_y_range,
             pixels_per_meter=pixels_per_meter,
-            return_transform=True
         )
         
         print(f"IPM size: {ipm_size[0]}x{ipm_size[1]} pixels (auto-calculated for equal scale)")
@@ -693,8 +664,59 @@ def process_folder(extractor: RoadExtractor, args):
 
 
 def main():
+    """CLI entry point for road extraction.
+    
+    Output Flags:
+        --save-mask           Save binary road mask
+        --save-lanes          Save extracted lane binary mask
+        --save-lane-overlay   Save lane overlay (Red lanes)
+        --save-road-gray      Save grayscale road texture
+        --colored             Save colored road visualization
+        --overlay             Save road overlay on original image
+        --all                 Save all outputs (enables all above flags)
+
+    Inverse Perspective Mapping (IPM) Mode (DEFAULT):
+        IPM mode is enabled by default for better lane detection accuracy.
+        --no-ipm              To run it without taking IPM
+        --fov                 Camera FOV in degrees (default: 110)
+        --pitch               Camera pitch in degrees (default: 0)
+        --camera-height       Camera height in meters (default: 1.2)
+        --pixels-per-meter    IPM resolution (default: 30)
+        --ipm-x-min/max       IPM lateral range in meters
+        --ipm-y-min/max       IPM forward range in meters
+
+    Logging:
+        --verbose, -v         Enable debug logging
+        --quiet, -q           Suppress info messages, only show warnings/errors
+    """
+    
+    cli_examples = """
+Examples:
+    # Single image - IPM mode (default)
+    python -m perception.core.road_extraction --image input.jpg --output ./output/
+    
+    # Single image with all outputs
+    python -m perception.core.road_extraction --image input.jpg --all
+    
+    # IPM with custom camera parameters
+    python -m perception.core.road_extraction --image input.jpg --fov 90 --pitch 5 --camera-height 1.5 --all
+    
+    # To run it without taking IPM
+    python -m perception.core.road_extraction --image input.jpg --no-ipm --save-lanes --save-lane-overlay
+    
+    # Batch process folder
+    python -m perception.core.road_extraction --folder /data/images/ --output ./road_masks/
+    
+    # Use larger model for better accuracy
+    python -m perception.core.road_extraction --image input.jpg --model b5
+    
+    # Quiet mode (only warnings/errors)
+    python -m perception.core.road_extraction --folder /data/images/ --all -q
+"""
+    
     parser = argparse.ArgumentParser(
         description='Extract road mask from images using SegFormer',
+        epilog=cli_examples,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     

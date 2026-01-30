@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from typing import Tuple, Optional
+from typing import Tuple
 def convert_to_ipm(
     image: np.ndarray,
     fov: float,
@@ -9,8 +9,7 @@ def convert_to_ipm(
     bev_x_range: Tuple[float, float],
     bev_y_range: Tuple[float, float],
     pixels_per_meter: float,
-    return_transform: bool = False
-) -> Tuple[np.ndarray, Tuple[int, int], Optional[np.ndarray]]:
+) -> Tuple[np.ndarray, Tuple[int, int], np.ndarray]:
     """
     Convert an image to Bird's Eye View using camera intrinsics and extrinsics.
     
@@ -27,12 +26,11 @@ def convert_to_ipm(
         bev_x_range: (x_min, x_max) range in meters (left/right from vehicle center).
         bev_y_range: (y_min, y_max) range in meters (forward distance from camera).
         pixels_per_meter: Resolution of BEV output (pixels per meter). Higher = more detail.
-        return_transform: If True, also returns the 3x3 perspective transform matrix.
         
     Returns:
         bev_img: BEV transformed image
         bev_size: (width, height) of output BEV image (auto-calculated)
-        M: 3x3 perspective transform matrix (only if return_transform=True, else None)
+        M: 3x3 perspective transform matrix
         
     Example:
         # Basic usage
@@ -125,8 +123,5 @@ def convert_to_ipm(
     
     bev_size = (bev_width, bev_height)
     
-    if return_transform:
-        return bev_img, bev_size, M
-    else:
-        return bev_img, bev_size, None
+    return bev_img, bev_size, M
 
