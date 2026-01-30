@@ -48,7 +48,7 @@ from typing import Optional, Tuple, Union
 
 from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
 
-from perception.data_classes.semantic_labels import get_class_name, get_class_stats, SEMANTIC_COLOR_LUT
+from perception.data_classes.semantic_labels import get_class_name, get_class_stats, colorize_mask, SEMANTIC_COLOR_LUT
 
 
 # Available model variants (sorted by size/accuracy)
@@ -126,18 +126,18 @@ class SegFormer:
     def predict(
         self, 
         image: np.ndarray,
-        return_logits: bool = False
+        return_confidence: bool = False
     ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """
         Run semantic segmentation on an image.
         
         Args:
             image: RGB image as numpy array (H, W, 3), uint8
-            return_logits: If True, also return raw logits
+            return_confidence: If True, also return confidence scores
             
         Returns:
             segmentation: Class indices (H, W) as numpy array
-            logits (optional): Raw logits (num_classes, H, W) if return_logits=True
+            confidence (optional): Confidence scores (H, W) in [0, 1] if return_confidence=True
         """
         original_size = image.shape[:2]  # (H, W)
         
@@ -161,50 +161,14 @@ class SegFormer:
         # Get class predictions
         segmentation = upsampled_logits.argmax(dim=1).squeeze().cpu().numpy()
         
-        if return_logits:
+        if return_confidence:
+            # Softmax to get probabilities
             logits_np = upsampled_logits.squeeze().cpu().numpy()
-            return segmentation, logits_np
+            probs = np.exp(logits_np) / np.exp(logits_np).sum(axis=0, keepdims=True)
+            confidence = probs.max(axis=0)
+            return segmentation, confidence
         
         return segmentation
-    
-    def predict_with_confidence(self, image: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Run segmentation and return confidence scores.
-        
-        Args:
-            image: RGB image (H, W, 3)
-            
-        Returns:
-            segmentation: Class indices (H, W)
-            confidence: Confidence scores (H, W) in [0, 1]
-        """
-        segmentation, logits = self.predict(image, return_logits=True)
-        
-        # Softmax to get probabilities
-        probs = np.exp(logits) / np.exp(logits).sum(axis=0, keepdims=True)
-        confidence = probs.max(axis=0)
-        
-        return segmentation, confidence
-    
-    @staticmethod
-    def colorize(mask: np.ndarray) -> np.ndarray:
-        """
-        Convert class indices to RGB colors using semantic_labels palette.
-        
-        Args:
-            mask: Segmentation mask (H, W) with Cityscapes class indices 0-18
-            
-        Returns:
-            RGB image (H, W, 3)
-        
-        Note:
-            Cityscapes class IDs are offset by +1 to map to CARLA labels
-            (Cityscapes 0=road -> CARLA 1=road, etc.)
-        """
-        # Offset by +1 to map Cityscapes classes to CARLA semantic labels
-        # Cityscapes: 0=road, 1=sidewalk, ... | CARLA: 0=unlabeled, 1=road, 2=sidewalk, ...
-        offset_mask = np.clip(mask + 1, 0, 255)
-        return SEMANTIC_COLOR_LUT[offset_mask]
     
     @staticmethod
     def overlay(
@@ -217,13 +181,14 @@ class SegFormer:
         
         Args:
             image: Original RGB image (H, W, 3)
-            mask: Segmentation mask (H, W) with class indices
+            mask: Segmentation mask (H, W) with Cityscapes class indices
             alpha: Blend factor (0 = only image, 1 = only segmentation)
             
         Returns:
             Blended RGB image (H, W, 3)
         """
-        colored = SegFormer.colorize(mask)
+        # Offset by +1 to map Cityscapes classes to CARLA semantic labels
+        colored = colorize_mask(mask + 1)
         blended = cv2.addWeighted(image, 1 - alpha, colored, alpha, 0)
         return blended
 
@@ -342,7 +307,8 @@ def process_single_image(segformer, args):
         result = segformer.overlay(image_rgb, mask, alpha=args.alpha)
         default_suffix = '_overlay'
     else:
-        result = segformer.colorize(mask)
+        # Offset by +1 to map Cityscapes classes to CARLA semantic labels
+        result = colorize_mask(mask + 1)
         default_suffix = '_segmented'
     
     # Determine output path with model name
@@ -458,7 +424,8 @@ def process_batch_folder(segformer, args):
                 result = segformer.overlay(image_rgb, mask, alpha=args.alpha)
                 suffix = '_overlay'
             else:
-                result = segformer.colorize(mask)
+                # Offset by +1 to map Cityscapes classes to CARLA semantic labels
+                result = colorize_mask(mask + 1)
                 suffix = '_segmented'
             
             # Save with model name in filename
