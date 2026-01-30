@@ -48,6 +48,8 @@ from typing import Optional, Tuple, Union
 
 from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
 
+from perception.data_classes.semantic_labels import get_class_name
+
 
 # Cityscapes color palette (19 classes)
 CITYSCAPES_PALETTE = np.array([
@@ -249,13 +251,6 @@ class SegFormer:
         blended = cv2.addWeighted(image, 1 - alpha, colored, alpha, 0)
         return blended
     
-    @staticmethod
-    def get_class_name(class_id: int) -> str:
-        """Get class name from class ID."""
-        if 0 <= class_id < len(CITYSCAPES_CLASSES):
-            return CITYSCAPES_CLASSES[class_id]
-        return 'unknown'
-    
     def get_class_stats(self, mask: np.ndarray) -> dict:
         """
         Get pixel statistics for each class in the segmentation.
@@ -271,7 +266,7 @@ class SegFormer:
         
         stats = {}
         for class_id, count in zip(unique, counts):
-            class_name = self.get_class_name(class_id)
+            class_name = get_class_name(class_id) or 'unknown'
             stats[class_name] = {
                 'class_id': int(class_id),
                 'pixel_count': int(count),
