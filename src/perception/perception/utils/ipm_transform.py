@@ -3,12 +3,12 @@ import numpy as np
 from typing import Tuple, Optional
 def convert_to_ipm(
     image: np.ndarray,
-    fov: float = 110.0,
-    pitch: float = 0.0,
-    camera_height: float = 1.2,
-    bev_x_range: Tuple[float, float] = None,
-    bev_y_range: Tuple[float, float] = None,
-    pixels_per_meter: float = None,
+    fov: float,
+    pitch: float,
+    camera_height: float,
+    bev_x_range: Tuple[float, float],
+    bev_y_range: Tuple[float, float],
+    pixels_per_meter: float,
     return_transform: bool = False
 ) -> Tuple[np.ndarray, Tuple[int, int], Optional[np.ndarray]]:
     """
@@ -25,11 +25,8 @@ def convert_to_ipm(
         pitch: Camera pitch angle in degrees (positive = looking down)
         camera_height: Camera height above ground in meters
         bev_x_range: (x_min, x_max) range in meters (left/right from vehicle center).
-                     Uses DEFAULT_BEV_X_RANGE if None.
         bev_y_range: (y_min, y_max) range in meters (forward distance from camera).
-                     Uses DEFAULT_BEV_Y_RANGE if None.
         pixels_per_meter: Resolution of BEV output (pixels per meter). Higher = more detail.
-                         Uses DEFAULT_PIXELS_PER_METER if None.
         return_transform: If True, also returns the 3x3 perspective transform matrix.
         
     Returns:
@@ -47,14 +44,6 @@ def convert_to_ipm(
         # Scale is equal: 1 pixel = 3.33 cm in both directions
     """
     height, width = image.shape[:2]
-    
-    # Use defaults if not specified
-    if bev_x_range is None:
-        bev_x_range = DEFAULT_BEV_X_RANGE
-    if bev_y_range is None:
-        bev_y_range = DEFAULT_BEV_Y_RANGE
-    if pixels_per_meter is None:
-        pixels_per_meter = DEFAULT_PIXELS_PER_METER
     
     x_min, x_max = bev_x_range
     y_min, y_max = bev_y_range

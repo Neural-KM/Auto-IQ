@@ -71,7 +71,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Tuple
 
-from perception.core.segformer import SegFormer, CITYSCAPES_PALETTE
+from perception.core.segformer import SegFormer
 from perception.utils.lane_detection import _extract_lanes_from_ipm
 from perception.utils.ipm_transform import convert_to_ipm 
 
