@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 from typing import Tuple, Optional
-def convert_to_bev(
+def convert_to_ipm(
     image: np.ndarray,
     fov: float = 110.0,
     pitch: float = 0.0,

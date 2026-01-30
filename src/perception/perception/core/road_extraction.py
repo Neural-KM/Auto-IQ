@@ -11,7 +11,7 @@ Core Methods:
     extract_road_with_confidence() - Road mask with confidence filtering
     visualize_road()            - Unified visualization (overlay/colored/mask_only modes)
     extract_lanes()             - Lane detection on perspective images
-    extract_lanes_bev()         - Lane detection with Bird's Eye View transform (default)
+    extract_lanes_ipm()         - Lane detection with Inverse Perspective Mapping (default)
 
 Usage:
     python -m perception.core.road_extraction --image path/to/image.jpg --output path/to/output/
@@ -26,32 +26,32 @@ Output Flags:
     --overlay             Save road overlay on original image
     --all                 Save all outputs (enables all above flags)
 
-Bird's Eye View (BEV) Mode (DEFAULT):
-    BEV mode is enabled by default for better lane detection accuracy.
-    --no-bev              Disable BEV, use perspective mode instead
+Inverse Perspective Mapping (IPM) Mode (DEFAULT):
+    IPM mode is enabled by default for better lane detection accuracy.
+    --no-ipm              To run it without taking IPM
     --fov                 Camera FOV in degrees (default: 110)
     --pitch               Camera pitch in degrees (default: 0)
     --camera-height       Camera height in meters (default: 1.2)
-    --pixels-per-meter    BEV resolution (default: 30)
-    --bev-x-min/max       BEV lateral range in meters
-    --bev-y-min/max       BEV forward range in meters
+    --pixels-per-meter    IPM resolution (default: 30)
+    --ipm-x-min/max       IPM lateral range in meters
+    --ipm-y-min/max       IPM forward range in meters
 
 Logging:
     --verbose, -v         Enable debug logging
     --quiet, -q           Suppress info messages, only show warnings/errors
 
 Examples:
-    # Single image - BEV mode (default)
+    # Single image - IPM mode (default)
     python -m perception.core.road_extraction --image input.jpg --output ./output/
     
     # Single image with all outputs
     python -m perception.core.road_extraction --image input.jpg --all
     
-    # BEV with custom camera parameters
+    # IPM with custom camera parameters
     python -m perception.core.road_extraction --image input.jpg --fov 90 --pitch 5 --camera-height 1.5 --all
     
-    # Disable BEV, use perspective mode
-    python -m perception.core.road_extraction --image input.jpg --no-bev --save-lanes --save-lane-overlay
+    # To run it without taking IPM
+    python -m perception.core.road_extraction --image input.jpg --no-ipm --save-lanes --save-lane-overlay
     
     # Batch process folder
     python -m perception.core.road_extraction --folder /data/images/ --output ./road_masks/
@@ -63,7 +63,6 @@ Examples:
     python -m perception.core.road_extraction --folder /data/images/ --all -q
 """
 
-import logging
 import numpy as np
 import cv2
 import argparse
@@ -73,19 +72,16 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from perception.core.segformer import SegFormer, CITYSCAPES_PALETTE
-
-# Configure module logger
-logger = logging.getLogger(__name__)
-from perception.utils.lane_detection import _extract_lanes_from_bev
-from perception.utils.bev_transform import convert_to_bev
+from perception.utils.lane_detection import _extract_lanes_from_ipm
+from perception.utils.ipm_transform import convert_to_ipm 
 
 # ============================================================================
 # Configuration (Dataclasses - frozen for immutability)
 # ============================================================================
 
 @dataclass(frozen=True)
-class BEVConfig:
-    """Bird's Eye View transform parameters."""
+class IPMConfig:
+    """Inverse Perspective Mapping transform parameters."""
     x_range: Tuple[float, float] = (-10.0, 10.0)   # meters left/right from vehicle center
     y_range: Tuple[float, float] = (3.0, 30.0)     # meters forward (near to far)
     pixels_per_meter: float = 30.0                  # resolution: 1 meter = 30 pixels
@@ -112,7 +108,7 @@ class RoadExtractionConfig:
     model: str = 'b0'                    # SegFormer variant: b0, b1, b2, b3, b4, b5
     device: Optional[str] = None         # 'cuda', 'cpu', or None for auto-detect
     road_class_id: int = 0               # Cityscapes class ID for road
-    bev: BEVConfig = field(default_factory=BEVConfig)
+    ipm: IPMConfig = field(default_factory=IPMConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
@@ -238,45 +234,45 @@ class RoadExtractor:
         return result
 
     # =========================================================================
-    # Bird's Eye View (BEV) Methods
+    # Inverse Perspective Mapping (IPM) Methods
     # =========================================================================
     
-    def extract_lanes_bev(
+    def extract_lanes_ipm(
         self, 
         image: np.ndarray,
         fov: float = None,
         pitch: float = None,
         camera_height: float = None,
-        bev_x_range: Tuple[float, float] = None,
-        bev_y_range: Tuple[float, float] = None,
+        ipm_x_range: Tuple[float, float] = None,
+        ipm_y_range: Tuple[float, float] = None,
         pixels_per_meter: float = None
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Tuple[int, int]]:
         """
         Extract lane markings using the correct pipeline:
-        SegFormer → Road Mask → Separate Road → BEV → Lane Detection
+        SegFormer → Road Mask → Separate Road → IPM → Lane Detection
         
         Pipeline:
         1. Run SegFormer on original image → get road mask
         2. Separate road from image (road_only = image AND mask)
-        3. Convert separated road image to BEV
-        4. Find lane markings in BEV image
+        3. Convert separated road image to IPM
+        4. Find lane markings in IPM image
         
         Args:
             image: RGB image (H, W, 3)
             fov: Camera horizontal field of view in degrees. Uses CONFIG.camera.fov if None.
             pitch: Camera pitch angle in degrees. Uses CONFIG.camera.pitch if None.
             camera_height: Camera height above ground in meters. Uses CONFIG.camera.height if None.
-            bev_x_range: (x_min, x_max) range in meters (left/right). Uses CONFIG.bev.x_range if None.
-            bev_y_range: (y_min, y_max) range in meters (forward distance). Uses CONFIG.bev.y_range if None.
-            pixels_per_meter: Resolution - pixels per meter. Uses CONFIG.bev.pixels_per_meter if None.
+            ipm_x_range: (x_min, x_max) range in meters (left/right). Uses CONFIG.ipm.x_range if None.
+            ipm_y_range: (y_min, y_max) range in meters (forward distance). Uses CONFIG.ipm.y_range if None.
+            pixels_per_meter: Resolution - pixels per meter. Uses CONFIG.ipm.pixels_per_meter if None.
             
         Returns:
             road_only: Separated road image (original perspective)
-            bev_road_image: Bird's Eye View of separated road
-            bev_lane_mask: Lane markings mask in BEV space
+            ipm_road_image: Inverse Perspective Mapping of separated road
+            ipm_lane_mask: Lane markings mask in IPM space
             original_road_mask: Road mask from SegFormer (perspective)
-            bev_road_mask: Road mask in BEV space
-            bev_size: (width, height) of the BEV output
+            ipm_road_mask: Road mask in IPM space
+            ipm_size: (width, height) of the IPM output
         """
         # Use CONFIG defaults if not provided
         fov = fov if fov is not None else CONFIG.camera.fov
@@ -286,40 +282,40 @@ class RoadExtractor:
         height, width = image.shape[:2]
         
         # 1. Run SegFormer on ORIGINAL image → get road mask
-        logger.debug("Step 1: Running SegFormer to get road mask...")
+        print("Step 1: Running SegFormer to get road mask...")
         original_road_mask = self.extract_road_mask(image)
         
         # 2. Separate road from image (keep only road pixels)
-        logger.debug("Step 2: Separating road from image...")
+        print("Step 2: Separating road from image...")
         road_only = cv2.bitwise_and(image, image, mask=original_road_mask)
         
-        # 3. Convert separated road image to BEV (Using Camera Geometry)
+        # 3. Convert separated road image to IPM (Using Camera Geometry)
         # Dimensions are auto-calculated from ranges and pixels_per_meter
-        logger.debug("Step 3: Converting separated road to BEV...")
-        bev_road_image, bev_size, M = convert_to_bev(
+        print("Step 3: Converting separated road to IPM...")
+        ipm_road_image, ipm_size, M = convert_to_ipm(
             road_only,
             fov=fov,
             pitch=pitch,
             camera_height=camera_height,
-            bev_x_range=bev_x_range,
-            bev_y_range=bev_y_range,
+            bev_x_range=ipm_x_range,
+            bev_y_range=ipm_y_range,
             pixels_per_meter=pixels_per_meter,
             return_transform=True
         )
         
-        logger.debug("BEV size: %dx%d pixels (auto-calculated for equal scale)", bev_size[0], bev_size[1])
-        
-        # Also transform road mask to BEV for reference
-        bev_road_mask = cv2.warpPerspective(
-            original_road_mask, M, bev_size, 
+        print(f"IPM size: {ipm_size[0]}x{ipm_size[1]} pixels (auto-calculated for equal scale)")
+
+        # Also transform road mask to IPM for reference
+        ipm_road_mask = cv2.warpPerspective(
+            original_road_mask, M, ipm_size, 
             flags=cv2.INTER_NEAREST
         )
         
-        # 5. Find lane markings in BEV image
-        logger.debug("Step 4: Detecting lane markings in BEV...")
-        bev_lane_mask = _extract_lanes_from_bev(bev_road_image, bev_road_mask)
+        # 5. Find lane markings in IPM image
+        print("Step 4: Detecting lane markings in IPM...")
+        ipm_lane_mask = _extract_lanes_from_ipm(ipm_road_image, ipm_road_mask)
         
-        return road_only, bev_road_image, bev_lane_mask, original_road_mask, bev_road_mask, bev_size
+        return road_only, ipm_road_image, ipm_lane_mask, original_road_mask, ipm_road_mask, ipm_size
     
     
     
@@ -373,18 +369,17 @@ def process_single_image(extractor: RoadExtractor, args):
     img_path = Path(args.image)
     
     if not img_path.exists():
-        logger.error('Image not found: %s', img_path)
+        print(f'Error: Image not found: {img_path}')
         return 1
-    
+
     # Load image
     image_bgr = cv2.imread(str(img_path))
     if image_bgr is None:
-        logger.error('Could not load image: %s', img_path)
+        print(f'Error: Could not load image: {img_path}')
         return 1
-    
+
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    logger.info('Processing: %s (%dx%d)', img_path.name, image_rgb.shape[1], image_rgb.shape[0])
-    
+    print(f'Processing: {img_path.name} ({image_rgb.shape[1]}x{image_rgb.shape[0]})')
     # Determine output paths
     if args.output:
         out_dir = Path(args.output)
@@ -396,124 +391,124 @@ def process_single_image(extractor: RoadExtractor, args):
     base_name = img_path.stem
     
     # =========================================================================
-    # Bird's Eye View (BEV) Processing Mode
-    # Pipeline: SegFormer → Road Mask → Separate Road → BEV → Lane Detection
+    # Inverse Perspective Mapping (IPM) Processing Mode
+    # Pipeline: SegFormer → Road Mask → Separate Road → IPM → Lane Detection
     # =========================================================================
-    if args.bev:
-        bev_x_range = (args.bev_x_min, args.bev_x_max)
-        bev_y_range = (args.bev_y_min, args.bev_y_max)
+    if args.ipm:
+        ipm_x_range = (args.ipm_x_min, args.ipm_x_max)
+        ipm_y_range = (args.ipm_y_min, args.ipm_y_max)
         
-        logger.info('Pipeline: SegFormer → Road Mask → Separate Road → BEV → Lane Detection')
-        logger.info('BEV range: X=[%s, %s]m, Y=[%s, %s]m', args.bev_x_min, args.bev_x_max, args.bev_y_min, args.bev_y_max)
-        logger.info('Resolution: %s pixels/meter', args.pixels_per_meter)
+        print('Pipeline: SegFormer → Road Mask → Separate Road → IPM → Lane Detection')
+        print(f'IPM range: X=[{args.ipm_x_min}, {args.ipm_x_max}]m, Y=[{args.ipm_y_min}, {args.ipm_y_max}]m')
+        print(f'Resolution: {args.pixels_per_meter} pixels/meter')
         
         # Run the pipeline
-        road_only, bev_road_image, bev_lane_mask, original_road_mask, bev_road_mask, bev_size = extractor.extract_lanes_bev(
+        road_only, ipm_road_image, ipm_lane_mask, original_road_mask, ipm_road_mask, ipm_size = extractor.extract_lanes_ipm(
             image_rgb,
             fov=args.fov,
             pitch=args.pitch,
             camera_height=args.camera_height,
-            bev_x_range=bev_x_range,
-            bev_y_range=bev_y_range,
+            ipm_x_range=ipm_x_range,
+            ipm_y_range=ipm_y_range,
             pixels_per_meter=args.pixels_per_meter
         )
         
-        logger.info('Final BEV size: %dx%d pixels', bev_size[0], bev_size[1])
-        
+        print(f'Final IPM size: {ipm_size[0]}x{ipm_size[1]} pixels')
+
         # Save separated road image (perspective)
         road_only_bgr = cv2.cvtColor(road_only, cv2.COLOR_RGB2BGR)
         road_only_path = out_dir / f'{base_name}_road_only.png'
         cv2.imwrite(str(road_only_path), road_only_bgr)
-        logger.info('Saved separated road: %s', road_only_path)
-        
-        # Save BEV road image (separated road in bird's eye view)
-        bev_bgr = cv2.cvtColor(bev_road_image, cv2.COLOR_RGB2BGR)
-        bev_path = out_dir / f'{base_name}_bev.png'
-        cv2.imwrite(str(bev_path), bev_bgr)
-        logger.info('Saved BEV road image: %s', bev_path)
+        print(f'Saved separated road: {road_only_path}')
+
+        # Save IPM road image (separated road in inverse perspective mapping)
+        ipm_bgr = cv2.cvtColor(ipm_road_image, cv2.COLOR_RGB2BGR)
+        ipm_path = out_dir / f'{base_name}_ipm.png'
+        cv2.imwrite(str(ipm_path), ipm_bgr)
+        print(f'Saved IPM road image: {ipm_path}')
         
         # Save original road mask (from SegFormer on perspective image)
         if args.save_mask:
             orig_mask_path = out_dir / f'{base_name}_road_mask.png'
             cv2.imwrite(str(orig_mask_path), original_road_mask)
-            logger.info('Saved original road mask: %s', orig_mask_path)
+            print(f'Saved original road mask: {orig_mask_path}')
             
-            bev_mask_path = out_dir / f'{base_name}_bev_road_mask.png'
-            cv2.imwrite(str(bev_mask_path), bev_road_mask)
-            logger.info('Saved BEV road mask: %s', bev_mask_path)
+            ipm_mask_path = out_dir / f'{base_name}_ipm_road_mask.png'
+            cv2.imwrite(str(ipm_mask_path), ipm_road_mask)
+            print(f'Saved IPM road mask: {ipm_mask_path}')
         
-        # Save BEV lane mask
+        # Save IPM lane mask
         if args.save_lanes:
-            bev_lane_path = out_dir / f'{base_name}_bev_lanes.png'
-            cv2.imwrite(str(bev_lane_path), bev_lane_mask)
-            logger.info('Saved BEV lane mask: %s', bev_lane_path)
+            ipm_lane_path = out_dir / f'{base_name}_ipm_lanes.png'
+            cv2.imwrite(str(ipm_lane_path), ipm_lane_mask)
+            print(f'Saved IPM lane mask: {ipm_lane_path}')
         
-        # Save BEV lane overlay
+        # Save IPM lane overlay
         if args.save_lane_overlay:
-            # Create lane overlay on BEV image (Red lanes)
-            bev_lane_overlay = bev_road_image.copy()
-            bev_lane_overlay[bev_lane_mask == 255] = (255, 0, 0)  # Red
+            # Create lane overlay on IPM image (Red lanes)
+            ipm_lane_overlay = ipm_road_image.copy()
+            ipm_lane_overlay[ipm_lane_mask == 255] = (255, 0, 0)  # Red
             
             # Blend
-            bev_lane_overlay_blended = cv2.addWeighted(
-                bev_road_image, 1 - args.alpha, 
-                bev_lane_overlay, args.alpha, 0
+            ipm_lane_overlay_blended = cv2.addWeighted(
+                ipm_road_image, 1 - args.alpha, 
+                ipm_lane_overlay, args.alpha, 0
             )
             
-            bev_lane_overlay_bgr = cv2.cvtColor(bev_lane_overlay_blended, cv2.COLOR_RGB2BGR)
-            bev_lane_overlay_path = out_dir / f'{base_name}_bev_lanes_overlay.png'
-            cv2.imwrite(str(bev_lane_overlay_path), bev_lane_overlay_bgr)
-            logger.info('Saved BEV lane overlay: %s', bev_lane_overlay_path)
+            ipm_lane_overlay_bgr = cv2.cvtColor(ipm_lane_overlay_blended, cv2.COLOR_RGB2BGR)
+            ipm_lane_overlay_path = out_dir / f'{base_name}_ipm_lanes_overlay.png'
+            cv2.imwrite(str(ipm_lane_overlay_path), ipm_lane_overlay_bgr)
+            print(f'Saved IPM lane overlay: {ipm_lane_overlay_path}')
         
-        # Save BEV road overlay
+        # Save IPM road overlay
         if args.overlay:
-            bev_road_overlay = bev_road_image.copy()
-            bev_road_overlay[bev_road_mask == 255] = (128, 64, 128)  # Purple
+            ipm_road_overlay = ipm_road_image.copy()
+            ipm_road_overlay[ipm_road_mask == 255] = (128, 64, 128)  # Purple
             
-            bev_road_overlay_blended = cv2.addWeighted(
-                bev_road_image, 1 - args.alpha, 
-                bev_road_overlay, args.alpha, 0
+            ipm_road_overlay_blended = cv2.addWeighted(
+                ipm_road_image, 1 - args.alpha, 
+                ipm_road_overlay, args.alpha, 0
             )
             
-            bev_road_overlay_bgr = cv2.cvtColor(bev_road_overlay_blended, cv2.COLOR_RGB2BGR)
-            bev_road_overlay_path = out_dir / f'{base_name}_bev_road_overlay.png'
-            cv2.imwrite(str(bev_road_overlay_path), bev_road_overlay_bgr)
-            logger.info('Saved BEV road overlay: %s', bev_road_overlay_path)
+            ipm_road_overlay_bgr = cv2.cvtColor(ipm_road_overlay_blended, cv2.COLOR_RGB2BGR)
+            ipm_road_overlay_path = out_dir / f'{base_name}_ipm_road_overlay.png'
+            cv2.imwrite(str(ipm_road_overlay_path), ipm_road_overlay_bgr)
+            print(f'Saved IPM road overlay: {ipm_road_overlay_path}')
         
-        # Save BEV grayscale road texture (road pixels only in grayscale)
+        # Save IPM grayscale road texture (road pixels only in grayscale)
         if args.save_road_gray:
-            # Convert BEV road image to grayscale
-            bev_road_gray = cv2.cvtColor(bev_road_image, cv2.COLOR_RGB2GRAY)
-            bev_road_gray_path = out_dir / f'{base_name}_bev_road_grayscale.png'
-            cv2.imwrite(str(bev_road_gray_path), bev_road_gray)
-            logger.info('Saved BEV grayscale road: %s', bev_road_gray_path)
+            # Convert IPM road image to grayscale
+            ipm_road_gray = cv2.cvtColor(ipm_road_image, cv2.COLOR_RGB2GRAY)
+            ipm_road_gray_path = out_dir / f'{base_name}_ipm_road_grayscale.png'
+            cv2.imwrite(str(ipm_road_gray_path), ipm_road_gray)
+            print(f'Saved IPM grayscale road: {ipm_road_gray_path}')
         
-        # Display BEV results if requested
+        # Display IPM results if requested
         if args.show:
             # Create side-by-side comparison
-            # Resize original to match BEV height for comparison
-            bev_h = bev_size[1]
-            scale = bev_h / image_bgr.shape[0]
+            # Resize original to match IPM height for comparison
+            ipm_h = ipm_size[1]
+            scale = ipm_h / image_bgr.shape[0]
             orig_resized = cv2.resize(image_bgr, None, fx=scale, fy=scale)
             
-            # Create BEV lane overlay for display
-            bev_display = bev_bgr.copy()
-            bev_display[bev_lane_mask == 255] = (0, 0, 255)  # Red in BGR
+            # Create IPM lane overlay for display
+            ipm_display = ipm_bgr.copy()
+            ipm_display[ipm_lane_mask == 255] = (0, 0, 255)  # Red in BGR
             
             # Pad original if needed to match heights
-            if orig_resized.shape[0] != bev_display.shape[0]:
-                pad = abs(orig_resized.shape[0] - bev_display.shape[0])
-                if orig_resized.shape[0] < bev_display.shape[0]:
+            if orig_resized.shape[0] != ipm_display.shape[0]:
+                pad = abs(orig_resized.shape[0] - ipm_display.shape[0])
+                if orig_resized.shape[0] < ipm_display.shape[0]:
                     orig_resized = cv2.copyMakeBorder(
                         orig_resized, 0, pad, 0, 0, cv2.BORDER_CONSTANT, value=(0, 0, 0)
                     )
                 else:
-                    bev_display = cv2.copyMakeBorder(
-                        bev_display, 0, pad, 0, 0, cv2.BORDER_CONSTANT, value=(0, 0, 0)
+                    ipm_display = cv2.copyMakeBorder(
+                        ipm_display, 0, pad, 0, 0, cv2.BORDER_CONSTANT, value=(0, 0, 0)
                     )
             
-            display = np.hstack([orig_resized, bev_display])
-            cv2.imshow('Original | BEV with Lanes', display)
+            display = np.hstack([orig_resized, ipm_display])
+            cv2.imshow('Original | IPM with Lanes', display)
             cv2.waitKey(0)
             cv2.destroyAllWindows()
         
@@ -529,22 +524,22 @@ def process_single_image(extractor: RoadExtractor, args):
     if args.save_mask:
         mask_path = out_dir / f'{base_name}_road_mask.png'
         cv2.imwrite(str(mask_path), road_mask)
-        logger.info('Saved road mask: %s', mask_path)
-    
+        print(f'Saved road mask: {mask_path}')
+
     # Save colored road (optional)
     if args.colored:
         colored = extractor.visualize_road(image_rgb, mode='colored')
         colored_bgr = cv2.cvtColor(colored, cv2.COLOR_RGB2BGR)
         colored_path = out_dir / f'{base_name}_road_colored.png'
         cv2.imwrite(str(colored_path), colored_bgr)
-        logger.info('Saved colored road: %s', colored_path)
+        print(f'Saved colored road: {colored_path}')
     # Save overlay (optional)
     if args.overlay:
         overlay = extractor.visualize_road(image_rgb, mode='overlay', alpha=args.alpha)
         overlay_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
         overlay_path = out_dir / f'{base_name}_road_overlay.png'
         cv2.imwrite(str(overlay_path), overlay_bgr)
-        logger.info('Saved overlay: %s', overlay_path)
+        print(f'Saved overlay: {overlay_path}')
     
     # Save lane markings and overlays
     if args.save_lanes or args.save_lane_overlay:
@@ -554,7 +549,7 @@ def process_single_image(extractor: RoadExtractor, args):
         if args.save_lanes:
             lane_path = out_dir / f'{base_name}_lanes.png'
             cv2.imwrite(str(lane_path), lane_mask)
-            logger.info('Saved separated lanes (Grayscale Threshold): %s', lane_path)
+            print(f'Saved separated lanes (Grayscale Threshold): {lane_path}')
             
         # Save Lane Overlay
         if args.save_lane_overlay:
@@ -568,7 +563,7 @@ def process_single_image(extractor: RoadExtractor, args):
             lane_overlay_bgr = cv2.cvtColor(lane_overlay_blended, cv2.COLOR_RGB2BGR)
             lane_overlay_path = out_dir / f'{base_name}_lanes_overlay.png'
             cv2.imwrite(str(lane_overlay_path), lane_overlay_bgr)
-            logger.info('Saved lane overlay: %s', lane_overlay_path)
+            print(f'Saved lane overlay: {lane_overlay_path}')
     
     # Save Grayscale Road Texture (Requested)
     if args.save_road_gray:
@@ -576,7 +571,7 @@ def process_single_image(extractor: RoadExtractor, args):
         road_gray = cv2.cvtColor(road_rgb, cv2.COLOR_RGB2GRAY)
         road_gray_path = out_dir / f'{base_name}_road_grayscale.png'
         cv2.imwrite(str(road_gray_path), road_gray)
-        logger.info('Saved grayscale road: %s', road_gray_path)
+        print(f'Saved grayscale road: {road_gray_path}')
 
     # Display if requested
     if args.show:
@@ -596,7 +591,7 @@ def process_folder(extractor: RoadExtractor, args):
     folder = Path(args.folder)
     
     if not folder.exists():
-        logger.error('Folder not found: %s', folder)
+        print(f'Error: Folder not found: {folder}')
         return 1
     
     # Find all images
@@ -609,10 +604,10 @@ def process_folder(extractor: RoadExtractor, args):
     images = sorted(set(images))
     
     if not images:
-        logger.error('No images found in: %s', folder)
+        print(f'Error: No images found in: {folder}')
         return 1
     
-    logger.info('Found %d images to process', len(images))
+    print(f'Found {len(images)} images to process')
     
     # Output directory
     if args.output:
@@ -624,11 +619,11 @@ def process_folder(extractor: RoadExtractor, args):
     
     # Process each image
     for i, img_path in enumerate(images):
-        logger.info('[%d/%d] Processing: %s', i+1, len(images), img_path.name)
+        print(f'[{i+1}/{len(images)}] Processing: {img_path.name}')
         
         image_bgr = cv2.imread(str(img_path))
         if image_bgr is None:
-            logger.warning('Skipping: Could not load image: %s', img_path.name)
+            print(f'Warning: Skipping: Could not load image: {img_path.name}')
             continue
         
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
@@ -663,7 +658,7 @@ def process_folder(extractor: RoadExtractor, args):
             if args.save_lanes:
                 lane_path = out_dir / f'{base_name}_lanes.png'
                 cv2.imwrite(str(lane_path), lane_mask)
-                logger.debug('Saved separated lanes: %s', lane_path)
+                print(f'Saved separated lanes: {lane_path}')
 
             # Save Lane Overlay
             if args.save_lane_overlay:
@@ -685,7 +680,7 @@ def process_folder(extractor: RoadExtractor, args):
             road_gray_path = out_dir / f'{base_name}_road_grayscale.png'
             cv2.imwrite(str(road_gray_path), road_gray)
     
-    logger.info('Done! Results saved to: %s', out_dir)
+    print(f'Done! Results saved to: {out_dir}')
     return 0
 
 
@@ -717,28 +712,28 @@ def main():
     parser.add_argument('--all', action='store_true', help='Save all outputs')
     
     # =========================================================================
-    # Bird's Eye View (BEV) Options
+    # Inverse Perspective Mapping (IPM) Options
     # =========================================================================
-    parser.add_argument('--bev', action='store_true', default=True, dest='bev',
-                        help='Enable Bird\'s Eye View mode (default: enabled)')
-    parser.add_argument('--no-bev', action='store_false', dest='bev',
-                        help='Disable Bird\'s Eye View, use perspective mode')
+    parser.add_argument('--ipm', action='store_true', default=True, dest='ipm',
+                        help='Enable Inverse Perspective Mapping mode (default: enabled)')
+    parser.add_argument('--no-ipm', action='store_false', dest='ipm',
+                        help='To run it without taking IPM')
     parser.add_argument('--fov', type=float, default=None,
                         help='Camera horizontal field of view in degrees (default: 110 or from config)')
     parser.add_argument('--pitch', type=float, default=None,
                         help='Camera pitch angle in degrees (default: 0 or from config)')
     parser.add_argument('--camera-height', type=float, default=None, dest='camera_height',
                         help='Camera height above ground in meters (default: 1.2 or from config)')
-    parser.add_argument('--bev-x-min', type=float, default=CONFIG.bev.x_range[0], dest='bev_x_min',
-                        help=f'BEV left boundary in meters (default: {CONFIG.bev.x_range[0]})')
-    parser.add_argument('--bev-x-max', type=float, default=CONFIG.bev.x_range[1], dest='bev_x_max',
-                        help=f'BEV right boundary in meters (default: {CONFIG.bev.x_range[1]})')
-    parser.add_argument('--bev-y-min', type=float, default=CONFIG.bev.y_range[0], dest='bev_y_min',
-                        help=f'BEV near boundary in meters (default: {CONFIG.bev.y_range[0]})')
-    parser.add_argument('--bev-y-max', type=float, default=CONFIG.bev.y_range[1], dest='bev_y_max',
-                        help=f'BEV far boundary in meters (default: {CONFIG.bev.y_range[1]})')
-    parser.add_argument('--pixels-per-meter', type=float, default=CONFIG.bev.pixels_per_meter, dest='pixels_per_meter',
-                        help=f'BEV resolution in pixels per meter (default: {CONFIG.bev.pixels_per_meter}). Higher = more detail.')
+    parser.add_argument('--ipm-x-min', type=float, default=CONFIG.ipm.x_range[0], dest='ipm_x_min',
+                        help=f'IPM left boundary in meters (default: {CONFIG.ipm.x_range[0]})')
+    parser.add_argument('--ipm-x-max', type=float, default=CONFIG.ipm.x_range[1], dest='ipm_x_max',
+                        help=f'IPM right boundary in meters (default: {CONFIG.ipm.x_range[1]})')
+    parser.add_argument('--ipm-y-min', type=float, default=CONFIG.ipm.y_range[0], dest='ipm_y_min',
+                        help=f'IPM near boundary in meters (default: {CONFIG.ipm.y_range[0]})')
+    parser.add_argument('--ipm-y-max', type=float, default=CONFIG.ipm.y_range[1], dest='ipm_y_max',
+                        help=f'IPM far boundary in meters (default: {CONFIG.ipm.y_range[1]})')
+    parser.add_argument('--pixels-per-meter', type=float, default=CONFIG.ipm.pixels_per_meter, dest='pixels_per_meter',
+                        help=f'IPM resolution in pixels per meter (default: {CONFIG.ipm.pixels_per_meter}). Higher = more detail.')
     
     # Model options
     parser.add_argument('--model', type=str, default=CONFIG.model, 
@@ -753,20 +748,6 @@ def main():
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose/debug logging')
     parser.add_argument('--quiet', '-q', action='store_true', help='Suppress info messages, only show warnings/errors')
     args = parser.parse_args()
-    
-    # Configure logging based on verbosity flags
-    if args.quiet:
-        log_level = logging.WARNING
-    elif args.verbose:
-        log_level = logging.DEBUG
-    else:
-        log_level = logging.INFO
-    
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%H:%M:%S'
-    )
     
     # Load defaults from dataclass config, optionally override from carla_sensors.yaml
     config_fov = CONFIG.camera.fov
@@ -786,9 +767,9 @@ def main():
                         config_pitch = float(cam_cfg['rotation'][0])
                     if 'location' in cam_cfg and len(cam_cfg['location']) >= 3:
                         config_height = float(cam_cfg['location'][2])
-                    logger.info("Loaded camera config from %s: FOV=%s, Pitch=%s, Height=%s", config_path, config_fov, config_pitch, config_height)
+                    print(f"Loaded camera config from {config_path}: FOV={config_fov}, Pitch={config_pitch}, Height={config_height}")
         except Exception as e:
-            logger.warning("Failed to load config from %s: %s", config_path, e)
+            print(f"Warning: Failed to load config from {config_path}: {e}")
 
     # Set values if not provided by CLI
     if args.fov is None:
@@ -810,12 +791,12 @@ def main():
     # Default behavior if no output flags are provided
     if not (args.save_mask or args.save_lanes or args.save_lane_overlay or 
             args.save_road_gray or args.colored or args.overlay or args.road_only or args.show):
-        logger.info("No output format specified. Defaulting to --save-mask and --overlay.")
+        print("No output format specified. Defaulting to --save-mask and --overlay.")
         args.save_mask = True
         args.overlay = True
     
     # Initialize extractor
-    logger.info('Loading SegFormer-%s for road extraction...', args.model)
+    print(f'Loading SegFormer-{args.model} for road extraction...')
     extractor = RoadExtractor(model_name=args.model, device=args.device)
     
     # Process
