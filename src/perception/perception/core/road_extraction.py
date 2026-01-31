@@ -54,8 +54,8 @@ from perception.utils.ipm_transform import convert_to_ipm
 @dataclass(frozen=True)
 class IPMConfig:
     """Inverse Perspective Mapping transform parameters."""
-    x_range: Tuple[float, float] = (-10.0, 10.0)   # meters left/right from vehicle center
-    y_range: Tuple[float, float] = (3.0, 30.0)     # meters forward (near to far)
+    x_range: Tuple[float, float] = (3.0, 30.0)     # meters forward (near to far)
+    y_range: Tuple[float, float] = (-10.0, 10.0)   # meters left/right from vehicle center
     pixels_per_meter: float = 30.0                  # resolution: 1 meter = 30 pixels
 
 
@@ -238,8 +238,8 @@ class RoadExtractor:
             fov: Camera horizontal field of view in degrees. Uses CONFIG.camera.fov if None.
             pitch: Camera pitch angle in degrees. Uses CONFIG.camera.pitch if None.
             camera_height: Camera height above ground in meters. Uses CONFIG.camera.height if None.
-            ipm_x_range: (x_min, x_max) range in meters (left/right). Uses CONFIG.ipm.x_range if None.
-            ipm_y_range: (y_min, y_max) range in meters (forward distance). Uses CONFIG.ipm.y_range if None.
+            ipm_x_range: (x_min, x_max) forward range in meters. Uses CONFIG.ipm.x_range if None.
+            ipm_y_range: (y_min, y_max) lateral range in meters (left/right). Uses CONFIG.ipm.y_range if None.
             pixels_per_meter: Resolution - pixels per meter. Uses CONFIG.ipm.pixels_per_meter if None.
             
         Returns:
@@ -755,13 +755,13 @@ Examples:
     parser.add_argument('--camera-height', type=float, default=None, dest='camera_height',
                         help='Camera height above ground in meters (default: 1.2 or from config)')
     parser.add_argument('--ipm-x-min', type=float, default=CONFIG.ipm.x_range[0], dest='ipm_x_min',
-                        help=f'IPM left boundary in meters (default: {CONFIG.ipm.x_range[0]})')
+                        help=f'IPM near boundary in meters (default: {CONFIG.ipm.x_range[0]})')
     parser.add_argument('--ipm-x-max', type=float, default=CONFIG.ipm.x_range[1], dest='ipm_x_max',
-                        help=f'IPM right boundary in meters (default: {CONFIG.ipm.x_range[1]})')
+                        help=f'IPM far boundary in meters (default: {CONFIG.ipm.x_range[1]})')
     parser.add_argument('--ipm-y-min', type=float, default=CONFIG.ipm.y_range[0], dest='ipm_y_min',
-                        help=f'IPM near boundary in meters (default: {CONFIG.ipm.y_range[0]})')
+                        help=f'IPM right boundary in meters (default: {CONFIG.ipm.y_range[0]})')
     parser.add_argument('--ipm-y-max', type=float, default=CONFIG.ipm.y_range[1], dest='ipm_y_max',
-                        help=f'IPM far boundary in meters (default: {CONFIG.ipm.y_range[1]})')
+                        help=f'IPM left boundary in meters (default: {CONFIG.ipm.y_range[1]})')
     parser.add_argument('--pixels-per-meter', type=float, default=CONFIG.ipm.pixels_per_meter, dest='pixels_per_meter',
                         help=f'IPM resolution in pixels per meter (default: {CONFIG.ipm.pixels_per_meter}). Higher = more detail.')
     

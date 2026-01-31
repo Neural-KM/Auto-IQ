@@ -23,8 +23,8 @@ def convert_to_ipm(
         fov: Camera horizontal field of view in degrees
         pitch: Camera pitch angle in degrees (positive = looking down)
         camera_height: Camera height above ground in meters
-        bev_x_range: (x_min, x_max) range in meters (left/right from vehicle center).
-        bev_y_range: (y_min, y_max) range in meters (forward distance from camera).
+        bev_x_range: (x_min, x_max) forward range in meters (X_v = forward in vehicle frame).
+        bev_y_range: (y_min, y_max) lateral range in meters (Y_v = left in vehicle frame).
         pixels_per_meter: Resolution of BEV output (pixels per meter). Higher = more detail.
         
     Returns:
@@ -43,16 +43,17 @@ def convert_to_ipm(
     """
     height, width = image.shape[:2]
     
-    x_min, x_max = bev_x_range
-    y_min, y_max = bev_y_range
+    x_min, x_max = bev_x_range  # Forward range (X_v = forward)
+    y_min, y_max = bev_y_range  # Lateral range (Y_v = left)
     
     # Calculate real-world spans
-    x_span = x_max - x_min  # Total width in meters
-    y_span = y_max - y_min  # Total depth in meters
+    x_span = x_max - x_min  # Total forward distance in meters
+    y_span = y_max - y_min  # Total lateral width in meters
     
     # Auto-calculate BEV dimensions to maintain equal scale
-    bev_width = int(x_span * pixels_per_meter)
-    bev_height = int(y_span * pixels_per_meter)
+    # BEV width corresponds to Y (lateral), BEV height corresponds to X (forward)
+    bev_width = int(y_span * pixels_per_meter)
+    bev_height = int(x_span * pixels_per_meter)
     
     # Ensure minimum size
     bev_width = max(bev_width, 100)
@@ -67,13 +68,14 @@ def convert_to_ipm(
 
     pitch_rad = np.radians(pitch)
     
-    # Ground plane points: (X, Y, Z) where Z=0 (ground level)
+    # Ground plane points in vehicle frame: (X_v=forward, Y_v=left, Z_v=up)
+    # Z=0 is ground level
     # Order: far-left, far-right, near-right, near-left
     ground_points_3d = np.array([
-        [x_min, y_max, 0],  # Far left
-        [x_max, y_max, 0],  # Far right
-        [x_max, y_min, 0],  # Near right
-        [x_min, y_min, 0],  # Near left
+        [x_max, y_max, 0],  # Far left (max forward, max left)
+        [x_max, y_min, 0],  # Far right (max forward, min left i.e. right)
+        [x_min, y_min, 0],  # Near right (min forward, right)
+        [x_min, y_max, 0],  # Near left (min forward, max left)
     ], dtype=np.float64)
     
     # Rotation: pitch around x-axis
@@ -85,15 +87,15 @@ def convert_to_ipm(
     
     src_pts = []
     for gp in ground_points_3d:
-        # Convert vehicle coords (X_v=right, Y_v=forward, Z_v=up) to 
+        # Convert vehicle coords (X_v=forward, Y_v=left, Z_v=up) to 
         # camera coords (X_c=right, Y_c=down, Z_c=forward)
         
         # Point relative to camera position (camera at height h)
         p_vehicle = np.array([gp[0], gp[1], gp[2] - camera_height])
         
         # Transform to camera frame
-        # X_c = X_v, Y_c = -Z_v, Z_c = Y_v
-        p_cam_unrotated = np.array([p_vehicle[0], -p_vehicle[2], p_vehicle[1]])
+        # X_c = -Y_v, Y_c = -Z_v, Z_c = X_v
+        p_cam_unrotated = np.array([-p_vehicle[1], -p_vehicle[2], p_vehicle[0]])
         
         p_cam = R_pitch @ p_cam_unrotated
         
@@ -108,11 +110,13 @@ def convert_to_ipm(
     src_pts = np.float32(src_pts)
     
     # Destination points in BEV image
+    # BEV image: top = far (max X), bottom = near (min X)
+    #            left = max Y (left), right = min Y (right)
     dst_pts = np.float32([
-        [0, 0],                           # Far left -> top-left
-        [bev_width, 0],                   # Far right -> top-right
-        [bev_width, bev_height],          # Near right -> bottom-right
-        [0, bev_height],                  # Near left -> bottom-left
+        [0, 0],                           # Far left (max X, max Y) -> top-left
+        [bev_width, 0],                   # Far right (max X, min Y) -> top-right
+        [bev_width, bev_height],          # Near right (min X, min Y) -> bottom-right
+        [0, bev_height],                  # Near left (min X, max Y) -> bottom-left
     ])
     
     # Compute perspective transform matrix
