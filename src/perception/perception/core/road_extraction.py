@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
 """
-Road Extraction from SegFormer Segmentation
-=============================================
+Road Extraction (Segmentation Model Agnostic)
+==============================================
 
 This module provides the RoadExtractor class for extracting road masks and lane 
-markings from images using SegFormer semantic segmentation (Cityscapes class 0 = road).
+markings from images. It is segmentation model agnostic - it receives pre-computed
+segmentation maps or road masks from any upstream source.
 
 RoadExtractor Class:
     Parameters:
-        model_name (str): SegFormer variant - 'b0', 'b1', 'b2', 'b3', 'b4', 'b5'
-                          Larger models (b4, b5) provide better accuracy but slower inference.
-        device (str): 'cuda', 'cpu', or None for auto-detection.
-    
+        road_grayscale_id (int): Pixel value ID for road in the grayscale segmentation map (default: 90) we are converting the rgb id of the object to grayscale to get this value
     Core Methods:
-        extract_road_mask(segmentation)     - Binary road mask from pre-computed segmentation
-        extract_road_with_confidence(image) - Road mask with confidence filtering
-        extract_road_only(image)            - Original image with only road pixels visible
-        visualize_road(image, mode)         - Visualization (overlay/colored/mask_only modes)
-        extract_lanes(image)                - Lane detection on perspective images
-        extract_lanes_ipm(image, ...)       - Lane detection with Inverse Perspective Mapping
+        extract_road_mask(segmentation)              - Binary road mask from pre-computed segmentation
+        extract_road_only(image, road_mask)          - Original image with only road pixels visible
+        visualize_road(image, road_mask, mode)       - Visualization (overlay/colored/mask_only modes)
+        extract_lanes(image, road_mask)              - Lane detection on perspective images
+        extract_lanes_ipm(image, road_mask, ...)     - Lane detection with Inverse Perspective Mapping
 
 Configuration:
     RoadExtractionConfig dataclass provides default settings for:
@@ -29,9 +26,14 @@ Configuration:
 Example:
     from perception.core.road_extraction import RoadExtractor
     
-    extractor = RoadExtractor(model_name='b0', device='cuda')
-    road_only, ipm_road, ipm_lanes, road_mask, ipm_mask, size = extractor.extract_lanes_ipm(
-        image, fov=110, pitch=5, camera_height=1.2
+    extractor = RoadExtractor(road_grayscale_id=90)
+    
+    # Option 1: Provide segmentation map (class IDs per pixel)
+    road_mask = extractor.extract_road_mask(segmentation_map)
+    
+    # Option 2: Use pre-computed road mask directly
+    road_only, ipm_road, ipm_lanes, ipm_mask, size = extractor.extract_lanes_ipm(
+        image, road_mask, fov=110, pitch=5, camera_height=1.2
     )
 """
 
@@ -43,7 +45,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Tuple
 
-from perception.core.segformer import SegFormer
 from perception.utils.lane_detection import _extract_lanes_from_ipm
 from perception.utils.ipm_transform import convert_to_ipm 
 
@@ -77,9 +78,7 @@ class OutputConfig:
 @dataclass(frozen=True)
 class RoadExtractionConfig:
     """Main configuration for road extraction module."""
-    model: str = 'b0'                    # SegFormer variant: b0, b1, b2, b3, b4, b5
-    device: Optional[str] = None         # 'cuda', 'cpu', or None for auto-detect
-    road_class_id: int = 0               # Cityscapes class ID for road
+    road_grayscale_id: int = 90          # Pixel intensity value for road (e.g. 90 for Cityscapes)
     ipm: IPMConfig = field(default_factory=IPMConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
@@ -91,57 +90,56 @@ CONFIG = RoadExtractionConfig()
 
 class RoadExtractor:
     """
-    Extracts road mask from images using SegFormer segmentation.
+    Extracts road mask from images using pre-computed segmentation.
+    
+    This class is segmentation model agnostic - it receives segmentation maps
+    or road masks from any upstream source (SegFormer, DeepLab, etc.).
     """
     
-    def __init__(self, model_name: str = 'b0', device: Optional[str] = None):
+    def __init__(self, road_grayscale_id: int = 90):
         """
-        Initialize RoadExtractor with SegFormer model.
+        Initialize RoadExtractor.
         
         Args:
-            model_name: SegFormer model variant (b0, b1, b2, b3, b4, b5)
-            device: 'cuda', 'cpu', or None for auto-detection
+            road_grayscale_id: Pixel value corresponding to road in the segmentation map.
+                               For grayscale visualizations, this is the intensity value (e.g., 90).
         """
-        self.segformer = SegFormer(model_name=model_name, device=device)
+        self.road_grayscale_id = road_grayscale_id
     
     def extract_road_mask(self, segmentation: np.ndarray) -> np.ndarray:
 
         """
         Extract binary road mask from segmentation map.
         
-        NOTE: SegFormer inference should be done upstream (in ROS node or caller).
-        This function only extracts the road class from the segmentation output.
-        It has not been used in the code can be used if segmentation is pre-computed otherwise redundant.
-        
         Args:
-            segmentation: Segmentation map from SegFormer (H, W), class IDs
+            segmentation: Segmentation map (H, W)
             
         Returns:
             Binary mask (H, W) where 255 = road, 0 = non-road
         """
-        # Extract road pixels (Cityscapes class 0 = road)
-        return (segmentation == CONFIG.road_class_id).astype(np.uint8) * 255
+        # Extract road pixels based on configured road value
+        return (segmentation == self.road_grayscale_id).astype(np.uint8) * 255
     
     def extract_road_with_confidence(
         self, 
-        image: np.ndarray, 
+        segmentation: np.ndarray,
+        confidence: np.ndarray,
         threshold: float = 0.5
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Extract road mask with confidence filtering.
         
         Args:
-            image: RGB image (H, W, 3)
+            segmentation: Segmentation map (H, W)
+            confidence: Confidence scores (H, W) for each pixel
             threshold: Minimum confidence threshold for road pixels
             
         Returns:
             road_mask: Binary mask (H, W) where 255 = confident road
-            confidence: Confidence scores for road pixels (H, W)
+            road_confidence: Confidence scores for road pixels (H, W)
         """
-        segmentation, confidence = self.segformer.predict_with_confidence(image)
-        
         # Road pixels with high confidence
-        is_road = segmentation == CONFIG.road_class_id
+        is_road = segmentation == self.road_grayscale_id
         is_confident = confidence >= threshold
         
         road_mask = (is_road & is_confident).astype(np.uint8) * 255
@@ -151,7 +149,8 @@ class RoadExtractor:
     
     def visualize_road(
         self, 
-        image: np.ndarray, 
+        image: np.ndarray,
+        road_mask: np.ndarray, 
         mode: str = 'overlay',
         alpha: float = 0.5,
         road_color: Tuple[int, int, int] = (128, 64, 128)
@@ -161,6 +160,7 @@ class RoadExtractor:
         
         Args:
             image: RGB image (H, W, 3)
+            road_mask: Binary road mask (H, W) where 255 = road
             mode: Visualization mode:
                 - 'overlay': Blend road color on original image
                 - 'colored': Road colored, rest black
@@ -171,10 +171,6 @@ class RoadExtractor:
         Returns:
             RGB visualization image
         """
-        # Run SegFormer inference and extract road mask
-        segmentation = self.segformer.predict(image)
-        road_mask = (segmentation == CONFIG.road_class_id).astype(np.uint8) * 255
-        
         if mode == 'colored':
             # Road colored, rest black
             result = np.zeros_like(image)
@@ -190,22 +186,17 @@ class RoadExtractor:
         
         return result
     
-    def extract_road_only(self, image: np.ndarray) -> np.ndarray:
+    def extract_road_only(self, image: np.ndarray, road_mask: np.ndarray) -> np.ndarray:
         """
         Extract only road pixels from original image (Separate road from real image).
         
         Args:
             image: RGB image (H, W, 3)
+            road_mask: Binary road mask (H, W) where 255 = road
             
         Returns:
             RGB image with only road pixels visible, rest black
         """
-        # Run SegFormer inference to get segmentation map
-        segmentation = self.segformer.predict(image)
-        
-        # Extract road mask (Cityscapes class 0 = road, 255 = road, 0 = non-road)
-        road_mask = (segmentation == CONFIG.road_class_id).astype(np.uint8) * 255
-        
         # Apply mask to isolate road pixels, rest becomes black
         return cv2.bitwise_and(image, image, mask=road_mask)
 
@@ -216,25 +207,30 @@ class RoadExtractor:
     def extract_lanes_ipm(
         self, 
         image: np.ndarray,
+        road_mask: np.ndarray,
         fov: float = None,
         pitch: float = None,
         camera_height: float = None,
         ipm_x_range: Tuple[float, float] = None,
         ipm_y_range: Tuple[float, float] = None,
         pixels_per_meter: float = None
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Tuple[int, int]]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Tuple[int, int]]:
         """
         Extract lane markings using the correct pipeline:
-        SegFormer → Road Mask → Separate Road → IPM → Lane Detection
+        Road Mask → IPM (Original Image) → Lane Detection
+        
+        This method is segmentation model agnostic - it receives the road mask
+        from any upstream source.
         
         Pipeline:
-        1. Run SegFormer on original image → get road mask
-        2. Separate road from image (road_only = image AND mask)
-        3. Convert separated road image to IPM
-        4. Find lane markings in IPM image
+        1. Receive road mask from upstream (extracted from segmentation map)
+        2. Convert ORIGINAL image to IPM (for full context)
+        3. Convert road mask to IPM
+        4. Find lane markings in IPM image (using IPM road mask to filter)
         
         Args:
             image: RGB image (H, W, 3)
+            road_mask: Binary road mask (H, W) where 255 = road, 0 = non-road
             fov: Camera horizontal field of view in degrees. Uses CONFIG.camera.fov if None.
             pitch: Camera pitch angle in degrees. Uses CONFIG.camera.pitch if None.
             camera_height: Camera height above ground in meters. Uses CONFIG.camera.height if None.
@@ -243,10 +239,9 @@ class RoadExtractor:
             pixels_per_meter: Resolution - pixels per meter. Uses CONFIG.ipm.pixels_per_meter if None.
             
         Returns:
-            road_only: Separated road image (original perspective)
-            ipm_road_image: Inverse Perspective Mapping of separated road
+            road_only: Separated road image (original perspective) - for visualization
+            ipm_image: Inverse Perspective Mapping of ORIGINAL image
             ipm_lane_mask: Lane markings mask in IPM space
-            original_road_mask: Road mask from SegFormer (perspective)
             ipm_road_mask: Road mask in IPM space
             ipm_size: (width, height) of the IPM output
         """
@@ -257,22 +252,10 @@ class RoadExtractor:
         
         height, width = image.shape[:2]
         
-        # 1. Run SegFormer on ORIGINAL image → get segmentation map
-        print("Step 1: Running SegFormer to get road mask...")
-        segmentation = self.segformer.predict(image)
-        
-        # Extract road mask (Cityscapes class 0 = road)
-        original_road_mask = (segmentation == CONFIG.road_class_id).astype(np.uint8) * 255
-        
-        # 2. Separate road from image (keep only road pixels)
-        print("Step 2: Separating road from image...")
-        road_only = cv2.bitwise_and(image, image, mask=original_road_mask)
-        
-        # 3. Convert separated road image to IPM (Using Camera Geometry)
-        # Dimensions are auto-calculated from ranges and pixels_per_meter
-        print("Step 3: Converting separated road to IPM...")
-        ipm_road_image, ipm_size, M = convert_to_ipm(
-            road_only,
+        # 1. Convert convert ORIGINAL image to IPM (Use full image for better context)
+        print("Step 1: Converting original image to IPM...")
+        ipm_image, ipm_size, M = convert_to_ipm(
+            image,
             fov=fov,
             pitch=pitch,
             camera_height=camera_height,
@@ -283,41 +266,53 @@ class RoadExtractor:
         
         print(f"IPM size: {ipm_size[0]}x{ipm_size[1]} pixels (auto-calculated for equal scale)")
 
-        # Also transform road mask to IPM for reference
+        # 2. Transform road mask to IPM for reference/filtering
         ipm_road_mask = cv2.warpPerspective(
-            original_road_mask, M, ipm_size, 
+            road_mask, M, ipm_size, 
             flags=cv2.INTER_NEAREST
         )
         
-        # 5. Find lane markings in IPM image
-        print("Step 4: Detecting lane markings in IPM...")
-        ipm_lane_mask = _extract_lanes_from_ipm(ipm_road_image, ipm_road_mask)
+        # Check if road is visible in this IPM view
+        road_pixel_count = np.count_nonzero(ipm_road_mask)
+        print(f"DEBUG: Road pixels in IPM view: {road_pixel_count}")
         
-        return road_only, ipm_road_image, ipm_lane_mask, original_road_mask, ipm_road_mask, ipm_size
+        if road_pixel_count == 0:
+            print("WARNING: No road pixels visible in the configured IPM region!")
+            print(f"         IPM X-Range: {ipm_x_range}")
+            print(f"         IPM Y-Range: {ipm_y_range}")
+            print("         Try adjusting the ranges or camera parameters.")
+            # return empty lane mask to avoid crash
+            ipm_lane_mask = np.zeros_like(ipm_road_mask)
+        else:
+            # 3. Find lane markings in IPM image
+            print("Step 2: Detecting lane markings in IPM...")
+            ipm_lane_mask = _extract_lanes_from_ipm(ipm_image, ipm_road_mask)
+        
+        # 4. Create road_only for return visualization (perspective)
+        road_only = cv2.bitwise_and(image, image, mask=road_mask)
+        
+        return road_only, ipm_image, ipm_lane_mask, ipm_road_mask, ipm_size
     
     
     
-    def extract_lanes(self, image: np.ndarray) -> np.ndarray:
+    def extract_lanes(self, image: np.ndarray, road_mask: np.ndarray) -> np.ndarray:
         """
         Extract lane markings using Adaptive Thresholding on the Road ROI.
         
         Args:
             image: RGB image (H, W, 3)
+            road_mask: Binary road mask (H, W) where 255 = road
             
         Returns:
             Binary mask (H, W) where 255 = lane markings
         """
-        # 1. Run SegFormer inference and extract road mask
-        segmentation = self.segformer.predict(image)
-        road_mask = (segmentation == CONFIG.road_class_id).astype(np.uint8) * 255
-        
-        # 2. Extract road ROI
+        # 1. Extract road ROI using provided mask
         road_only = cv2.bitwise_and(image, image, mask=road_mask)
         
-        # 3. Convert to Grayscale
+        # 2. Convert to Grayscale
         gray = cv2.cvtColor(road_only, cv2.COLOR_RGB2GRAY)
         
-        # 4. Apply Adaptive Thresholding
+        # 3. Apply Adaptive Thresholding
         mean_road_val = cv2.mean(gray, mask=road_mask)[0]
         filled_gray = gray.copy()
         filled_gray[road_mask == 0] = int(mean_road_val)
@@ -333,7 +328,7 @@ class RoadExtractor:
             -10
         )
         
-        # 5. Clean up with morphology
+        # 4. Clean up with morphology
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         lane_mask = cv2.morphologyEx(lane_mask, cv2.MORPH_OPEN, kernel)
         
@@ -343,8 +338,15 @@ class RoadExtractor:
         return lane_mask
 
 
-def process_single_image(extractor: RoadExtractor, args):
-    """Process a single image."""
+def process_single_image(extractor: RoadExtractor, args, segmentation_map: np.ndarray = None):
+    """Process a single image.
+    
+    Args:
+        extractor: RoadExtractor instance
+        args: Command line arguments
+        segmentation_map: Pre-computed segmentation map (H, W) with class IDs.
+                         If None, a dummy road mask will be created for demonstration.
+    """
     img_path = Path(args.image)
     
     if not img_path.exists():
@@ -359,6 +361,44 @@ def process_single_image(extractor: RoadExtractor, args):
 
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     print(f'Processing: {img_path.name} ({image_rgb.shape[1]}x{image_rgb.shape[0]})')
+    
+    # Get road mask from segmentation or load from file
+    if args.seg_map_path:
+        # Load pre-computed segmentation map (Class IDs)
+        seg_map = cv2.imread(args.seg_map_path, cv2.IMREAD_GRAYSCALE)
+        if seg_map is None:
+            print(f'Error: Could not load segmentation map from: {args.seg_map_path}')
+            return 1
+        print(f'Loaded segmentation map from: {args.seg_map_path}')
+        
+        # DEBUG: Print unique values in segmentation map
+        unique_classes = np.unique(seg_map)
+        print(f"DEBUG: Unique pixel values found in segmentation map: {unique_classes}")
+        print(f"DEBUG: Using road_grayscale_id={extractor.road_grayscale_id}")
+        
+        # Extract road mask
+        road_mask = extractor.extract_road_mask(seg_map)
+        
+        # DEBUG: Check if mask is empty
+        road_pixels = np.count_nonzero(road_mask)
+        print(f"DEBUG: Extracted road mask has {road_pixels} pixels ({(road_pixels/road_mask.size)*100:.2f}% of image)")
+        
+        if road_pixels == 0:
+            print("ERROR: Road mask is empty! Check if road_grayscale_id matches the segmentation map values.")
+            print(f"       Available values: {unique_classes}")
+            return 1
+            
+        print('Extracted road mask from segmentation map')
+
+    elif segmentation_map is not None:
+        # Extract road mask from provided segmentation
+        road_mask = extractor.extract_road_mask(segmentation_map)
+        print('Extracted road mask from provided segmentation map')
+    else:
+        print('Error: No segmentation map provided.')
+        print('Use --seg-map-path to provide a pre-computed segmentation map file.')
+        return 1
+    
     # Determine output paths
     if args.output:
         out_dir = Path(args.output)
@@ -371,19 +411,20 @@ def process_single_image(extractor: RoadExtractor, args):
     
     # =========================================================================
     # Inverse Perspective Mapping (IPM) Processing Mode
-    # Pipeline: SegFormer → Road Mask → Separate Road → IPM → Lane Detection
+    # Pipeline: Road Mask → Separate Road → IPM → Lane Detection
     # =========================================================================
     if args.ipm:
         ipm_x_range = (args.ipm_x_min, args.ipm_x_max)
         ipm_y_range = (args.ipm_y_min, args.ipm_y_max)
         
-        print('Pipeline: SegFormer → Road Mask → Separate Road → IPM → Lane Detection')
+        print('Pipeline: Road Mask → Separate Road → IPM → Lane Detection')
         print(f'IPM range: X=[{args.ipm_x_min}, {args.ipm_x_max}]m, Y=[{args.ipm_y_min}, {args.ipm_y_max}]m')
         print(f'Resolution: {args.pixels_per_meter} pixels/meter')
         
         # Run the pipeline
-        road_only, ipm_road_image, ipm_lane_mask, original_road_mask, ipm_road_mask, ipm_size = extractor.extract_lanes_ipm(
+        road_only, ipm_road_image, ipm_lane_mask, ipm_road_mask, ipm_size = extractor.extract_lanes_ipm(
             image_rgb,
+            road_mask,
             fov=args.fov,
             pitch=args.pitch,
             camera_height=args.camera_height,
@@ -406,10 +447,10 @@ def process_single_image(extractor: RoadExtractor, args):
         cv2.imwrite(str(ipm_path), ipm_bgr)
         print(f'Saved IPM road image: {ipm_path}')
         
-        # Save original road mask (from SegFormer on perspective image)
+        # Save original road mask
         if args.save_mask:
             orig_mask_path = out_dir / f'{base_name}_road_mask.png'
-            cv2.imwrite(str(orig_mask_path), original_road_mask)
+            cv2.imwrite(str(orig_mask_path), road_mask)
             print(f'Saved original road mask: {orig_mask_path}')
             
             ipm_mask_path = out_dir / f'{base_name}_ipm_road_mask.png'
@@ -496,8 +537,7 @@ def process_single_image(extractor: RoadExtractor, args):
     # =========================================================================
     # Normal Processing Mode (Original Image)
     # =========================================================================
-    # Extract road mask
-    road_mask = extractor.extract_road_mask(image_rgb)
+    # Use provided road mask
     
     # Save binary mask
     if args.save_mask:
@@ -507,14 +547,14 @@ def process_single_image(extractor: RoadExtractor, args):
 
     # Save colored road (optional)
     if args.colored:
-        colored = extractor.visualize_road(image_rgb, mode='colored')
+        colored = extractor.visualize_road(image_rgb, road_mask, mode='colored')
         colored_bgr = cv2.cvtColor(colored, cv2.COLOR_RGB2BGR)
         colored_path = out_dir / f'{base_name}_road_colored.png'
         cv2.imwrite(str(colored_path), colored_bgr)
         print(f'Saved colored road: {colored_path}')
     # Save overlay (optional)
     if args.overlay:
-        overlay = extractor.visualize_road(image_rgb, mode='overlay', alpha=args.alpha)
+        overlay = extractor.visualize_road(image_rgb, road_mask, mode='overlay', alpha=args.alpha)
         overlay_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
         overlay_path = out_dir / f'{base_name}_road_overlay.png'
         cv2.imwrite(str(overlay_path), overlay_bgr)
@@ -522,7 +562,7 @@ def process_single_image(extractor: RoadExtractor, args):
     
     # Save lane markings and overlays
     if args.save_lanes or args.save_lane_overlay:
-        lane_mask = extractor.extract_lanes(image_rgb)
+        lane_mask = extractor.extract_lanes(image_rgb, road_mask)
         
         # Save Grayscale Threshold result
         if args.save_lanes:
@@ -546,7 +586,7 @@ def process_single_image(extractor: RoadExtractor, args):
     
     # Save Grayscale Road Texture (Requested)
     if args.save_road_gray:
-        road_rgb = extractor.extract_road_only(image_rgb)
+        road_rgb = extractor.extract_road_only(image_rgb, road_mask)
         road_gray = cv2.cvtColor(road_rgb, cv2.COLOR_RGB2GRAY)
         road_gray_path = out_dir / f'{base_name}_road_grayscale.png'
         cv2.imwrite(str(road_gray_path), road_gray)
@@ -566,7 +606,11 @@ def process_single_image(extractor: RoadExtractor, args):
 
 
 def process_folder(extractor: RoadExtractor, args):
-    """Process all images in a folder."""
+    """Process all images in a folder.
+    
+    Note: For batch processing, segmentation maps must be provided in a parallel folder
+    structure (or same folder) with matching filenames.
+    """
     folder = Path(args.folder)
     
     if not folder.exists():
@@ -587,6 +631,12 @@ def process_folder(extractor: RoadExtractor, args):
         return 1
     
     print(f'Found {len(images)} images to process')
+    
+    # Segmentation map folder
+    seg_folder = Path(args.seg_folder) if args.seg_folder else None
+    if seg_folder and not seg_folder.exists():
+        print(f'Error: Segmentation map folder not found: {seg_folder}')
+        return 1
     
     # Output directory
     if args.output:
@@ -609,29 +659,54 @@ def process_folder(extractor: RoadExtractor, args):
         
         base_name = img_path.stem
         
+        # Load corresponding segmentation map
+        if seg_folder:
+            # Look for map in folder with same name or similar
+            # Try exact name first, then common suffixes
+            map_candidates = [
+                seg_folder / f'{base_name}.png',
+                seg_folder / f'{base_name}_seg.png',
+                seg_folder / f'{base_name}_mask.png',
+            ]
+            seg_map = None
+            for map_path in map_candidates:
+                if map_path.exists():
+                    seg_map = cv2.imread(str(map_path), cv2.IMREAD_GRAYSCALE)
+                    break
+            
+            if seg_map is None:
+                print(f'Warning: Skipping: No segmentation map found for {img_path.name}')
+                continue
+                
+            # Extract road mask
+            road_mask = extractor.extract_road_mask(seg_map)
+            
+        else:
+            print(f'Warning: Skipping: No segmentation map folder provided. Use --seg-folder.')
+            continue
+        
         # Save binary mask
         if args.save_mask:
-            road_mask = extractor.extract_road_mask(image_rgb)
             mask_path = out_dir / f'{base_name}_road_mask.png'
             cv2.imwrite(str(mask_path), road_mask)
         
         # Save colored road (optional)
         if args.colored:
-            colored = extractor.visualize_road(image_rgb, mode='colored')
+            colored = extractor.visualize_road(image_rgb, road_mask, mode='colored')
             colored_bgr = cv2.cvtColor(colored, cv2.COLOR_RGB2BGR)
             colored_path = out_dir / f'{base_name}_road_colored.png'
             cv2.imwrite(str(colored_path), colored_bgr)
         
         # Save overlay (optional)
         if args.overlay:
-            overlay = extractor.visualize_road(image_rgb, mode='overlay', alpha=args.alpha)
+            overlay = extractor.visualize_road(image_rgb, road_mask, mode='overlay', alpha=args.alpha)
             overlay_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
             overlay_path = out_dir / f'{base_name}_road_overlay.png'
             cv2.imwrite(str(overlay_path), overlay_bgr)
         
         # Save lane markings and overlays
         if args.save_lanes or args.save_lane_overlay:
-            lane_mask = extractor.extract_lanes(image_rgb)
+            lane_mask = extractor.extract_lanes(image_rgb, road_mask)
             
             # Save Grayscale Threshold result
             if args.save_lanes:
@@ -654,7 +729,7 @@ def process_folder(extractor: RoadExtractor, args):
 
         # Save Grayscale Road Texture (Requested)
         if args.save_road_gray:
-            road_rgb = extractor.extract_road_only(image_rgb)
+            road_rgb = extractor.extract_road_only(image_rgb, road_mask)
             road_gray = cv2.cvtColor(road_rgb, cv2.COLOR_RGB2GRAY)
             road_gray_path = out_dir / f'{base_name}_road_grayscale.png'
             cv2.imwrite(str(road_gray_path), road_gray)
@@ -666,6 +741,12 @@ def process_folder(extractor: RoadExtractor, args):
 def main():
     """CLI entry point for road extraction.
     
+    This CLI is model-agnostic and requires pre-computed road masks or segmentation.
+    
+    Input Requirements:
+        --seg-map-path        Path to pre-computed segmentation map (for single image)
+        --seg-folder          Path to folder with segmentation maps (for batch processing)
+
     Output Flags:
         --save-mask           Save binary road mask
         --save-lanes          Save extracted lane binary mask
@@ -692,30 +773,27 @@ def main():
     
     cli_examples = """
 Examples:
-    # Single image - IPM mode (default)
-    python -m perception.core.road_extraction --image input.jpg --output ./output/
+    # Single image with pre-computed segmentation map - IPM mode (default)
+    python -m perception.core.road_extraction --image input.jpg --seg-map-path seg_map.png --output ./output/
     
     # Single image with all outputs
-    python -m perception.core.road_extraction --image input.jpg --all
+    python -m perception.core.road_extraction --image input.jpg --seg-map-path seg_map.png --all
     
     # IPM with custom camera parameters
-    python -m perception.core.road_extraction --image input.jpg --fov 90 --pitch 5 --camera-height 1.5 --all
+    python -m perception.core.road_extraction --image input.jpg --seg-map-path seg_map.png --fov 90 --pitch 5 --camera-height 1.5 --all
     
     # To run it without taking IPM
-    python -m perception.core.road_extraction --image input.jpg --no-ipm --save-lanes --save-lane-overlay
+    python -m perception.core.road_extraction --image input.jpg --seg-map-path seg_map.png --no-ipm --save-lanes --save-lane-overlay
     
-    # Batch process folder
-    python -m perception.core.road_extraction --folder /data/images/ --output ./road_masks/
-    
-    # Use larger model for better accuracy
-    python -m perception.core.road_extraction --image input.jpg --model b5
+    # Batch process folder with masks
+    python -m perception.core.road_extraction --folder /data/images/ --seg-folder /data/masks/ --output ./road_masks/
     
     # Quiet mode (only warnings/errors)
-    python -m perception.core.road_extraction --folder /data/images/ --all -q
+    python -m perception.core.road_extraction --folder /data/images/ --seg-folder /data/masks/ --all -q
 """
     
     parser = argparse.ArgumentParser(
-        description='Extract road mask from images using SegFormer',
+        description='Extract road mask from images using pre-computed segmentation (model-agnostic)',
         epilog=cli_examples,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -724,6 +802,14 @@ Examples:
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument('--image', type=str, help='Path to single image')
     input_group.add_argument('--folder', type=str, help='Path to folder of images')
+    
+    # Mask input options (required for processing)
+    parser.add_argument('--seg-map-path', type=str, dest='seg_map_path',
+                        help='Path to pre-computed segmentation map file (for single image)')
+    parser.add_argument('--seg-folder', type=str, dest='seg_folder',
+                        help='Path to folder containing segmentation maps (for batch processing)')
+    parser.add_argument('--road-grayscale-id', type=int, default=CONFIG.road_grayscale_id, dest='road_grayscale_id',
+                        help=f'Pixel/Grayscale intensity value for road in segmentation map. (default: {CONFIG.road_grayscale_id})')
     
     # Output options
     parser.add_argument('--output', type=str, help='Output directory')
@@ -764,14 +850,6 @@ Examples:
                         help=f'IPM left boundary in meters (default: {CONFIG.ipm.y_range[1]})')
     parser.add_argument('--pixels-per-meter', type=float, default=CONFIG.ipm.pixels_per_meter, dest='pixels_per_meter',
                         help=f'IPM resolution in pixels per meter (default: {CONFIG.ipm.pixels_per_meter}). Higher = more detail.')
-    
-    # Model options
-    parser.add_argument('--model', type=str, default=CONFIG.model, 
-                        choices=['b0', 'b1', 'b2', 'b3', 'b4', 'b5'],
-                        help=f'SegFormer model variant (default: {CONFIG.model})')
-    parser.add_argument('--device', type=str, choices=['cuda', 'cpu'],
-                        default=CONFIG.device,
-                        help='Device to use (default: auto-detect)')
     
     # Display
     parser.add_argument('--show', action='store_true', help='Display results')
@@ -825,9 +903,9 @@ Examples:
         args.save_mask = True
         args.overlay = True
     
-    # Initialize extractor
-    print(f'Loading SegFormer-{args.model} for road extraction...')
-    extractor = RoadExtractor(model_name=args.model, device=args.device)
+    # Initialize extractor (model-agnostic)
+    print(f'Initializing RoadExtractor (road_grayscale_id={args.road_grayscale_id})...')
+    extractor = RoadExtractor(road_grayscale_id=args.road_grayscale_id)
     
     # Process
     if args.image:
