@@ -25,6 +25,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 from sensor_msgs.msg import Image
 
 from perception.core.segformer import SegFormer
+from perception.data_classes.semantic_labels import colorize_mask
 
 
 class SegFormerNode(Node):
@@ -145,7 +146,8 @@ class SegFormerNode(Node):
         
         # Publish colored visualization
         if self.publish_colored:
-            colored = self.segformer.colorize(segmentation_mask)
+            # Offset by +1 to map Cityscapes classes to CARLA semantic labels
+            colored = colorize_mask(segmentation_mask + 1)
             colored_msg = self._numpy_to_ros_image(
                 colored, 
                 msg.header, 
