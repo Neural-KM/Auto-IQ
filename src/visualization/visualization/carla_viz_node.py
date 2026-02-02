@@ -20,6 +20,7 @@ Also publishes RViz markers for obstacles and trajectory.
 import json
 import math
 import os
+import numpy as np
 from dataclasses import replace
 from typing import List, Tuple
 
@@ -27,6 +28,7 @@ import rclpy
 from rclpy.node import Node
 
 from nav_msgs.msg import Path, Odometry
+from sensor_msgs.msg import Image
 from visualization_msgs.msg import MarkerArray, Marker
 from std_msgs.msg import ColorRGBA
 from geometry_msgs.msg import PoseStamped, PointStamped
@@ -41,6 +43,8 @@ from autoiq_common.converters import (
     obstacle_array_from_ros,
 )
 from autoiq_common.utils import quaternion_to_yaw
+
+from perception.data_classes.semantic_labels import colorize_mask
 
 import carla
 from ament_index_python.packages import get_package_share_directory
@@ -68,8 +72,10 @@ class CarlaVizNode(Node):
         self.declare_parameter('objects_file', '')
         
         # Comma-separated list of objects to draw in CARLA debug view
-        # Options: trajectory, global_route, predicted_traj, ground_truth_obstacles, detected_obstacles, speed, sensors
-        self.declare_parameter('carla_debug_draw', 'trajectory,global_route,predicted_traj,speed')
+        # Options: trajectory, global_route, predicted_traj, ground_truth_obstacles, detected_obstacles, speed, control
+        self.declare_parameter('carla_debug_draw', 'trajectory,global_route,predicted_traj,speed,control')
+        self.declare_parameter('semantic_topic', '/carla/ego_vehicle/ground_truth/camera/semantic/front/image')
+        self.declare_parameter('semantic_output_topic', '/visualization/semantic_image')
         
         carla_host = self.get_parameter('carla_host').value
         carla_port = self.get_parameter('carla_port').value
@@ -83,6 +89,9 @@ class CarlaVizNode(Node):
         self.carla_draw_items = set()
         if carla_debug_draw_str:
             self.carla_draw_items = set(item.strip() for item in carla_debug_draw_str.split(',') if item.strip())
+        
+        semantic_topic = self.get_parameter('semantic_topic').value
+        semantic_output_topic = self.get_parameter('semantic_output_topic').value
         
         # ==================== CARLA Connection ====================
         self.carla_drawer = None
@@ -124,6 +133,9 @@ class CarlaVizNode(Node):
             Path, '/visualization/trajectory', 10)
         self.current_waypoint_marker_pub = self.create_publisher(
             Marker, '/visualization/current_waypoint', 10)
+        # Publish colored semantic image
+        self.semantic_image_pub = self.create_publisher(
+            Image, semantic_output_topic, 10)
         
         # ==================== Subscribers ====================
         self.odom_sub = self.create_subscription(
@@ -149,6 +161,11 @@ class CarlaVizNode(Node):
         self.detected_obstacles_sub = self.create_subscription(
             ObstacleArrayMsg, '/perception/obstacles',
             self.detected_obstacles_callback, 10)
+        
+        self.semantic_sub = self.create_subscription(
+            Image, semantic_topic,
+            self.semantic_callback, 10)
+        self.get_logger().info(f'Subscribed to semantic image: {semantic_topic}')
         
         self.current_waypoint_sub = self.create_subscription(
             PointStamped, '/planning/current_waypoint',
@@ -265,10 +282,45 @@ class CarlaVizNode(Node):
         """Receive ground truth obstacles."""
         obstacle_array = obstacle_array_from_ros(msg)
         self.ground_truth_obstacles = self._transform_obstacles_to_world(obstacle_array)
+    def semantic_callback(self, msg: Image):
+        """Receive semantic segmentation image and republish colored version."""
+        # Parse semantic class IDs from image
+        if msg.encoding == 'bgra8':
+            # CARLA semantic camera: class ID in R channel (index 2 for BGRA)
+            img = np.frombuffer(msg.data, dtype=np.uint8).reshape(
+                msg.height, msg.width, 4)
+            class_ids = img[:, :, 2]
+        elif msg.encoding == 'rgb8':
+            img = np.frombuffer(msg.data, dtype=np.uint8).reshape(
+                msg.height, msg.width, 3)
+            class_ids = img[:, :, 0]
+        elif msg.encoding == 'mono8':
+            class_ids = np.frombuffer(msg.data, dtype=np.uint8).reshape(
+                msg.height, msg.width)
+        else:
+            return
         
-        marker_array = self._obstacles_to_marker_array(
-            self.ground_truth_obstacles, 'ground_truth_obstacles', (0.0, 1.0, 0.0))
-        self.gt_obstacles_marker_pub.publish(marker_array)
+        # Colorize using semantic labels palette
+        colored = colorize_mask(class_ids)
+        
+        # Publish colored image
+        out_msg = Image()
+        out_msg.header = msg.header
+        out_msg.height = msg.height
+        out_msg.width = msg.width
+        out_msg.encoding = 'rgb8'
+        out_msg.step = msg.width * 3
+        out_msg.data = colored.tobytes()
+        
+        self.semantic_image_pub.publish(out_msg)
+    
+    # def _transform_obstacles_to_world(self, obstacle_array: ObstacleArray) -> List[Obstacle]:
+    #     """
+    #     Transform obstacles from ego frame to world frame.
+    #     """
+    #     marker_array = self._obstacles_to_marker_array(
+    #         self.ground_truth_obstacles, 'ground_truth_obstacles', (0.0, 1.0, 0.0))
+    #     self.gt_obstacles_marker_pub.publish(marker_array)
     
     def detected_obstacles_callback(self, msg: ObstacleArrayMsg):
         """Receive detected obstacles."""

@@ -85,3 +85,32 @@ def colorize_mask(mask: np.ndarray) -> np.ndarray:
         RGB image (H, W, 3)
     """
     return SEMANTIC_COLOR_LUT[np.clip(mask, 0, 255)]
+
+
+def get_class_stats(mask: np.ndarray) -> dict:
+    """
+    Get pixel statistics for each class in the segmentation mask.
+    
+    Useful for analyzing scene composition (e.g., percentage of road, 
+    buildings, vegetation in an image).
+    
+    Args:
+        mask: Segmentation mask (H, W) with class IDs
+        
+    Returns:
+        Dict mapping class names to pixel counts and percentages
+        Example: {'road': {'class_id': 1, 'pixel_count': 50000, 'percentage': 45.5}, ...}
+    """
+    total_pixels = mask.size
+    unique, counts = np.unique(mask, return_counts=True)
+    
+    stats = {}
+    for class_id, count in zip(unique, counts):
+        class_name = get_class_name(class_id) or 'unknown'
+        stats[class_name] = {
+            'class_id': int(class_id),
+            'pixel_count': int(count),
+            'percentage': float(count / total_pixels * 100)
+        }
+    
+    return stats

@@ -62,6 +62,21 @@ python3 tools/spawn_obstacle.py --type car --distance 40 --lane center
 ros2 topic pub /planning/goal_index std_msgs/Int32 "data: 250"
 ```
 
+## Datasets
+
+```bash
+# Carla image datasets of every spawn point
+wget "https://huggingface.co/datasets/nakul004/imagessim/resolve/main/Data.zip"
+
+# Rosbags 15/1 bot at transit
+wget "https://huggingface.co/datasets/nakul004/imagessim/resolve/main/rosbag2_1970_01_01-05_49_48.zip"
+wget "https://huggingface.co/datasets/nakul004/imagessim/resolve/main/rosbag2_1970_01_01-05_54_59.zip"
+wget "https://huggingface.co/datasets/nakul004/imagessim/resolve/main/rosbag2_1970_01_01-05_50_52.zip" 
+
+#Rosbag images 15/1 bot at transit
+wget "https://huggingface.co/datasets/nakul004/imagessim/resolve/main/Images_15jan_bot_transit.zip" 
+```
+
 ## License
 
 Apache License 2.0

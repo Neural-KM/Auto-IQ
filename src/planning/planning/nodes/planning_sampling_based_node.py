@@ -157,7 +157,7 @@ class PlanningNode(Node):
         if map_to_costmap is None:
             return
         
-        t_sampling_start = time.perf_counter()
+        # t_sampling_start = time.perf_counter()
         # 4. Run Sampling based Planner
         trajectory = self.motion_planner.plan(
             self.vehicle_state,
@@ -168,7 +168,7 @@ class PlanningNode(Node):
             self.costmap_resolution,
             map_to_costmap
         )
-        self.get_logger().info(f'Planning Time: {(time.perf_counter() - t_sampling_start)*1000:.1f} ms')
+        # self.get_logger().info(f'Planning Time: {(time.perf_counter() - t_sampling_start)*1000:.1f} ms')
         # 5. Publish
         if trajectory:
             self._publish_trajectory(trajectory)
@@ -243,6 +243,7 @@ class PlanningNode(Node):
             p = PoseStamped()
             p.pose.position.x = wp.transform.location.x
             p.pose.position.y = -wp.transform.location.y
+            p.pose.position.z = wp.transform.location.z
             msg.poses.append(p)
         self.global_route_pub.publish(msg)
 

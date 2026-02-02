@@ -3,6 +3,7 @@ Object Detector
 ===============
 
 YOLO-based 2D object detector.
+
 """
 
 import cv2

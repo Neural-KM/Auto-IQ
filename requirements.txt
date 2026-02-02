@@ -1,13 +1,12 @@
 pygame
 numpy
-scipy
+torch
 pyyaml
 casadi
 ultralytics
-torch
-torchvision
 networkx
 empy
 catkin_pkg
 lark
 scikit-image
+tabulate
