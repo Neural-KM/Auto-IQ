@@ -62,6 +62,23 @@ python3 tools/spawn_obstacle.py --type car --distance 40 --lane center
 ros2 topic pub /planning/goal_index std_msgs/Int32 "data: 250"
 ```
 
+## Perception Nodes
+
+### Semantic Segmentation + Lane Extraction Pipeline
+
+```bash
+# Semantic segmentation (choose source: ground_truth or segformer)
+ros2 run perception semantic_segmentation_node --ros-args -p segmentation_source:=ground_truth
+
+# Lane extraction (subscribes to semantic map)
+ros2 run perception road_extraction_node
+```
+
+| Node | Subscribes | Publishes |
+|------|------------|-----------|
+| `semantic_segmentation_node` | RGB or GT semantic camera | `/perception/semantic_map`, `/perception/semantic_map/colored` |
+| `road_extraction_node` | `/perception/semantic_map/colored` | `/perception/road_mask`, `/perception/lane_markings` |
+
 ## Datasets
 
 ```bash
