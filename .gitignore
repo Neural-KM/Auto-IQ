@@ -48,6 +48,9 @@ MANIFEST
 *.manifest
 *.spec
 
+# Rosbags
+Rosbags/
+
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt

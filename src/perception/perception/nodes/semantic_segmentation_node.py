@@ -52,7 +52,7 @@ class SemanticSegmentationNode(Node):
         
         # ==================== Parameters ====================
         self.declare_parameter('segmentation_source', 'ground_truth')  # 'segformer' or 'ground_truth'
-        self.declare_parameter('model_name', 'b0')  # SegFormer model variant
+        self.declare_parameter('model_name', 'b2')  # SegFormer model variant
         self.declare_parameter('device', 'cuda')
         self.declare_parameter('publish_colored', True)
         self.declare_parameter('rgb_topic', '/carla/ego_vehicle/sensor/camera/rgb/front/image')
