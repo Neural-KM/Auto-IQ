@@ -1,6 +1,5 @@
 pygame
 numpy
-torch
 pyyaml
 casadi
 ultralytics
@@ -10,3 +9,4 @@ catkin_pkg
 lark
 scikit-image
 tabulate
+numba
