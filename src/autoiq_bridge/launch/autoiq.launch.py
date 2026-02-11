@@ -32,8 +32,6 @@ def generate_launch_description():
     args = [
         DeclareLaunchArgument('enable_bridge', default_value='true'),
         DeclareLaunchArgument('enable_perception', default_value='true'),
-        DeclareLaunchArgument('enable_lane_pipeline', default_value='true',
-                              description='Enable SegFormer → Road Extraction pipeline'),
         DeclareLaunchArgument('segmentation_source', default_value='segformer',
                               description="'segformer' (camera-based) or 'ground_truth' (CARLA sim)"),
         DeclareLaunchArgument('enable_planning', default_value='true'),
@@ -58,16 +56,8 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(perception_pkg, 'launch', 'perception.launch.py')
         ),
-        condition=IfCondition(LaunchConfiguration('enable_perception')),
-    )
-    
-    # Lane Pipeline (SegFormer → Road Extraction)
-    lane_pipeline_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(perception_pkg, 'launch', 'lane_pipeline.launch.py')
-        ),
         launch_arguments={'segmentation_source': LaunchConfiguration('segmentation_source')}.items(),
-        condition=IfCondition(LaunchConfiguration('enable_lane_pipeline')),
+        condition=IfCondition(LaunchConfiguration('enable_perception')),
     )
     
     # Planning
@@ -116,7 +106,6 @@ def generate_launch_description():
         args + [
             bridge_launch,
             perception_launch,
-            lane_pipeline_launch,
             planning_launch,
             control_launch,
             visualization_launch,
