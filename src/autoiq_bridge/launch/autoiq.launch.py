@@ -34,6 +34,8 @@ def generate_launch_description():
         DeclareLaunchArgument('enable_perception', default_value='true'),
         DeclareLaunchArgument('segmentation_source', default_value='segformer',
                               description="'segformer' (camera-based) or 'ground_truth' (CARLA sim)"),
+        DeclareLaunchArgument('semantic_source', default_value='fused',
+                              description="Mapping input: 'fused' (perception pipeline) or 'ground_truth' (CARLA sim)"),
         DeclareLaunchArgument('enable_planning', default_value='true'),
         DeclareLaunchArgument('enable_control', default_value='true'),
         DeclareLaunchArgument('enable_visualization', default_value='true'),
@@ -99,6 +101,7 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(mapping_pkg, 'launch', 'local_costmap.launch.py')
         ),
+        launch_arguments={'semantic_source': LaunchConfiguration('semantic_source')}.items(),
         condition=IfCondition(LaunchConfiguration('enable_mapping')),
     )
     

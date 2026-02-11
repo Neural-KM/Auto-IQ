@@ -74,11 +74,9 @@ class InversePerspectiveMapperNode2(Node):
         super().__init__('inverse_perspective_mapper_node_v2')
         
         # ==================== Parameters ====================
-        self.declare_parameter('semantic_topic', '/carla/ego_vehicle/ground_truth/camera/semantic/front/image')
-        self.declare_parameter('camera_info_topic', '/carla/ego_vehicle/ground_truth/camera/semantic/front/camera_info')
+        self.declare_parameter('semantic_source', 'fused')  # 'fused' or 'ground_truth'
         self.declare_parameter('costmap_topic', '/mapping/ipm_costmap')
         self.declare_parameter('base_frame', 'ego_vehicle')
-        self.declare_parameter('camera_frame', 'ego_vehicle/ground_truth/camera/semantic/front')
         
         # Grid parameters
         self.declare_parameter('grid_size', 40.0)    # meters (square grid)
@@ -93,12 +91,19 @@ class InversePerspectiveMapperNode2(Node):
         self.declare_parameter('rear_to_base_link', 1.7)  # Distance from base_link to vehicle center
         self.declare_parameter('clear_zone_radius', 5.0)  # Circular free zone around vehicle (meters)
         
-        # Get parameter values
-        semantic_topic = self.get_parameter('semantic_topic').value
-        camera_info_topic = self.get_parameter('camera_info_topic').value
+        # Resolve semantic source → only the image topic changes
+        # Camera intrinsics and frame are shared (same physical camera)
+        semantic_source = self.get_parameter('semantic_source').value
+        camera_info_topic = '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info'
+        self.camera_frame = 'ego_vehicle/sensor/camera/rgb/front'
+        
+        if semantic_source == 'ground_truth':
+            semantic_topic = '/carla/ego_vehicle/ground_truth/camera/semantic/front/image'
+        else:
+            semantic_topic = '/perception/semantic_map/fused'
+        
         costmap_topic = self.get_parameter('costmap_topic').value
         self.base_frame = self.get_parameter('base_frame').value
-        self.camera_frame = self.get_parameter('camera_frame').value
         
         self.grid_size = self.get_parameter('grid_size').value
         self.resolution = self.get_parameter('resolution').value
