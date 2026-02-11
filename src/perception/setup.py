@@ -28,9 +28,9 @@ setup(
         'console_scripts': [
             'perception_node = perception.nodes.perception_node:main',
             'segformer_node = perception.nodes.segformer_node:main',
-            'semantic_pointcloud_node = perception.nodes.semantic_pointcloud_node:main',
             'semantic_segmentation_node = perception.nodes.semantic_segmentation_node:main',
             'road_extraction_node = perception.nodes.road_extraction_node:main',
+            'semantic_pointcloud_node = perception.nodes.semantic_pointcloud_node:main',
             'save_camera_snapshot = perception.tools.save_camera_snapshot:main',
         ],
     },

@@ -40,7 +40,7 @@ class SegFormerNode(Node):
         super().__init__('segformer_node')
         
         # ==================== Parameters ====================
-        self.declare_parameter('model_name', 'nvidia/segformer-b0-finetuned-cityscapes-1024-1024')
+        self.declare_parameter('model_name', 'nvidia/segformer-b2-finetuned-cityscapes-1024-1024')
         self.declare_parameter('device', 'cuda')  # 'cuda' or 'cpu'
         self.declare_parameter('publish_colored', True)
         self.declare_parameter('resize_output', True)  # Resize output to match input size
