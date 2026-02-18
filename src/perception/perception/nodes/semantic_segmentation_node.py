@@ -7,7 +7,7 @@ ROS2 node that publishes semantic segmentation maps from either:
 - SegFormer model inference (learned segmentation)
 - CARLA ground truth semantic camera (perfect labels)
 
-The output is published to a unified topic, allowing downstream node
+The output is published to a unified topic, allowing downstream nodes
 (like road_extraction_node) to be agnostic to the source.
 
 Parameters:
