@@ -36,7 +36,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 
 from sensor_msgs.msg import Image
 
-from perception.data_classes.semantic_labels import colorize_mask, SEMANTIC_BY_NAME
+from perception.data_classes.semantic_labels import colorize_mask
 
 
 class SemanticSegmentationNode(Node):

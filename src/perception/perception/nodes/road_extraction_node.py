@@ -46,7 +46,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 
 from sensor_msgs.msg import Image
 
-from perception.core.road_extraction import RoadExtractor, CONFIG
+from perception.core.road_extraction import RoadExtractor
 from perception.data_classes.semantic_labels import (
     SEMANTIC_BY_NAME,
     colorize_mask,
