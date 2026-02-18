@@ -346,8 +346,8 @@ class RoadExtractor:
         self,
         semantic_map: np.ndarray,
         rgb_image: np.ndarray,
-        road_class_id: int = None,
-        road_line_class_id: int = None,
+        road_class_id: int,
+        road_line_class_id: int,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Inject lane markings into a semantic map that lacks a road_line class.
@@ -373,11 +373,6 @@ class RoadExtractor:
             fused_map:  The semantic map with road_line pixels injected (same array as input).
             lane_mask:  Binary mask (H, W) where 255 = detected lane marking.
         """
-        if road_class_id is None:
-            road_class_id = SEMANTIC_BY_NAME['road']          # 1
-        if road_line_class_id is None:
-            road_line_class_id = SEMANTIC_BY_NAME['road_line']  # 24
-
         # 1. Build road mask from class IDs
         road_mask = (semantic_map == road_class_id).astype(np.uint8) * 255
 
