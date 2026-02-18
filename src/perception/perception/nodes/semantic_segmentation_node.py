@@ -98,7 +98,7 @@ class SemanticSegmentationNode(Node):
                 sensor_qos
             )
             self.get_logger().info(f'Subscribed to RGB: {rgb_topic}')
-        else:  # ground_truth
+        elif self.segmentation_source == 'ground_truth':
             self.image_sub = self.create_subscription(
                 Image,
                 ground_truth_topic,
@@ -106,6 +106,9 @@ class SemanticSegmentationNode(Node):
                 sensor_qos
             )
             self.get_logger().info(f'Subscribed to Ground Truth: {ground_truth_topic}')
+        else:
+            self.get_logger().error(f'Invalid segmentation_source: {self.segmentation_source}. Options are: segformer, ground_truth')
+            raise ValueError(f'Invalid segmentation_source: {self.segmentation_source}')
         
         # ==================== Publishers ====================
         self.semantic_pub = self.create_publisher(Image, output_topic, 10)
