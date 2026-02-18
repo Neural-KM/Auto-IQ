@@ -333,7 +333,7 @@ def main(args=None):
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        pass
+        node.get_logger().info("Shutting down RoadExtractionNode due to KeyboardInterrupt")
     finally:
         node.destroy_node()
         rclpy.shutdown()
