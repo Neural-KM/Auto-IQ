@@ -365,27 +365,23 @@ class SemanticSegmentationNode(Node):
     def _ros_image_to_numpy_rgb(self, msg: Image) -> np.ndarray:
         """
         Convert ROS2 Image message to RGB numpy array.
-        
+
+        Only rgb8 is accepted (the bridge converts CARLA's BGRA to RGB before publishing).
+
         Args:
-            msg: ROS2 Image message
-            
+            msg: ROS2 Image message (expected: rgb8)
+
         Returns:
-            RGB numpy array (H, W, 3) or None if conversion failed
+            RGB numpy array (H, W, 3)
+
+        Raises:
+            ValueError: If encoding is not rgb8.
         """
-        if msg.encoding == 'bgra8':
-            image_bgra = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, 4)
-            return cv2.cvtColor(image_bgra, cv2.COLOR_BGRA2RGB)
-        elif msg.encoding == 'bgr8':
-            image_bgr = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, 3)
-            return cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        elif msg.encoding == 'rgb8':
-            return np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, 3)
-        else:
-            self.get_logger().error(f'Unsupported encoding: {msg.encoding}')
-            return None
+        if msg.encoding != 'rgb8':
+            raise ValueError(
+                f'Expected rgb8 encoding from RGB camera, got {msg.encoding}')
+        return np.frombuffer(msg.data, dtype=np.uint8).reshape(
+            msg.height, msg.width, 3).copy()
     
     def _update_stats(self, start_time: float, source: str):
         """Update and log processing statistics."""
