@@ -76,12 +76,6 @@ def generate_launch_description():
                 'segmentation_source': LaunchConfiguration('segmentation_source'),
                 'model_name': LaunchConfiguration('model_name'),
                 'device': LaunchConfiguration('device'),
-                'publish_colored': True,
-                'rgb_topic': '/carla/ego_vehicle/sensor/camera/rgb/front/image',
-                'ground_truth_topic': '/carla/ego_vehicle/ground_truth/camera/semantic/front/image',
-                'output_topic': '/perception/semantic_map',
-                'enable_fusion': True,
-                'fused_topic': '/perception/semantic_map/fused',
             }],
         ),
 
