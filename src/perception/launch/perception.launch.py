@@ -58,10 +58,14 @@ def generate_launch_description():
             ]
         ),
 
-        # ==================== Node 2: Semantic Segmentation ====================
+        # ==================== Node 2: Semantic Segmentation + Lane Fusion ====================
         # Publishes: /perception/semantic_map (mono8, class IDs)
         #            /perception/semantic_map/colored (rgb8)
-        # Note: SegFormer does NOT produce road_line (class 24)
+        #            /perception/semantic_map/fused (mono8, with lane markings)
+        #            /perception/semantic_map/fused/colored (rgb8)
+        #            /perception/road_mask, /perception/lane_markings (debug)
+        # Note: SegFormer does NOT natively produce road_line (class 24);
+        #       the integrated fusion step detects and injects them.
         Node(
             package='perception',
             executable='semantic_segmentation_node',
@@ -76,45 +80,12 @@ def generate_launch_description():
                 'rgb_topic': '/carla/ego_vehicle/sensor/camera/rgb/front/image',
                 'ground_truth_topic': '/carla/ego_vehicle/ground_truth/camera/semantic/front/image',
                 'output_topic': '/perception/semantic_map',
+                'enable_fusion': True,
+                'fused_topic': '/perception/semantic_map/fused',
             }],
         ),
 
-        # ==================== Node 3: Road Extraction + Semantic Fusion ====================
-        # Takes semantic map (mono8) + RGB camera image.
-        # Detects lane markings via adaptive thresholding within the road mask,
-        # then writes class 24 (road_line) into the semantic map.
-        #
-        # Subscribes: /perception/semantic_map (mono8) + RGB camera
-        # Publishes:  /perception/semantic_map/fused (mono8) — ready for mapping
-        #             /perception/semantic_map/fused/colored (rgb8)
-        #             /perception/road_mask, /perception/lane_markings (debug)
-        #             /perception/lane_markings/ipm (optional IPM viz)
-        Node(
-            package='perception',
-            executable='road_extraction_node',
-            name='road_extraction_node',
-            output='screen',
-            parameters=[{
-                'use_sim_time': True,
-                'semantic_topic': '/perception/semantic_map',
-                'rgb_topic': '/carla/ego_vehicle/sensor/camera/rgb/front/image',
-                'output_topic': '/perception/semantic_map/fused',
-                'publish_colored': True,
-                'enable_ipm': True,
-                'publish_overlay': True,
-                'publish_ipm': True,
-                'fov': 110.0,
-                'pitch': 0.0,
-                'camera_height': 1.2,
-                'ipm_x_min': 3.0,
-                'ipm_x_max': 30.0,
-                'ipm_y_min': -10.0,
-                'ipm_y_max': 10.0,
-                'pixels_per_meter': 30.0,
-            }],
-        ),
-
-        # ==================== Node 4: Semantic PointCloud ====================
+        # ==================== Node 3: Semantic PointCloud ====================
         Node(
             package='perception',
             executable='semantic_pointcloud_node',
