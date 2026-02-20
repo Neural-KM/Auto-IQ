@@ -15,10 +15,6 @@ from perception.data_classes.lane import LaneDetection
 # Semantic class IDs
 ROAD = SEMANTIC_BY_NAME['road']
 ROAD_LINE = SEMANTIC_BY_NAME['road_line']
-SIDEWALK = SEMANTIC_BY_NAME['sidewalk']
-VEHICLE = SEMANTIC_BY_NAME['vehicle']
-VEGETATION = SEMANTIC_BY_NAME['vegetation']
-SKY = SEMANTIC_BY_NAME['sky']
 
 
 class LaneDetector:
