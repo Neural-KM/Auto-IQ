@@ -7,10 +7,15 @@ ROS2 node that publishes semantic segmentation maps from either:
 - SegFormer model inference (learned segmentation)
 - CARLA ground truth semantic camera (perfect labels)
 
-Includes integrated **road extraction / semantic fusion**: detects lane markings
-via adaptive thresholding within the road region and injects class 24
-(road_line) into the semantic map.  The fused map is published on a separate
-topic so that the mapping/costmap node receives lane-aware semantics.
+Flow:
+- **ground_truth mode**: CARLA ground truth already contains lane markings
+  (class 24 road_line).  The map is published as-is to both the raw and fused
+  topics — no RoadExtractor processing is needed.
+- **segformer mode**: SegFormer output does NOT contain lane markings.
+  When *enable_fusion* is True, the RoadExtractor detects lane markings via
+  adaptive thresholding on the RGB image and injects class 24 (road_line)
+  into the semantic map.  The fused map is published on a separate topic so
+  that the mapping/costmap node receives lane-aware semantics.
 
 Parameters:
 - segmentation_source: 'segformer' or 'ground_truth' (default: 'ground_truth')
@@ -20,11 +25,11 @@ Parameters:
 - ground_truth_topic: Input ground truth semantic topic (for ground_truth mode)
 - output_topic: Base semantic map topic (default: /perception/semantic_map)
 - fused_topic: Fused semantic map with lane markings (default: /perception/semantic_map/fused)
-- enable_fusion: Enable lane-marking fusion (default: True)
+- enable_fusion: Enable lane-marking fusion via RoadExtractor (segformer mode only, default: True)
 - publish_colored: Publish colored visualization (default: True)
 
 Subscribes:
-- /carla/ego_vehicle/sensor/camera/rgb/front/image (RGB camera — always)
+- /carla/ego_vehicle/sensor/camera/rgb/front/image (RGB camera — segformer mode)
 - /carla/ego_vehicle/ground_truth/camera/semantic/front/image (ground_truth mode)
 
 Publishes:
@@ -55,13 +60,9 @@ from perception.data_classes.semantic_labels import (
 
 
 class SemanticSegmentationNode(Node):
-    """
-    ROS2 Node for unified semantic segmentation + lane-marking fusion.
+    """ROS2 Node for semantic segmentation with optional lane-marking fusion.
 
-    Supports switching between SegFormer inference and CARLA ground truth
-    via the 'segmentation_source' parameter.  When *enable_fusion* is True
-    (default), detected lane markings are injected into the semantic map as
-    class 24 (road_line) and published on a separate fused topic.
+    See module docstring for the ground_truth vs segformer flow.
     """
 
     def __init__(self):
@@ -105,11 +106,12 @@ class SemanticSegmentationNode(Node):
                 self.get_logger().error(f'Failed to load SegFormer: {e}')
                 raise RuntimeError(f'SegFormer loading failed: {e}')
 
-        # ==================== Initialize RoadExtractor (if fusion enabled) ====================
+        # ==================== Initialize RoadExtractor (segformer + fusion only) ==============
+        # Ground truth already contains lane markings — no extraction needed.
         self.road_extractor: Optional[RoadExtractor] = None
-        if self.enable_fusion:
+        if self.segmentation_source == 'segformer' and self.enable_fusion:
             self.road_extractor = RoadExtractor(road_grayscale_id=0)
-            self.get_logger().info('RoadExtractor initialized for lane-marking fusion')
+            self.get_logger().info('RoadExtractor initialized for lane-marking fusion (segformer mode)')
 
         # Semantic class IDs used by fusion
         self._road_id = SEMANTIC_BY_NAME.get('road', 1)
@@ -136,12 +138,7 @@ class SemanticSegmentationNode(Node):
             self.image_sub = self.create_subscription(
                 Image, ground_truth_topic, self.ground_truth_callback, sensor_qos)
             self.get_logger().info(f'Subscribed to Ground Truth: {ground_truth_topic}')
-
-            # Also subscribe to RGB for lane-marking fusion
-            if self.enable_fusion:
-                self.rgb_sub = self.create_subscription(
-                    Image, rgb_topic, self._rgb_cache_callback, sensor_qos)
-                self.get_logger().info(f'Subscribed to RGB (for fusion): {rgb_topic}')
+            # NOTE: No RGB subscription needed — ground truth already has lane markings.
         else:
             self.get_logger().error(
                 f'Invalid segmentation_source: {self.segmentation_source}. '
@@ -167,6 +164,7 @@ class SemanticSegmentationNode(Node):
         # ==================== Stats ====================
         self._frame_count = 0
         self._total_time = 0.0
+        self._last_lane_mask: Optional[np.ndarray] = None
 
         self.get_logger().info(
             f'Semantic Segmentation Node initialized! '
@@ -175,48 +173,24 @@ class SemanticSegmentationNode(Node):
         )
     
     # ------------------------------------------------------------------ #
-    #  RGB cache callback (ground_truth mode only)                        #
-    # ------------------------------------------------------------------ #
-
-    def _rgb_cache_callback(self, msg: Image):
-        """Cache latest RGB image for lane-marking fusion (ground_truth mode)."""
-        self._latest_rgb = self._ros_image_to_numpy_rgb(msg)
-
-    # ------------------------------------------------------------------ #
     #  SegFormer callback                                                 #
     # ------------------------------------------------------------------ #
 
     def rgb_callback(self, msg: Image):
-        """
-        Process RGB image through SegFormer and publish semantic map.
-
-        Args:
-            msg: ROS2 Image message (expected: bgra8 from CARLA)
-        """
+        """Run SegFormer on an RGB frame and publish semantic maps."""
         start_time = time.perf_counter()
 
-        # Convert to RGB numpy array
         image_np = self._ros_image_to_numpy_rgb(msg)
         if image_np is None:
             return
 
-        # Cache for fusion
         self._latest_rgb = image_np
-
-        # Run SegFormer inference
         segmentation = self.segformer.predict(image_np)
 
-        # SegFormer outputs Cityscapes classes (0-18), convert to CARLA classes
-        # Cityscapes road=0, CARLA road=1, so we add 1
+        # Cityscapes classes (0-18) → CARLA classes (+1)
         segmentation_carla = (segmentation + 1).astype(np.uint8)
 
-        # Publish raw semantic map
-        self._publish_semantic(segmentation_carla, msg.header)
-
-        # Fuse lane markings and publish fused map
-        self._fuse_and_publish(segmentation_carla, msg.header)
-
-        # Stats
+        self._process_and_publish(segmentation_carla, msg.header)
         self._update_stats(start_time, 'SegFormer')
     
     # ------------------------------------------------------------------ #
@@ -224,100 +198,66 @@ class SemanticSegmentationNode(Node):
     # ------------------------------------------------------------------ #
 
     def ground_truth_callback(self, msg: Image):
-        """
-        Process CARLA ground truth semantic camera and publish semantic map.
-
-        The bridge extracts the class-ID channel and publishes mono8.
-
-        Args:
-            msg: ROS2 Image message (mono8 from bridge)
-        """
+        """Publish CARLA ground truth semantic map (already has lane markings)."""
         start_time = time.perf_counter()
 
-        # Bridge already extracts the semantic label channel as mono8
         segmentation = np.frombuffer(msg.data, dtype=np.uint8).reshape(
             msg.height, msg.width)
 
-        # Publish raw semantic map
-        self._publish_semantic(segmentation, msg.header)
-
-        # Fuse lane markings and publish fused map
-        self._fuse_and_publish(segmentation, msg.header)
-
-        # Stats
+        self._process_and_publish(segmentation, msg.header)
         self._update_stats(start_time, 'Ground Truth')
     
     # ------------------------------------------------------------------ #
-    #  Fusion logic                                                       #
+    #  Unified publish pipeline                                           #
     # ------------------------------------------------------------------ #
 
-    def _fuse_and_publish(self, segmentation: np.ndarray, header):
-        """
-        Detect lane markings, inject them into the semantic map, and publish
-        the fused result.  Gracefully does nothing when:
-        - fusion is disabled
-        - no RGB frame is available yet
-        - size mismatch between RGB and semantic map
-        - no road pixels are visible
-        - no lane markings are detected
-        """
+    def _process_and_publish(self, segmentation: np.ndarray, header, publish_raw: bool = True):
+        """Publish raw semantic map and, if fusion is enabled, the fused map."""
+        if publish_raw:
+            self._publish_semantic_map(segmentation, header,
+                                      self.semantic_pub, self.colored_pub)
+
         if not self.enable_fusion:
             return
 
+        fused_map = self._try_fuse(segmentation)
+        self._publish_semantic_map(fused_map, header,
+                                   self.fused_pub, self.fused_colored_pub)
+
+        if fused_map is not segmentation:
+            road_mask = np.where(
+                (fused_map == self._road_id) | (fused_map == self._road_line_id),
+                255, 0,
+            ).astype(np.uint8)
+            self._publish_image(road_mask, header, 'mono8', self.road_mask_pub)
+            self._publish_image(self._last_lane_mask, header, 'mono8',
+                                self.lane_mask_pub)
+
+    def _try_fuse(self, segmentation: np.ndarray) -> np.ndarray:
+        """Fuse lane markings into segmentation via RoadExtractor, or return unchanged."""
         rgb = self._latest_rgb
 
         if rgb is None:
-            # No RGB yet — publish unfused semantic map as fused
-            self._publish_image(segmentation, header, 'mono8', self.fused_pub)
-            if self.publish_colored:
-                self._publish_image(
-                    colorize_mask(segmentation), header, 'rgb8',
-                    self.fused_colored_pub)
-            return
+            return segmentation
 
         if rgb.shape[:2] != segmentation.shape[:2]:
             self.get_logger().warn(
                 f'Size mismatch: RGB {rgb.shape[:2]} vs Semantic '
                 f'{segmentation.shape[:2]}. Publishing unfused map.')
-            self._publish_image(segmentation, header, 'mono8', self.fused_pub)
-            if self.publish_colored:
-                self._publish_image(
-                    colorize_mask(segmentation), header, 'rgb8',
-                    self.fused_colored_pub)
-            return
+            return segmentation
 
-        # --- Run fusion (safe even when no markings are found) ---
         try:
-            fused_map = segmentation.copy()  # avoid mutating the original
+            fused_map = segmentation.copy()
             fused_map, lane_mask = self.road_extractor.fuse_lane_markings(
                 fused_map, rgb,
                 road_class_id=self._road_id,
                 road_line_class_id=self._road_line_id,
             )
+            self._last_lane_mask = lane_mask
+            return fused_map
         except Exception as e:
             self.get_logger().error(f'Lane fusion failed: {e}')
-            # Publish the unfused map so downstream never loses data
-            self._publish_image(segmentation, header, 'mono8', self.fused_pub)
-            if self.publish_colored:
-                self._publish_image(
-                    colorize_mask(segmentation), header, 'rgb8',
-                    self.fused_colored_pub)
-            return
-
-        # --- Publish fused semantic map ---
-        self._publish_image(fused_map, header, 'mono8', self.fused_pub)
-        if self.publish_colored:
-            self._publish_image(
-                colorize_mask(fused_map), header, 'rgb8',
-                self.fused_colored_pub)
-
-        # --- Debug: road mask & lane mask ---
-        road_mask = np.where(
-            (fused_map == self._road_id) | (fused_map == self._road_line_id),
-            255, 0,
-        ).astype(np.uint8)
-        self._publish_image(road_mask, header, 'mono8', self.road_mask_pub)
-        self._publish_image(lane_mask, header, 'mono8', self.lane_mask_pub)
+            return segmentation
 
     # ------------------------------------------------------------------ #
     #  Publishing helpers                                                 #
@@ -339,37 +279,21 @@ class SemanticSegmentationNode(Node):
         msg.data = array.tobytes()
         publisher.publish(msg)
 
-    def _publish_semantic(self, segmentation: np.ndarray, header):
-        """
-        Publish raw semantic segmentation map and optional colored visualization.
+    def _publish_semantic_map(self, segmentation: np.ndarray, header,
+                              mono_pub, colored_pub=None):
+        """Publish semantic map (mono8) and optional colored visualization."""
+        self._publish_image(segmentation, header, 'mono8', mono_pub)
 
-        Args:
-            segmentation: Semantic mask (H, W) with class IDs
-            header: ROS2 Header
-        """
-        self._publish_image(segmentation, header, 'mono8', self.semantic_pub)
-
-        if self.publish_colored:
-            colored = colorize_mask(segmentation)
-            self._publish_image(colored, header, 'rgb8', self.colored_pub)
+        if self.publish_colored and colored_pub is not None:
+            self._publish_image(colorize_mask(segmentation), header, 'rgb8',
+                                colored_pub)
     
     def _ros_image_to_numpy_rgb(self, msg: Image) -> np.ndarray:
-        """
-        Convert ROS2 Image message to RGB numpy array.
-
-        The bridge converts CARLA's BGRA to rgb8 before publishing.
-
-        Args:
-            msg: ROS2 Image message (rgb8 from bridge)
-
-        Returns:
-            RGB numpy array (H, W, 3)
-        """
+        """Convert ROS2 Image (rgb8) to numpy array (H, W, 3)."""
         return np.frombuffer(msg.data, dtype=np.uint8).reshape(
             msg.height, msg.width, 3).copy()
     
     def _update_stats(self, start_time: float, source: str):
-        """Update and log processing statistics."""
         elapsed = (time.perf_counter() - start_time) * 1000
         self._frame_count += 1
         self._total_time += elapsed
