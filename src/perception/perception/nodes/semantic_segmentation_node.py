@@ -227,25 +227,16 @@ class SemanticSegmentationNode(Node):
         """
         Process CARLA ground truth semantic camera and publish semantic map.
 
-        CARLA semantic camera outputs BGRA8 where the R channel (index 2)
-        contains the class ID.
+        The bridge extracts the class-ID channel and publishes mono8.
 
         Args:
-            msg: ROS2 Image message (bgra8 from CARLA semantic camera)
+            msg: ROS2 Image message (mono8 from bridge)
         """
         start_time = time.perf_counter()
 
-        # Extract semantic mask from CARLA semantic camera
-        if msg.encoding == 'bgra8':
-            image_bgra = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, 4)
-            segmentation = image_bgra[:, :, 2].copy()
-        elif msg.encoding == 'mono8':
-            segmentation = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width)
-        else:
-            self.get_logger().error(f'Unsupported encoding: {msg.encoding}')
-            return
+        # Bridge already extracts the semantic label channel as mono8
+        segmentation = np.frombuffer(msg.data, dtype=np.uint8).reshape(
+            msg.height, msg.width)
 
         # Publish raw semantic map
         self._publish_semantic(segmentation, msg.header)
@@ -366,20 +357,14 @@ class SemanticSegmentationNode(Node):
         """
         Convert ROS2 Image message to RGB numpy array.
 
-        Only rgb8 is accepted (the bridge converts CARLA's BGRA to RGB before publishing).
+        The bridge converts CARLA's BGRA to rgb8 before publishing.
 
         Args:
-            msg: ROS2 Image message (expected: rgb8)
+            msg: ROS2 Image message (rgb8 from bridge)
 
         Returns:
             RGB numpy array (H, W, 3)
-
-        Raises:
-            ValueError: If encoding is not rgb8.
         """
-        if msg.encoding != 'rgb8':
-            raise ValueError(
-                f'Expected rgb8 encoding from RGB camera, got {msg.encoding}')
         return np.frombuffer(msg.data, dtype=np.uint8).reshape(
             msg.height, msg.width, 3).copy()
     
