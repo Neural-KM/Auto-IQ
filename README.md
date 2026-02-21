@@ -56,10 +56,10 @@ ros2 launch autoiq_bridge autoiq.launch.py use_ground_truth:=false
 
 ```bash
 # Spawn static obstacle
-python3 tools/spawn_obstacle.py --type car --distance 40 --lane center
+python3 tools/spawn_obstacle.py --ahead 30
 
 # Set navigation goal by spawn point index
-ros2 topic pub /planning/goal_index std_msgs/Int32 "data: 250"
+ros2 topic pub /planning/goal_index std_msgs/Int32 "data: 250" --once
 ```
 
 ## Perception Nodes
