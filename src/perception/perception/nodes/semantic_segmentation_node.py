@@ -58,6 +58,8 @@ from perception.data_classes.semantic_labels import (
     colorize_mask,
 )
 
+from cv_bridge import CvBridge
+
 
 class SemanticSegmentationNode(Node):
     """ROS2 Node for semantic segmentation with optional lane-marking fusion.
@@ -127,6 +129,9 @@ class SemanticSegmentationNode(Node):
 
         # ==================== Cached RGB for fusion ====================
         self._latest_rgb: Optional[np.ndarray] = None
+
+        # ==================== CV Bridge ====================
+        self.cv_bridge = CvBridge()
 
         # ==================== Subscribers ====================
         if self.segmentation_source == 'segformer':
@@ -201,8 +206,11 @@ class SemanticSegmentationNode(Node):
         """Publish CARLA ground truth semantic map (already has lane markings)."""
         start_time = time.perf_counter()
 
-        segmentation = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-            msg.height, msg.width)
+        try:
+            segmentation = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
+        except Exception as e:
+            self.get_logger().warn(f'cv_bridge conversion failed: {e}')
+            return
 
         self._process_and_publish(segmentation, msg.header)
         self._update_stats(start_time, 'Ground Truth')
@@ -265,18 +273,8 @@ class SemanticSegmentationNode(Node):
 
     def _publish_image(self, array: np.ndarray, header, encoding: str, publisher):
         """Publish a numpy array as a ROS2 Image on *publisher*."""
-        msg = Image()
+        msg = self.cv_bridge.cv2_to_imgmsg(array, encoding=encoding)
         msg.header = header
-        msg.height = array.shape[0]
-        msg.width = array.shape[1]
-        msg.encoding = encoding
-        if encoding == 'mono8':
-            msg.step = msg.width
-        elif encoding in ('rgb8', 'bgr8'):
-            msg.step = msg.width * 3
-        else:
-            msg.step = msg.width * (array.shape[2] if array.ndim > 2 else 1)
-        msg.data = array.tobytes()
         publisher.publish(msg)
 
     def _publish_semantic_map(self, segmentation: np.ndarray, header,
@@ -290,8 +288,7 @@ class SemanticSegmentationNode(Node):
     
     def _ros_image_to_numpy_rgb(self, msg: Image) -> np.ndarray:
         """Convert ROS2 Image (rgb8) to numpy array (H, W, 3)."""
-        return np.frombuffer(msg.data, dtype=np.uint8).reshape(
-            msg.height, msg.width, 3).copy()
+        return self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
     
     def _update_stats(self, start_time: float, source: str):
         elapsed = (time.perf_counter() - start_time) * 1000

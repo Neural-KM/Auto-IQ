@@ -36,6 +36,8 @@ from tf2_ros import TransformException
 from scipy import ndimage
 import time
 
+from cv_bridge import CvBridge
+
 # Import semantic labels from perception module (CARLA convention)
 from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME, colorize_mask
 from mapping.utils.ipm_funcs import (
@@ -132,6 +134,9 @@ class InversePerspectiveMapperNode2(Node):
         # Debug counters
         self._tf_log_count = 0
         self._img_log_count = 0
+        
+        # ==================== CV Bridge ====================
+        self.cv_bridge = CvBridge()
         
         # ==================== QoS ====================
         sensor_qos = QoSProfile(
@@ -240,10 +245,10 @@ class InversePerspectiveMapperNode2(Node):
         height = msg.height
         width = msg.width
         
-        if msg.encoding == 'mono8':
-            semantic_img = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width)
-        else:
-            self.get_logger().warn(f'Unsupported semantic encoding: {msg.encoding} Expecting mono8.')
+        try:
+            semantic_img = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
+        except Exception as e:
+            self.get_logger().warn(f'cv_bridge conversion failed: {e}')
             return
         
         # Debug: Log unique labels and road pixel count
@@ -266,15 +271,9 @@ class InversePerspectiveMapperNode2(Node):
         # Create debug image after drop skirt
         colorized_dropped = colorize_mask(semantic_img)
         colorized_dropped[-hood_mask_rows:, :] = [128, 128, 128]  # Gray out hood-masked area
-        self.debug_image_pub.publish(Image(
-            header=msg.header,
-            height=colorized_dropped.shape[0],
-            width=colorized_dropped.shape[1],
-            encoding='rgb8',
-            is_bigendian=0,
-            step=colorized_dropped.shape[1] * 3,
-            data=colorized_dropped.tobytes()
-        ))
+        debug_msg = self.cv_bridge.cv2_to_imgmsg(colorized_dropped, encoding='rgb8')
+        debug_msg.header = msg.header
+        self.debug_image_pub.publish(debug_msg)
         # 5. Run Reverse Projection (Numba JIT with parallel)
         grid = reverse_project_grid(
             self.grid_cells,

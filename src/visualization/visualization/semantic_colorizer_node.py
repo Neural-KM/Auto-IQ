@@ -22,6 +22,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 
 from sensor_msgs.msg import Image, PointCloud2, PointField
 
+from cv_bridge import CvBridge
 from perception.data_classes.semantic_labels import colorize_mask, SEMANTIC_COLOR_LUT
 
 
@@ -72,6 +73,9 @@ class SemanticColorizerNode(Node):
             self.labeled_pointcloud_callback, sensor_qos)
         self.get_logger().info(f'Subscribed to labeled pointcloud: {labeled_pointcloud_topic}')
         
+        # ==================== CV Bridge ====================
+        self.cv_bridge = CvBridge()
+        
         self.get_logger().info('Semantic Colorizer Node initialized')
     
     # ==================== Callbacks ====================
@@ -79,32 +83,24 @@ class SemanticColorizerNode(Node):
     def semantic_callback(self, msg: Image):
         """Receive semantic segmentation image and republish colored version."""
         # Parse semantic class IDs from image
-        if msg.encoding == 'bgra8':
-            # CARLA semantic camera: class ID in R channel (index 2 for BGRA)
-            img = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, 4)
-            class_ids = img[:, :, 2]
-        elif msg.encoding == 'rgb8':
-            img = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, 3)
-            class_ids = img[:, :, 0]
-        elif msg.encoding == 'mono8':
-            class_ids = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width)
-        else:
+        try:
+            img = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+        except Exception as e:
+            self.get_logger().warn(f'cv_bridge conversion failed: {e}')
             return
+        
+        # Extract class IDs: multi-channel images store class ID in R channel
+        if img.ndim == 3:
+            class_ids = img[:, :, 2] if img.shape[2] == 4 else img[:, :, 0]
+        else:
+            class_ids = img
         
         # Colorize using semantic labels palette
         colored = colorize_mask(class_ids)
         
         # Publish colored image
-        out_msg = Image()
+        out_msg = self.cv_bridge.cv2_to_imgmsg(colored, encoding='rgb8')
         out_msg.header = msg.header
-        out_msg.height = msg.height
-        out_msg.width = msg.width
-        out_msg.encoding = 'rgb8'
-        out_msg.step = msg.width * 3
-        out_msg.data = colored.tobytes()
         
         self.semantic_image_pub.publish(out_msg)
     
