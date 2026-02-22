@@ -36,6 +36,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 from sensor_msgs.msg import Image
 
+from cv_bridge import CvBridge
+
 
 class CameraSnapshotNode(Node):
     """Node to capture and save camera snapshots."""
@@ -63,6 +65,9 @@ class CameraSnapshotNode(Node):
         self._last_capture_time = 0.0
         self._done = False
         self._start_time = time.time()
+        
+        # CV Bridge
+        self.cv_bridge = CvBridge()
         
         # Create output directory if needed
         if self.count > 1:
@@ -132,37 +137,17 @@ class CameraSnapshotNode(Node):
     
     def _ros_to_numpy(self, msg: Image) -> np.ndarray:
         """Convert ROS Image to numpy array (BGR for OpenCV)."""
-        if msg.encoding == 'rgb8':
-            image = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, 3)
-            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        elif msg.encoding == 'bgr8':
-            image = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, 3)
-        elif msg.encoding == 'bgra8':
-            image = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, 4)
-            image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
-        elif msg.encoding == 'rgba8':
-            image = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, 4)
-            image = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
-        elif msg.encoding == 'mono8':
-            image = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width)
-        elif msg.encoding == '32FC1':
+        if msg.encoding == '32FC1':
             # Depth image - normalize for visualization
-            image = np.frombuffer(msg.data, dtype=np.float32).reshape(
-                msg.height, msg.width)
-            # Normalize to 0-255 (assuming max depth ~100m)
+            image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='32FC1')
             image = np.clip(image / 100.0 * 255, 0, 255).astype(np.uint8)
         elif msg.encoding == '16UC1':
             # Depth image 16-bit
-            image = np.frombuffer(msg.data, dtype=np.uint16).reshape(
-                msg.height, msg.width)
+            image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='16UC1')
             image = (image / 256).astype(np.uint8)
         else:
-            raise ValueError(f'Unsupported encoding: {msg.encoding}')
+            # cv_bridge handles rgb8, bgr8, bgra8, rgba8, mono8, etc.
+            image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         
         return image
     

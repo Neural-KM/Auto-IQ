@@ -29,6 +29,8 @@ from nav_msgs.msg import OccupancyGrid
 import tf2_ros
 from tf2_ros import TransformException
 import time
+
+from cv_bridge import CvBridge
 # Import semantic labels from perception module (CARLA convention)
 from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME
 from mapping.utils.ipm_funcs import (
@@ -89,6 +91,9 @@ class InversePerspectiveMapperNode(Node):
         # ==================== State ====================
         self.K = None  # Camera intrinsics matrix [3x3]
         self.camera_frame = None
+        
+        # ==================== CV Bridge ====================
+        self.cv_bridge = CvBridge()
         
         # ==================== QoS ====================
         sensor_qos = QoSProfile(
@@ -218,11 +223,11 @@ class InversePerspectiveMapperNode(Node):
         width = msg.width
         self.get_logger().info(f'Image size: {width}x{height}, encoding: {msg.encoding}')
         
-        # bgra is converted to mono8 by our bridge, no need to check for other data types
-        if msg.encoding != 'mono8':
-            self.get_logger().warn(f'Unexpected image encoding: {msg.encoding}')
+        try:
+            label_img = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
+        except Exception as e:
+            self.get_logger().warn(f'cv_bridge conversion failed: {e}')
             return
-        label_img = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width)
            
 
         # DEBUG: Log unique labels in the image to verify semantic encoding

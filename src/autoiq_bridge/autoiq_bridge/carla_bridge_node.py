@@ -47,6 +47,7 @@ from nav_msgs.msg import Odometry
 from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
 from autoiq_msgs.msg import VehicleControl
 
+from cv_bridge import CvBridge
 import carla
 
 # Local converters
@@ -128,6 +129,9 @@ class CarlaBridgeNode(Node):
         
         # Cached CameraInfo messages (avoid recreating each frame)
         self.cached_camera_info: Dict[str, CameraInfo] = {}
+        
+        # ==================== CV Bridge ====================
+        self.cv_bridge = CvBridge()
         
         # ==================== TF Broadcasters ====================
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -630,14 +634,9 @@ class CarlaBridgeNode(Node):
         rgb_array = array[:, :, :3][:, :, ::-1]  # BGRA -> RGB
         
         # Create Image message
-        msg = Image()
+        msg = self.cv_bridge.cv2_to_imgmsg(
+            np.ascontiguousarray(rgb_array), encoding='rgb8')
         msg.header = self.create_synchronized_header(sensor_info['frame_id'], ros_time)
-        msg.height = carla_image.height
-        msg.width = carla_image.width
-        msg.encoding = 'rgb8'
-        msg.is_bigendian = False
-        msg.step = carla_image.width * 3
-        msg.data = np.ascontiguousarray(rgb_array).tobytes()
         
         sensor_info['image_pub'].publish(msg)
         

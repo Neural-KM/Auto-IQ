@@ -1,8 +1,16 @@
 """
 Perception Launch File
+=======================
 
-All default parameters are defined in config/perception_params.yaml (single source of truth).
-Override via command line: ros2 launch perception perception.launch.py params_file:=/path/to/custom.yaml
+Launches the full perception stack:
+  1. YOLO-based object detection (perception_node)
+  2. Semantic Segmentation (SegFormer or CARLA Ground Truth)
+  3. Road Extraction + Semantic Fusion (lane marking injection)
+  4. Semantic PointCloud projection
+
+Usage:
+    ros2 launch perception perception.launch.py segmentation_source:=segformer
+    ros2 launch perception perception.launch.py segmentation_source:=ground_truth
 """
 
 import os
@@ -19,13 +27,26 @@ def generate_launch_description():
     default_params_file = os.path.join(pkg_dir, 'config', 'perception_params.yaml')
     
     return LaunchDescription([
-        # Single argument to override the entire config file if needed
+        # ==================== Arguments ====================
         DeclareLaunchArgument(
             'params_file',
             default_value=default_params_file,
             description='Path to perception parameters YAML file'
         ),
-        
+        DeclareLaunchArgument(
+            'segmentation_source', default_value='segformer',
+            description="'segformer' (camera-based) or 'ground_truth' (CARLA sim)"
+        ),
+        DeclareLaunchArgument(
+            'model_name', default_value='b5',
+            description='SegFormer model variant: b0-b5'
+        ),
+        DeclareLaunchArgument(
+            'device', default_value='cuda',
+            description='SegFormer inference device: cuda or cpu'
+        ),
+
+        # ==================== Node 1: YOLO Object Detection ====================
         Node(
             package='perception',
             executable='perception_node',
@@ -36,8 +57,29 @@ def generate_launch_description():
                 {'use_sim_time': True}
             ]
         ),
-        
-        # ==================== Semantic PointCloud Node ====================
+
+        # ==================== Node 2: Semantic Segmentation + Lane Fusion ====================
+        # Publishes: /perception/semantic_map (mono8, class IDs)
+        #            /perception/semantic_map/colored (rgb8)
+        #            /perception/semantic_map/fused (mono8, with lane markings)
+        #            /perception/semantic_map/fused/colored (rgb8)
+        #            /perception/road_mask, /perception/lane_markings (debug)
+        # Note: SegFormer does NOT natively produce road_line (class 24);
+        #       the integrated fusion step detects and injects them.
+        Node(
+            package='perception',
+            executable='semantic_segmentation_node',
+            name='semantic_segmentation_node',
+            output='screen',
+            parameters=[{
+                'use_sim_time': True,
+                'segmentation_source': LaunchConfiguration('segmentation_source'),
+                'model_name': LaunchConfiguration('model_name'),
+                'device': LaunchConfiguration('device'),
+            }],
+        ),
+
+        # ==================== Node 3: Semantic PointCloud ====================
         Node(
             package='perception',
             executable='semantic_pointcloud_node',

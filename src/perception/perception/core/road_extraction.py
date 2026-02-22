@@ -46,7 +46,8 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from perception.utils.lane_detection import _extract_lanes_from_ipm
-from perception.utils.ipm_transform import convert_to_ipm 
+from perception.utils.ipm_transform import convert_to_ipm
+from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME
 
 # ============================================================================
 # Configuration (Dataclasses - frozen for immutability)
@@ -336,6 +337,58 @@ class RoadExtractor:
         lane_mask = cv2.bitwise_and(lane_mask, road_mask)
         
         return lane_mask
+
+    # =========================================================================
+    # Semantic Fusion (Lane Marking Injection)
+    # =========================================================================
+
+    def fuse_lane_markings(
+        self,
+        semantic_map: np.ndarray,
+        rgb_image: np.ndarray,
+        road_class_id: int,
+        road_line_class_id: int,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Inject lane markings into a semantic map that lacks a road_line class.
+
+        SegFormer (trained on Cityscapes) lumps lane markings into the 'road'
+        class.  This method detects bright lane markings from the RGB image
+        within the road mask using adaptive thresholding, then writes the
+        road_line class ID into the semantic map at those pixels.
+
+        The returned map is pixel-identical in format to CARLA ground truth,
+        so the entire downstream stack (mapping, planning, control) works
+        without any changes.
+
+        Args:
+            semantic_map: Mono8 class-ID map (H, W) — e.g. from SegFormer.
+                          Modified **in-place** and also returned.
+            rgb_image:    RGB image (H, W, 3) — used for lane detection.
+            road_class_id:      Class ID for road (default: SEMANTIC_BY_NAME['road'] = 1).
+            road_line_class_id: Class ID for road_line to inject
+                                (default: SEMANTIC_BY_NAME['road_line'] = 24).
+
+        Returns:
+            fused_map:  The semantic map with road_line pixels injected (same array as input).
+            lane_mask:  Binary mask (H, W) where 255 = detected lane marking.
+        """
+        # 1. Build road mask from class IDs
+        road_mask = (semantic_map == road_class_id).astype(np.uint8) * 255
+
+        road_pixels = np.count_nonzero(road_mask)
+        if road_pixels == 0:
+            # No road visible — nothing to fuse
+            empty = np.zeros(semantic_map.shape[:2], dtype=np.uint8)
+            return semantic_map, empty
+
+        # 2. Detect lane markings in perspective space (adaptive threshold)
+        lane_mask = self.extract_lanes(rgb_image, road_mask)
+
+        # 3. Write road_line class into the semantic map
+        semantic_map[lane_mask > 0] = road_line_class_id
+
+        return semantic_map, lane_mask
 
 
 def process_single_image(extractor: RoadExtractor, args, segmentation_map: np.ndarray = None):

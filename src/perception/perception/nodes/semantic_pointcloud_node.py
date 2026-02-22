@@ -38,6 +38,8 @@ from std_msgs.msg import Header
 import tf2_ros
 from tf2_ros import TransformException
 
+from cv_bridge import CvBridge
+
 # CARLA Semantic Class IDs
 SEMANTIC_ROAD = 1
 SEMANTIC_VEHICLE = 14
@@ -127,6 +129,9 @@ class SemanticPointCloudNode(Node):
         # Latest sensor data
         self.latest_semantic = None
         self.latest_lidar = None
+        
+        # ==================== CV Bridge ====================
+        self.cv_bridge = CvBridge()
         
         # ==================== TF2 ====================
         self.tf_buffer = tf2_ros.Buffer()
@@ -245,24 +250,18 @@ class SemanticPointCloudNode(Node):
     
     def semantic_callback(self, msg: Image):
         """Store latest semantic segmentation image."""
-        # Convert to numpy array
-        if msg.encoding == 'bgra8':
-            # CARLA semantic camera uses BGRA8 where R channel contains class ID
-            img = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, 4)
-            # Class ID is in the R channel (index 2 for BGRA)
-            self.latest_semantic = img[:, :, 2].copy()
-        elif msg.encoding == 'rgb8':
-            img = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, 3)
-            # Assume class ID is in R channel
-            self.latest_semantic = img[:, :, 0].copy()
-        elif msg.encoding == 'mono8':
-            self.latest_semantic = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width).copy()
-        else:
-            self.get_logger().warn(f'Unsupported semantic encoding: {msg.encoding}')
+        # Convert to numpy array via cv_bridge
+        try:
+            img = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+        except Exception as e:
+            self.get_logger().warn(f'cv_bridge conversion failed: {e}')
             return
+        
+        # Extract class IDs: multi-channel images store class ID in R channel
+        if img.ndim == 3:
+            self.latest_semantic = (img[:, :, 2] if img.shape[2] == 4 else img[:, :, 0]).copy()
+        else:
+            self.latest_semantic = img.copy()
         
         # Process if we have both semantic and lidar
         if self.initialized and self.latest_lidar is not None:
@@ -467,13 +466,9 @@ class SemanticPointCloudNode(Node):
                 cv2.circle(debug_img, (u_int[i], v_int[i]), 3, color, -1)
         
         # Publish as ROS Image
-        msg = Image()
+        msg = self.cv_bridge.cv2_to_imgmsg(debug_img, encoding='rgb8')
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self.camera_frame
-        msg.height, msg.width = debug_img.shape[:2]
-        msg.encoding = 'rgb8'
-        msg.step = msg.width * 3
-        msg.data = debug_img.tobytes()
         
         self.debug_image_pub.publish(msg)
     

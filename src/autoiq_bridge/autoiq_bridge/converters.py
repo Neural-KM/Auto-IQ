@@ -13,6 +13,10 @@ from geometry_msgs.msg import TransformStamped, Vector3, Quaternion
 from nav_msgs.msg import Odometry
 import math
 
+from cv_bridge import CvBridge
+
+_cv_bridge = CvBridge()
+
 
 def carla_timestamp_to_ros(carla_timestamp: float) -> Time:
     """Convert CARLA timestamp (seconds) to ROS2 Time message."""
@@ -58,30 +62,19 @@ def carla_image_to_ros(carla_image, frame_id: str, encoding: str = 'rgb8') -> Im
         timestamp = 0.0  # Will need to be set externally
         height, width = array.shape[:2]
     
-    msg = Image()
-    msg.header = create_header(frame_id, timestamp)
-    msg.height = height
-    msg.width = width
-    msg.encoding = encoding
-    msg.is_bigendian = False
+    # Cast to appropriate dtype for the encoding
+    dtype_map = {
+        'rgb8': np.uint8,
+        'bgra8': np.uint8,
+        '32FC1': np.float32,
+        'mono8': np.uint8,
+        'mono16': np.uint16,
+    }
+    if encoding in dtype_map:
+        array = array.astype(dtype_map[encoding])
     
-    if encoding == 'rgb8':
-        msg.step = width * 3
-        msg.data = array.astype(np.uint8).tobytes()
-    elif encoding == 'bgra8':
-        msg.step = width * 4
-        msg.data = array.astype(np.uint8).tobytes()
-    elif encoding == '32FC1':
-        # Depth image (float32)
-        msg.step = width * 4
-        msg.data = array.astype(np.float32).tobytes()
-    elif encoding == 'mono8':
-        # Semantic segmentation (single channel)
-        msg.step = width
-        msg.data = array.astype(np.uint8).tobytes()
-    elif encoding == 'mono16':
-        msg.step = width * 2
-        msg.data = array.astype(np.uint16).tobytes()
+    msg = _cv_bridge.cv2_to_imgmsg(np.ascontiguousarray(array), encoding=encoding)
+    msg.header = create_header(frame_id, timestamp)
     
     return msg
 
@@ -98,13 +91,8 @@ def carla_depth_to_ros(depth_array: np.ndarray, frame_id: str, timestamp: float)
     Returns:
         sensor_msgs/Image with 32FC1 encoding
     """
-    msg = Image()
+    msg = _cv_bridge.cv2_to_imgmsg(depth_array.astype(np.float32), encoding='32FC1')
     msg.header = create_header(frame_id, timestamp)
-    msg.height, msg.width = depth_array.shape[:2]
-    msg.encoding = '32FC1'
-    msg.is_bigendian = False
-    msg.step = msg.width * 4
-    msg.data = depth_array.astype(np.float32).tobytes()
     return msg
 
 
@@ -120,13 +108,8 @@ def carla_semantic_to_ros(semantic_array: np.ndarray, frame_id: str, timestamp: 
     Returns:
         sensor_msgs/Image with mono8 encoding
     """
-    msg = Image()
+    msg = _cv_bridge.cv2_to_imgmsg(semantic_array.astype(np.uint8), encoding='mono8')
     msg.header = create_header(frame_id, timestamp)
-    msg.height, msg.width = semantic_array.shape[:2]
-    msg.encoding = 'mono8'
-    msg.is_bigendian = False
-    msg.step = msg.width
-    msg.data = semantic_array.astype(np.uint8).tobytes()
     return msg
 
 

@@ -56,11 +56,28 @@ ros2 launch autoiq_bridge autoiq.launch.py use_ground_truth:=false
 
 ```bash
 # Spawn static obstacle
-python3 tools/spawn_obstacle.py --type car --distance 40 --lane center
+python3 tools/spawn_obstacle.py --ahead 30
 
 # Set navigation goal by spawn point index
-ros2 topic pub /planning/goal_index std_msgs/Int32 "data: 250"
+ros2 topic pub /planning/goal_index std_msgs/Int32 "data: 250" --once
 ```
+
+## Perception Nodes
+
+### Semantic Segmentation + Lane Extraction Pipeline
+
+```bash
+# Semantic segmentation (choose source: ground_truth or segformer)
+ros2 run perception semantic_segmentation_node --ros-args -p segmentation_source:=ground_truth
+
+# Lane extraction (subscribes to semantic map)
+ros2 run perception road_extraction_node
+```
+
+| Node | Subscribes | Publishes |
+|------|------------|-----------|
+| `semantic_segmentation_node` | RGB or GT semantic camera | `/perception/semantic_map`, `/perception/semantic_map/colored` |
+| `road_extraction_node` | `/perception/semantic_map` (mono8), RGB camera topic | `/perception/road_mask`, `/perception/lane_markings` |
 
 ## Datasets
 

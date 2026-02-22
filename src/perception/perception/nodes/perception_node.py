@@ -28,6 +28,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 import struct
 
+
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
@@ -36,6 +37,7 @@ from builtin_interfaces.msg import Time
 
 from autoiq_msgs.msg import ObstacleArray
 
+from cv_bridge import CvBridge
 import tf2_ros
 from tf2_ros import TransformException
 
@@ -144,6 +146,9 @@ class PerceptionNode(Node):
         self.latest_rgb = None
         self.latest_depth = None
         self.latest_lidar = None
+        
+        # ==================== CV Bridge ====================
+        self.cv_bridge = CvBridge()
         
         # ==================== Perception Components (initialized later) ====================
         self.perception = None
@@ -354,14 +359,11 @@ class PerceptionNode(Node):
         if not self.initialized or self.perception is None:
             return
         
-        # Convert ROS Image to numpy
-        if msg.encoding == 'rgb8':
-            img = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
-        elif msg.encoding == 'bgr8':
-            img = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
-            img = img[:, :, ::-1]
-        else:
-            self.get_logger().warn(f'Unsupported RGB encoding: {msg.encoding}')
+        # Convert ROS Image to numpy via cv_bridge
+        try:
+            img = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
+        except Exception as e:
+            self.get_logger().warn(f'cv_bridge conversion failed: {e}')
             return
         
         self.latest_rgb = img
@@ -409,10 +411,10 @@ class PerceptionNode(Node):
         if not self.initialized or self.lane_detector is None:
             return
         
-        if msg.encoding == 'mono8':
-            semantic_img = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width)
-        else:
-            self.get_logger().warn(f'Unsupported semantic encoding: {msg.encoding}')
+        try:
+            semantic_img = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
+        except Exception as e:
+            self.get_logger().warn(f'cv_bridge conversion failed: {e}')
             return
         
         result = self.lane_detector.detect(semantic_img)
@@ -494,13 +496,8 @@ class PerceptionNode(Node):
     
     def _publish_debug_rgb(self, msg: Image, annotated: np.ndarray):
         """Publish debug RGB image with bboxes."""
-        out_msg = Image()
+        out_msg = self.cv_bridge.cv2_to_imgmsg(annotated, encoding='rgb8')
         out_msg.header = msg.header
-        out_msg.height = annotated.shape[0]
-        out_msg.width = annotated.shape[1]
-        out_msg.encoding = 'rgb8'
-        out_msg.step = annotated.shape[1] * 3
-        out_msg.data = annotated.tobytes()
         self.debug_rgb_pub.publish(out_msg)
     
     def _publish_debug_bev(self):
@@ -510,14 +507,9 @@ class PerceptionNode(Node):
         debug_images = self.lane_detector.get_debug_images()
         lane_fit_img = debug_images.get('lane_fit')
         if lane_fit_img is not None:
-            out_msg = Image()
+            out_msg = self.cv_bridge.cv2_to_imgmsg(lane_fit_img, encoding='bgr8')
             out_msg.header.stamp = self.get_clock().now().to_msg()
             out_msg.header.frame_id = 'ego_vehicle'
-            out_msg.height = lane_fit_img.shape[0]
-            out_msg.width = lane_fit_img.shape[1]
-            out_msg.encoding = 'bgr8'
-            out_msg.step = lane_fit_img.shape[1] * 3
-            out_msg.data = lane_fit_img.tobytes()
             self.debug_bev_pub.publish(out_msg)
     
     # ==================== Ground Truth Detection ====================
