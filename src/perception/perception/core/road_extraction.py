@@ -72,9 +72,8 @@ class CameraConfig:
 @dataclass(frozen=True)
 class OutputConfig:
     """Output paths configuration."""
-    default_dir: Path = field(default_factory=lambda: Path('/Auto-IQ/data/rosbag_images_15jan/inference'))
-    sensor_config: Path = field(default_factory=lambda: Path('/Auto-IQ/config/carla_sensors.yaml'))
-
+    default_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[4] / 'data' / 'rosbag_images_15jan' / 'inference')
+    sensor_config: Path = field(default_factory=lambda: Path(__file__).resolve().parents[4] / 'config' / 'carla_sensors.yaml')
 
 @dataclass(frozen=True)
 class RoadExtractionConfig:
