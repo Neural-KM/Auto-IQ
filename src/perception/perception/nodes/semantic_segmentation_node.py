@@ -42,6 +42,16 @@ Publishes:
 
 """
 
+import numpy as np
+import time
+from typing import Optional
+
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+
+from sensor_msgs.msg import Image
+
 from perception.core.road_extraction import RoadExtractor
 from perception.data_classes.semantic_labels import (
     SEMANTIC_BY_NAME,
@@ -156,7 +166,7 @@ class SemanticSegmentationNode(Node):
             self.road_mask_pub = self.create_publisher(Image, '/perception/road_mask', 10)
             self.lane_mask_pub = self.create_publisher(Image, '/perception/lane_markings', 10)
 
-        # ==================== Stats ====================
+        # ==================== State ====================
         self._frame_count = 0
         self._total_time = 0.0
         self._last_lane_mask: Optional[np.ndarray] = None
@@ -294,12 +304,13 @@ class SemanticSegmentationNode(Node):
     def _ros_image_to_numpy_rgb(self, msg: Image) -> np.ndarray:
         """Convert ROS2 Image (rgb8) to numpy array (H, W, 3)."""
         return self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
-    
+
     def _update_stats(self, start_time: float, source: str):
+        """Log average FPS every 30 frames."""
         elapsed = (time.perf_counter() - start_time) * 1000
         self._frame_count += 1
         self._total_time += elapsed
-        
+
         if self._frame_count % 30 == 0:
             avg_time = self._total_time / self._frame_count
             fps = 1000.0 / avg_time if avg_time > 0 else 0
