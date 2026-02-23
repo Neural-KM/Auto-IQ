@@ -76,7 +76,7 @@ class InversePerspectiveMapperNode2(Node):
         super().__init__('inverse_perspective_mapper_node_v2')
         
         # ==================== Parameters ====================
-        self.declare_parameter('semantic_source', 'fused')  # 'fused' or 'ground_truth'
+        self.declare_parameter('semantic_source', 'road_lane_extraction')  # 'road_lane_extraction' or 'ground_truth'
         self.declare_parameter('costmap_topic', '/mapping/ipm_costmap')
         self.declare_parameter('base_frame', 'ego_vehicle')
         
@@ -102,7 +102,7 @@ class InversePerspectiveMapperNode2(Node):
         if semantic_source == 'ground_truth':
             semantic_topic = '/carla/ego_vehicle/ground_truth/camera/semantic/front/image'
         else:
-            semantic_topic = '/perception/semantic_map/fused'
+            semantic_topic = '/perception/semantic_map/road_lane_extraction'
         
         costmap_topic = self.get_parameter('costmap_topic').value
         self.base_frame = self.get_parameter('base_frame').value

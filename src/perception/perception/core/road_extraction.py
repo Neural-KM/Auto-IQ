@@ -72,9 +72,8 @@ class CameraConfig:
 @dataclass(frozen=True)
 class OutputConfig:
     """Output paths configuration."""
-    default_dir: Path = field(default_factory=lambda: Path('/Auto-IQ/data/rosbag_images_15jan/inference'))
-    sensor_config: Path = field(default_factory=lambda: Path('/Auto-IQ/config/carla_sensors.yaml'))
-
+    default_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[4] / 'data' / 'rosbag_images_15jan' / 'inference')
+    sensor_config: Path = field(default_factory=lambda: Path(__file__).resolve().parents[4] / 'config' / 'carla_sensors.yaml')
 
 @dataclass(frozen=True)
 class RoadExtractionConfig:
@@ -339,10 +338,10 @@ class RoadExtractor:
         return lane_mask
 
     # =========================================================================
-    # Semantic Fusion (Lane Marking Injection)
+    # Road Lane Extraction (Lane Marking Injection)
     # =========================================================================
 
-    def fuse_lane_markings(
+    def extract_road_lane_markings(
         self,
         semantic_map: np.ndarray,
         rgb_image: np.ndarray,
@@ -370,7 +369,7 @@ class RoadExtractor:
                                 (default: SEMANTIC_BY_NAME['road_line'] = 24).
 
         Returns:
-            fused_map:  The semantic map with road_line pixels injected (same array as input).
+            extracted_map:  The semantic map with road_line pixels injected (same array as input).
             lane_mask:  Binary mask (H, W) where 255 = detected lane marking.
         """
         # 1. Build road mask from class IDs
@@ -378,7 +377,7 @@ class RoadExtractor:
 
         road_pixels = np.count_nonzero(road_mask)
         if road_pixels == 0:
-            # No road visible — nothing to fuse
+            # No road visible — nothing to extract
             empty = np.zeros(semantic_map.shape[:2], dtype=np.uint8)
             return semantic_map, empty
 

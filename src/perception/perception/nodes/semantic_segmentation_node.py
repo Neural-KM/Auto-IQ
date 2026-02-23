@@ -9,23 +9,23 @@ ROS2 node that publishes semantic segmentation maps from either:
 
 Flow:
 - **ground_truth mode**: CARLA ground truth already contains lane markings
-  (class 24 road_line).  The map is published as-is to both the raw and fused
-  topics — no RoadExtractor processing is needed.
+  (class 24 road_line).  The map is published as-is to both the raw and
+  road_lane_extraction topics — no RoadExtractor processing is needed.
 - **segformer mode**: SegFormer output does NOT contain lane markings.
-  When *enable_fusion* is True, the RoadExtractor detects lane markings via
-  adaptive thresholding on the RGB image and injects class 24 (road_line)
-  into the semantic map.  The fused map is published on a separate topic so
-  that the mapping/costmap node receives lane-aware semantics.
+  When *enable_road_lane_extraction* is True, the RoadExtractor detects lane
+  markings via adaptive thresholding on the RGB image and injects class 24
+  (road_line) into the semantic map.  The extracted map is published on a
+  separate topic so that the mapping/costmap node receives lane-aware semantics.
 
 Parameters:
 - segmentation_source: 'segformer' or 'ground_truth' (default: 'ground_truth')
-- model_name: SegFormer model variant (b0-b5) when using segformer
+- model_name: SegFormer model variant (b0-b5), set in perception.launch.py
 - device: 'cuda' or 'cpu' for SegFormer inference
 - rgb_topic: Input RGB camera topic
 - ground_truth_topic: Input ground truth semantic topic (for ground_truth mode)
 - output_topic: Base semantic map topic (default: /perception/semantic_map)
-- fused_topic: Fused semantic map with lane markings (default: /perception/semantic_map/fused)
-- enable_fusion: Enable lane-marking fusion via RoadExtractor (segformer mode only, default: True)
+- road_lane_extraction_topic: Road lane extraction map with lane markings (default: /perception/semantic_map/road_lane_extraction)
+- enable_road_lane_extraction: Enable lane-marking extraction via RoadExtractor (segformer mode only, default: True)
 - publish_colored: Publish colored visualization (default: True)
 
 Subscribes:
@@ -35,14 +35,14 @@ Subscribes:
 Publishes:
 - /perception/semantic_map           (mono8) — raw semantic segmentation
 - /perception/semantic_map/colored    (rgb8)  — colored visualization
-- /perception/semantic_map/fused      (mono8) — fused with lane markings
-- /perception/semantic_map/fused/colored (rgb8) — colored fused visualization
+- /perception/semantic_map/road_lane_extraction      (mono8) — extracted with lane markings
+- /perception/semantic_map/road_lane_extraction/colored (rgb8) — colored road lane extraction visualization
 - /perception/road_mask               (mono8) — binary road mask  [debug]
 - /perception/lane_markings           (mono8) — lane markings mask [debug]
+
 """
 
 import numpy as np
-import cv2
 import time
 from typing import Optional
 
@@ -62,7 +62,7 @@ from cv_bridge import CvBridge
 
 
 class SemanticSegmentationNode(Node):
-    """ROS2 Node for semantic segmentation with optional lane-marking fusion.
+    """ROS2 Node for semantic segmentation with optional road lane extraction.
 
     See module docstring for the ground_truth vs segformer flow.
     """
@@ -72,16 +72,16 @@ class SemanticSegmentationNode(Node):
 
         # ==================== Parameters ====================
         self.declare_parameter('segmentation_source', 'ground_truth')
-        self.declare_parameter('model_name', 'b2')
+        self.declare_parameter('model_name', 'b0')
         self.declare_parameter('device', 'cuda')
         self.declare_parameter('publish_colored', True)
         self.declare_parameter('rgb_topic', '/carla/ego_vehicle/sensor/camera/rgb/front/image')
         self.declare_parameter('ground_truth_topic', '/carla/ego_vehicle/ground_truth/camera/semantic/front/image')
         self.declare_parameter('output_topic', '/perception/semantic_map')
 
-        # Road-extraction / fusion parameters
-        self.declare_parameter('enable_fusion', True)
-        self.declare_parameter('fused_topic', '/perception/semantic_map/fused')
+        # Road-extraction / road lane extraction parameters
+        self.declare_parameter('enable_road_lane_extraction', True)
+        self.declare_parameter('road_lane_extraction_topic', '/perception/semantic_map/road_lane_extraction')
 
         self.segmentation_source = self.get_parameter('segmentation_source').value
         model_name = self.get_parameter('model_name').value
@@ -90,11 +90,11 @@ class SemanticSegmentationNode(Node):
         rgb_topic = self.get_parameter('rgb_topic').value
         ground_truth_topic = self.get_parameter('ground_truth_topic').value
         output_topic = self.get_parameter('output_topic').value
-        self.enable_fusion = self.get_parameter('enable_fusion').value
-        fused_topic = self.get_parameter('fused_topic').value
+        self.enable_road_lane_extraction = self.get_parameter('enable_road_lane_extraction').value
+        road_lane_extraction_topic = self.get_parameter('road_lane_extraction_topic').value
 
         self.get_logger().info(f'Segmentation source: {self.segmentation_source}')
-        self.get_logger().info(f'Lane-marking fusion: {"enabled" if self.enable_fusion else "disabled"}')
+        self.get_logger().info(f'Road lane extraction: {"enabled" if self.enable_road_lane_extraction else "disabled"}')
 
         # ==================== Initialize SegFormer (if needed) ====================
         self.segformer = None
@@ -108,14 +108,14 @@ class SemanticSegmentationNode(Node):
                 self.get_logger().error(f'Failed to load SegFormer: {e}')
                 raise RuntimeError(f'SegFormer loading failed: {e}')
 
-        # ==================== Initialize RoadExtractor (segformer + fusion only) ==============
+        # ==================== Initialize RoadExtractor (segformer + road lane extraction only) ==
         # Ground truth already contains lane markings — no extraction needed.
         self.road_extractor: Optional[RoadExtractor] = None
-        if self.segmentation_source == 'segformer' and self.enable_fusion:
+        if self.segmentation_source == 'segformer' and self.enable_road_lane_extraction:
             self.road_extractor = RoadExtractor(road_grayscale_id=0)
-            self.get_logger().info('RoadExtractor initialized for lane-marking fusion (segformer mode)')
+            self.get_logger().info('RoadExtractor initialized for road lane extraction (segformer mode)')
 
-        # Semantic class IDs used by fusion
+        # Semantic class IDs used by road lane extraction
         self._road_id = SEMANTIC_BY_NAME.get('road', 1)
         self._road_line_id = SEMANTIC_BY_NAME.get('road_line', 24)
 
@@ -127,7 +127,7 @@ class SemanticSegmentationNode(Node):
             depth=1,
         )
 
-        # ==================== Cached RGB for fusion ====================
+        # ==================== Cached RGB for road lane extraction ====================
         self._latest_rgb: Optional[np.ndarray] = None
 
         # ==================== CV Bridge ====================
@@ -156,17 +156,17 @@ class SemanticSegmentationNode(Node):
         if self.publish_colored:
             self.colored_pub = self.create_publisher(Image, f'{output_topic}/colored', 10)
 
-        # Fused semantic map (with lane markings injected)
-        if self.enable_fusion:
-            self.fused_pub = self.create_publisher(Image, fused_topic, 10)
+        # Road lane extraction semantic map (with lane markings injected)
+        if self.enable_road_lane_extraction:
+            self.road_lane_extraction_pub = self.create_publisher(Image, road_lane_extraction_topic, 10)
             if self.publish_colored:
-                self.fused_colored_pub = self.create_publisher(
-                    Image, f'{fused_topic}/colored', 10)
+                self.road_lane_extraction_colored_pub = self.create_publisher(
+                    Image, f'{road_lane_extraction_topic}/colored', 10)
             # Debug publishers
             self.road_mask_pub = self.create_publisher(Image, '/perception/road_mask', 10)
             self.lane_mask_pub = self.create_publisher(Image, '/perception/lane_markings', 10)
 
-        # ==================== Stats ====================
+        # ==================== State ====================
         self._frame_count = 0
         self._total_time = 0.0
         self._last_lane_mask: Optional[np.ndarray] = None
@@ -174,7 +174,7 @@ class SemanticSegmentationNode(Node):
         self.get_logger().info(
             f'Semantic Segmentation Node initialized! '
             f'Publishing to: {output_topic}'
-            + (f' | fused to: {fused_topic}' if self.enable_fusion else '')
+            + (f' | road_lane_extraction to: {road_lane_extraction_topic}' if self.enable_road_lane_extraction else '')
         )
     
     # ------------------------------------------------------------------ #
@@ -220,52 +220,66 @@ class SemanticSegmentationNode(Node):
     # ------------------------------------------------------------------ #
 
     def _process_and_publish(self, segmentation: np.ndarray, header, publish_raw: bool = True):
-        """Publish raw semantic map and, if fusion is enabled, the fused map."""
+        """Publish raw semantic map and, if road lane extraction is enabled, the extracted map."""
         if publish_raw:
-            self._publish_semantic_map(segmentation, header,
-                                      self.semantic_pub, self.colored_pub)
+            self._publish_image(segmentation, header, 'mono8', self.semantic_pub)
 
-        if not self.enable_fusion:
+        if not self.enable_road_lane_extraction:
+            # Publish colored at the end under a single branch
+            if self.publish_colored and publish_raw:
+                self._publish_image(colorize_mask(segmentation), header, 'rgb8',
+                                    self.colored_pub)
             return
 
-        fused_map = self._try_fuse(segmentation)
-        self._publish_semantic_map(fused_map, header,
-                                   self.fused_pub, self.fused_colored_pub)
+        extracted_map, extraction_ok = self._extract_road(segmentation)
 
-        if fused_map is not segmentation:
-            road_mask = np.where(
-                (fused_map == self._road_id) | (fused_map == self._road_line_id),
-                255, 0,
-            ).astype(np.uint8)
+        # Publish road lane extraction mono8
+        self._publish_image(extracted_map, header, 'mono8', self.road_lane_extraction_pub)
+
+        # Debug publishers
+        if extraction_ok:
+            road_mask = ((extracted_map == self._road_id) | (extracted_map == self._road_line_id)).astype(np.uint8) * 255
             self._publish_image(road_mask, header, 'mono8', self.road_mask_pub)
-            self._publish_image(self._last_lane_mask, header, 'mono8',
-                                self.lane_mask_pub)
+            if self._last_lane_mask is not None:
+                self._publish_image(self._last_lane_mask, header, 'mono8',
+                                    self.lane_mask_pub)
 
-    def _try_fuse(self, segmentation: np.ndarray) -> np.ndarray:
-        """Fuse lane markings into segmentation via RoadExtractor, or return unchanged."""
+        # Publish all colored visualizations under a single branch
+        if self.publish_colored:
+            if publish_raw:
+                self._publish_image(colorize_mask(segmentation), header, 'rgb8',
+                                    self.colored_pub)
+            self._publish_image(colorize_mask(extracted_map), header, 'rgb8',
+                                self.road_lane_extraction_colored_pub)
+
+    def _extract_road(self, segmentation: np.ndarray):
+        """Extract road lane markings into segmentation via RoadExtractor.
+        
+        Returns:
+            (extracted_map, True) on success, (segmentation, False) on skip/failure.
+        """
         rgb = self._latest_rgb
 
         if rgb is None:
-            return segmentation
+            return segmentation, False
 
         if rgb.shape[:2] != segmentation.shape[:2]:
             self.get_logger().warn(
                 f'Size mismatch: RGB {rgb.shape[:2]} vs Semantic '
-                f'{segmentation.shape[:2]}. Publishing unfused map.')
-            return segmentation
+                f'{segmentation.shape[:2]}. Publishing unextracted map.')
+            return segmentation, False
 
         try:
-            fused_map = segmentation.copy()
-            fused_map, lane_mask = self.road_extractor.fuse_lane_markings(
-                fused_map, rgb,
+            extracted_map, lane_mask = self.road_extractor.extract_road_lane_markings(
+                segmentation, rgb,
                 road_class_id=self._road_id,
                 road_line_class_id=self._road_line_id,
             )
             self._last_lane_mask = lane_mask
-            return fused_map
+            return extracted_map, True
         except Exception as e:
-            self.get_logger().error(f'Lane fusion failed: {e}')
-            return segmentation
+            self.get_logger().error(f'Road lane extraction failed: {e}')
+            return segmentation, False
 
     # ------------------------------------------------------------------ #
     #  Publishing helpers                                                 #
@@ -289,12 +303,13 @@ class SemanticSegmentationNode(Node):
     def _ros_image_to_numpy_rgb(self, msg: Image) -> np.ndarray:
         """Convert ROS2 Image (rgb8) to numpy array (H, W, 3)."""
         return self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
-    
+
     def _update_stats(self, start_time: float, source: str):
+        """Log average FPS every 30 frames."""
         elapsed = (time.perf_counter() - start_time) * 1000
         self._frame_count += 1
         self._total_time += elapsed
-        
+
         if self._frame_count % 30 == 0:
             avg_time = self._total_time / self._frame_count
             fps = 1000.0 / avg_time if avg_time > 0 else 0

@@ -5,7 +5,7 @@ Perception Launch File
 Launches the full perception stack:
   1. YOLO-based object detection (perception_node)
   2. Semantic Segmentation (SegFormer or CARLA Ground Truth)
-  3. Road Extraction + Semantic Fusion (lane marking injection)
+  3. Road Extraction + Road Lane Extraction (lane marking injection)
   4. Semantic PointCloud projection
 
 Usage:
@@ -38,7 +38,7 @@ def generate_launch_description():
             description="'segformer' (camera-based) or 'ground_truth' (CARLA sim)"
         ),
         DeclareLaunchArgument(
-            'model_name', default_value='b5',
+            'model_name', default_value='b2',
             description='SegFormer model variant: b0-b5'
         ),
         DeclareLaunchArgument(
@@ -58,14 +58,14 @@ def generate_launch_description():
             ]
         ),
 
-        # ==================== Node 2: Semantic Segmentation + Lane Fusion ====================
+        # ==================== Node 2: Semantic Segmentation + Road Lane Extraction =============
         # Publishes: /perception/semantic_map (mono8, class IDs)
         #            /perception/semantic_map/colored (rgb8)
-        #            /perception/semantic_map/fused (mono8, with lane markings)
-        #            /perception/semantic_map/fused/colored (rgb8)
+        #            /perception/semantic_map/road_lane_extraction (mono8, with lane markings)
+        #            /perception/semantic_map/road_lane_extraction/colored (rgb8)
         #            /perception/road_mask, /perception/lane_markings (debug)
         # Note: SegFormer does NOT natively produce road_line (class 24);
-        #       the integrated fusion step detects and injects them.
+        #       the integrated road lane extraction step detects and injects them.
         Node(
             package='perception',
             executable='semantic_segmentation_node',
