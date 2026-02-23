@@ -72,7 +72,8 @@ class SemanticSegmentationNode(Node):
 
         # ==================== Parameters ====================
         self.declare_parameter('segmentation_source', 'ground_truth')
-ceh        self.declare_parameter('device', 'cuda')
+        self.declare_parameter('model_name', 'b0')
+        self.declare_parameter('device', 'cuda')
         self.declare_parameter('publish_colored', True)
         self.declare_parameter('rgb_topic', '/carla/ego_vehicle/sensor/camera/rgb/front/image')
         self.declare_parameter('ground_truth_topic', '/carla/ego_vehicle/ground_truth/camera/semantic/front/image')
@@ -219,38 +220,37 @@ ceh        self.declare_parameter('device', 'cuda')
     # ------------------------------------------------------------------ #
 
     def _process_and_publish(self, segmentation: np.ndarray, header, publish_raw: bool = True):
-        """Publish raw semantic map and, if fusion is enabled, the fused map.
-        
-        Optimized: only colorize / publish when there are active subscribers.
-        """
+        """Publish raw semantic map and, if fusion is enabled, the fused map."""
         if publish_raw:
-            # Always publish mono8 (cheap)
             self._publish_image(segmentation, header, 'mono8', self.semantic_pub)
-            # Only colorize if someone is listening (expensive: LUT on full frame)
-            if self.publish_colored and self.colored_pub.get_subscription_count() > 0:
-                self._publish_image(colorize_mask(segmentation), header, 'rgb8',
-                                    self.colored_pub)
 
         if not self.enable_fusion:
+            # Publish colored at the end under a single branch
+            if self.publish_colored and publish_raw:
+                self._publish_image(colorize_mask(segmentation), header, 'rgb8',
+                                    self.colored_pub)
             return
 
         fused_map, fused_ok = self._try_fuse(segmentation)
 
-        # Publish fused mono8 (cheap)
+        # Publish fused mono8
         self._publish_image(fused_map, header, 'mono8', self.fused_pub)
-        # Only colorize fused if someone is listening
-        if self.publish_colored and self.fused_colored_pub.get_subscription_count() > 0:
-            self._publish_image(colorize_mask(fused_map), header, 'rgb8',
-                                self.fused_colored_pub)
 
-        # Debug publishers: only compute + publish if someone is subscribed
+        # Debug publishers
         if fused_ok:
-            if self.road_mask_pub.get_subscription_count() > 0:
-                road_mask = ((fused_map == self._road_id) | (fused_map == self._road_line_id)).astype(np.uint8) * 255
-                self._publish_image(road_mask, header, 'mono8', self.road_mask_pub)
-            if self.lane_mask_pub.get_subscription_count() > 0 and self._last_lane_mask is not None:
+            road_mask = ((fused_map == self._road_id) | (fused_map == self._road_line_id)).astype(np.uint8) * 255
+            self._publish_image(road_mask, header, 'mono8', self.road_mask_pub)
+            if self._last_lane_mask is not None:
                 self._publish_image(self._last_lane_mask, header, 'mono8',
                                     self.lane_mask_pub)
+
+        # Publish all colored visualizations under a single branch
+        if self.publish_colored:
+            if publish_raw:
+                self._publish_image(colorize_mask(segmentation), header, 'rgb8',
+                                    self.colored_pub)
+            self._publish_image(colorize_mask(fused_map), header, 'rgb8',
+                                self.fused_colored_pub)
 
     def _try_fuse(self, segmentation: np.ndarray):
         """Fuse lane markings into segmentation via RoadExtractor.

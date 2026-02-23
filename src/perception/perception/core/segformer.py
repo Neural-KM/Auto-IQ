@@ -140,14 +140,6 @@ class SegFormer:
         except Exception as e:
             print(f'torch.compile failed: {e}')
         
-        # Warmup inference (extra runs for torch.compile to finish tracing)
-        self._warmup()
-    
-    def _warmup(self):
-        """Run warmup inferences to initialize CUDA kernels and torch.compile tracing."""
-        dummy = np.zeros((720, 1280, 3), dtype=np.uint8)  # Use realistic size
-        for i in range(3):  # Multiple runs for torch.compile to stabilize
-            _ = self.predict(dummy)
         print('SegFormer ready')
     
     def _fast_preprocess(self, image: np.ndarray) -> torch.Tensor:
