@@ -72,8 +72,7 @@ class SemanticSegmentationNode(Node):
 
         # ==================== Parameters ====================
         self.declare_parameter('segmentation_source', 'ground_truth')
-        self.declare_parameter('model_name', 'b0')
-        self.declare_parameter('device', 'cuda')
+ceh        self.declare_parameter('device', 'cuda')
         self.declare_parameter('publish_colored', True)
         self.declare_parameter('rgb_topic', '/carla/ego_vehicle/sensor/camera/rgb/front/image')
         self.declare_parameter('ground_truth_topic', '/carla/ego_vehicle/ground_truth/camera/semantic/front/image')
@@ -247,7 +246,7 @@ class SemanticSegmentationNode(Node):
         # Debug publishers: only compute + publish if someone is subscribed
         if fused_ok:
             if self.road_mask_pub.get_subscription_count() > 0:
-                road_mask = ((fused_map == self._road_id) | (fused_map == self._road_line_id)).view(np.uint8) * 255
+                road_mask = ((fused_map == self._road_id) | (fused_map == self._road_line_id)).astype(np.uint8) * 255
                 self._publish_image(road_mask, header, 'mono8', self.road_mask_pub)
             if self.lane_mask_pub.get_subscription_count() > 0 and self._last_lane_mask is not None:
                 self._publish_image(self._last_lane_mask, header, 'mono8',
