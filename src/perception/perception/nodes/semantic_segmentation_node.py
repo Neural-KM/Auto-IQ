@@ -19,7 +19,7 @@ Flow:
 
 Parameters:
 - segmentation_source: 'segformer' or 'ground_truth' (default: 'ground_truth')
-- model_name: SegFormer model variant (b0-b5) when using segformer
+- model_name: SegFormer model variant (b0-b5), set in perception.launch.py
 - device: 'cuda' or 'cpu' for SegFormer inference
 - rgb_topic: Input RGB camera topic
 - ground_truth_topic: Input ground truth semantic topic (for ground_truth mode)
@@ -39,18 +39,8 @@ Publishes:
 - /perception/semantic_map/fused/colored (rgb8) — colored fused visualization
 - /perception/road_mask               (mono8) — binary road mask  [debug]
 - /perception/lane_markings           (mono8) — lane markings mask [debug]
+
 """
-
-import numpy as np
-import cv2
-import time
-from typing import Optional
-
-import rclpy
-from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-
-from sensor_msgs.msg import Image
 
 from perception.core.road_extraction import RoadExtractor
 from perception.data_classes.semantic_labels import (
@@ -72,7 +62,7 @@ class SemanticSegmentationNode(Node):
 
         # ==================== Parameters ====================
         self.declare_parameter('segmentation_source', 'ground_truth')
-        self.declare_parameter('model_name', 'b2')
+        self.declare_parameter('model_name', 'b0')
         self.declare_parameter('device', 'cuda')
         self.declare_parameter('publish_colored', True)
         self.declare_parameter('rgb_topic', '/carla/ego_vehicle/sensor/camera/rgb/front/image')
@@ -220,52 +210,67 @@ class SemanticSegmentationNode(Node):
     # ------------------------------------------------------------------ #
 
     def _process_and_publish(self, segmentation: np.ndarray, header, publish_raw: bool = True):
-        """Publish raw semantic map and, if fusion is enabled, the fused map."""
+        """Publish raw semantic map and, if fusion is enabled, the fused map.
+        
+        Optimized: only colorize / publish when there are active subscribers.
+        """
         if publish_raw:
-            self._publish_semantic_map(segmentation, header,
-                                      self.semantic_pub, self.colored_pub)
+            # Always publish mono8 (cheap)
+            self._publish_image(segmentation, header, 'mono8', self.semantic_pub)
+            # Only colorize if someone is listening (expensive: LUT on full frame)
+            if self.publish_colored and self.colored_pub.get_subscription_count() > 0:
+                self._publish_image(colorize_mask(segmentation), header, 'rgb8',
+                                    self.colored_pub)
 
         if not self.enable_fusion:
             return
 
-        fused_map = self._try_fuse(segmentation)
-        self._publish_semantic_map(fused_map, header,
-                                   self.fused_pub, self.fused_colored_pub)
+        fused_map, fused_ok = self._try_fuse(segmentation)
 
-        if fused_map is not segmentation:
-            road_mask = np.where(
-                (fused_map == self._road_id) | (fused_map == self._road_line_id),
-                255, 0,
-            ).astype(np.uint8)
-            self._publish_image(road_mask, header, 'mono8', self.road_mask_pub)
-            self._publish_image(self._last_lane_mask, header, 'mono8',
-                                self.lane_mask_pub)
+        # Publish fused mono8 (cheap)
+        self._publish_image(fused_map, header, 'mono8', self.fused_pub)
+        # Only colorize fused if someone is listening
+        if self.publish_colored and self.fused_colored_pub.get_subscription_count() > 0:
+            self._publish_image(colorize_mask(fused_map), header, 'rgb8',
+                                self.fused_colored_pub)
 
-    def _try_fuse(self, segmentation: np.ndarray) -> np.ndarray:
-        """Fuse lane markings into segmentation via RoadExtractor, or return unchanged."""
+        # Debug publishers: only compute + publish if someone is subscribed
+        if fused_ok:
+            if self.road_mask_pub.get_subscription_count() > 0:
+                road_mask = ((fused_map == self._road_id) | (fused_map == self._road_line_id)).view(np.uint8) * 255
+                self._publish_image(road_mask, header, 'mono8', self.road_mask_pub)
+            if self.lane_mask_pub.get_subscription_count() > 0 and self._last_lane_mask is not None:
+                self._publish_image(self._last_lane_mask, header, 'mono8',
+                                    self.lane_mask_pub)
+
+    def _try_fuse(self, segmentation: np.ndarray):
+        """Fuse lane markings into segmentation via RoadExtractor.
+        
+        Returns:
+            (fused_map, True) on success, (segmentation, False) on skip/failure.
+        """
         rgb = self._latest_rgb
 
         if rgb is None:
-            return segmentation
+            return segmentation, False
 
         if rgb.shape[:2] != segmentation.shape[:2]:
             self.get_logger().warn(
                 f'Size mismatch: RGB {rgb.shape[:2]} vs Semantic '
                 f'{segmentation.shape[:2]}. Publishing unfused map.')
-            return segmentation
+            return segmentation, False
 
         try:
-            fused_map = segmentation.copy()
             fused_map, lane_mask = self.road_extractor.fuse_lane_markings(
-                fused_map, rgb,
+                segmentation, rgb,
                 road_class_id=self._road_id,
                 road_line_class_id=self._road_line_id,
             )
             self._last_lane_mask = lane_mask
-            return fused_map
+            return fused_map, True
         except Exception as e:
             self.get_logger().error(f'Lane fusion failed: {e}')
-            return segmentation
+            return segmentation, False
 
     # ------------------------------------------------------------------ #
     #  Publishing helpers                                                 #

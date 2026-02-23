@@ -38,7 +38,7 @@ def generate_launch_description():
             description="'segformer' (camera-based) or 'ground_truth' (CARLA sim)"
         ),
         DeclareLaunchArgument(
-            'model_name', default_value='b5',
+            'model_name', default_value='b2',
             description='SegFormer model variant: b0-b5'
         ),
         DeclareLaunchArgument(
