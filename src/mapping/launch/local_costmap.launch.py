@@ -15,8 +15,8 @@ def generate_launch_description():
     return LaunchDescription([
         # ==================== Arguments ====================
         DeclareLaunchArgument(
-            'semantic_source', default_value='fused',
-            description="'fused' (SegFormer + lane detection) or 'ground_truth' (CARLA sim)"
+            'semantic_source', default_value='road_lane_extraction',
+            description="'road_lane_extraction' (SegFormer + lane detection) or 'ground_truth' (CARLA sim)"
         ),
         DeclareLaunchArgument(
             'grid_size', default_value='80.0',
