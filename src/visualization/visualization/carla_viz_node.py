@@ -49,7 +49,7 @@ from perception.data_classes.semantic_labels import colorize_mask
 from cv_bridge import CvBridge
 import carla
 from ament_index_python.packages import get_package_share_directory
-
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from visualization.carla_drawer import CarlaDrawer
 
 
@@ -142,6 +142,13 @@ class CarlaVizNode(Node):
             Image, semantic_output_topic, 10)
         
         # ==================== Subscribers ====================
+        self.sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+
         self.odom_sub = self.create_subscription(
             Odometry, '/carla/ego_vehicle/ground_truth/odometry',
             self.odom_callback, 10)
@@ -168,7 +175,7 @@ class CarlaVizNode(Node):
         
         self.semantic_sub = self.create_subscription(
             Image, semantic_topic,
-            self.semantic_callback, 10)
+            self.semantic_callback, self.sensor_qos)
         self.get_logger().info(f'Subscribed to semantic image: {semantic_topic}')
         
         self.current_waypoint_sub = self.create_subscription(
