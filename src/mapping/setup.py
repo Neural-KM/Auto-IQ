@@ -28,7 +28,6 @@ setup(
     entry_points={
         'console_scripts': [
             'local_costmap_node = mapping.nodes.local_costmap_node:main',
-            'inverse_perspective_mapper_node = mapping.nodes.inverse_perspective_mapper:main',
             'inverse_perspective_mapper_node_v2 = mapping.nodes.inverse_perspective_mapper_v2:main',
         ],
     },
