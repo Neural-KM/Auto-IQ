@@ -20,7 +20,6 @@ import carla
 # Import your planners
 from planning.core.global_planner import GlobalPlanner
 from planning.core.planner_unified import SamplingBasedPlanner, PlannerConfig
-from planning.core.skeleton_extractor import SkeletonExtractor
 
 class PlanningNode(Node):
     def __init__(self):
@@ -45,7 +44,6 @@ class PlanningNode(Node):
         self.global_planner = GlobalPlanner(self.carla_map, sampling_resolution=2.0)
         
         self.motion_planner = SamplingBasedPlanner()
-        self.skeleton_extractor = SkeletonExtractor()
         
         # --- State Variables ---
         self.vehicle_state = VehicleState()
@@ -102,15 +100,6 @@ class PlanningNode(Node):
         cspace_msg.info = msg.info
         cspace_msg.data = grid.flatten().tolist()
         self.cspace_pub.publish(cspace_msg)
-        
-        # Compute and publish skeleton of the raw drivable area
-        raw_grid = np.array(msg.data, dtype=np.int8).reshape((msg.info.height, msg.info.width))
-        skeleton = self.skeleton_extractor.extract(raw_grid)
-        skel_msg = OccupancyGrid()
-        skel_msg.header = msg.header
-        skel_msg.info = msg.info
-        skel_msg.data = SkeletonExtractor.skeleton_to_occupancy_data(skeleton).tolist()
-        self.skeleton_pub.publish(skel_msg)
 
     def goal_cb(self, msg):
         # Convert ROS Goal -> CARLA Location
