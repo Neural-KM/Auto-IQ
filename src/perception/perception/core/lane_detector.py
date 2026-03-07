@@ -9,12 +9,11 @@ Outputs polynomial fits and lane geometry for path planning.
 
 import numpy as np
 import cv2
-from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME, SEMANTIC_COLOR_LUT
+from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME
 from perception.data_classes.lane import LaneDetection
 from perception.utils.ipm_transform import convert_to_ipm
 
-# Semantic class IDs
-ROAD = SEMANTIC_BY_NAME['road']
+# Semantic class ID
 ROAD_LINE = SEMANTIC_BY_NAME['road_line']
 
 
@@ -76,14 +75,9 @@ class LaneDetector:
         self.prev_left_fit = None
         self.prev_right_fit = None
         
-        # Vehicle is at image center
-        self.vehicle_x = self.width // 2
-        
-        # Debug images for visualization
+        # Debug images for visualization (only lane_fit is consumed by nodes)
         self.debug_images = {
             'bev_lane_mask': None,
-            'bev_road_mask': None,
-            'bev_combined': None,
             'lane_fit': None
         }
     
@@ -119,23 +113,12 @@ class LaneDetector:
         
         h, w = semantic_image.shape[:2]
         
-        # Extract binary masks
+        # Extract lane marking mask
         lane_mask = (semantic_image == ROAD_LINE).astype(np.uint8) * 255
-        road_mask = (semantic_image == ROAD).astype(np.uint8) * 255
         
         # Transform to bird's eye view
         bev_lane = self.to_birds_eye_view(lane_mask)
-        bev_road = self.to_birds_eye_view(road_mask)
-        
-        # Store debug images
         self.debug_images['bev_lane_mask'] = bev_lane
-        self.debug_images['bev_road_mask'] = bev_road
-        
-        # Combined BEV visualization
-        bev_combined = np.zeros((self.bev_height, self.bev_width, 3), dtype=np.uint8)
-        bev_combined[bev_road > 127] = [80, 40, 80]  # Purple for road
-        bev_combined[bev_lane > 127] = [0, 255, 255]  # Yellow for lane markings
-        self.debug_images['bev_combined'] = bev_combined
         
         # Fit lane polynomials using sliding window
         left_fit, right_fit, lane_fit_img = self._fit_lanes_sliding_window(bev_lane)
@@ -396,191 +379,7 @@ class LaneDetector:
         Returns:
             dict with:
                 - 'bev_lane_mask': Binary lane markings in bird's eye view
-                - 'bev_road_mask': Binary road in bird's eye view  
-                - 'bev_combined': Combined colored BEV
                 - 'lane_fit': BEV with sliding windows and fitted polynomials
         """
         return self.debug_images
     
-    def get_source_points(self):
-        """Get the perspective transform source points for visualization."""
-        # Calculate source points on the fly for visualization since we now use convert_to_ipm
-        fov_rad = np.radians(self.fov)
-        fx = self.width / (2.0 * np.tan(fov_rad / 2.0))
-        fy = fx
-        cx = self.width / 2.0
-        cy = self.height / 2.0
-        pitch_rad = np.radians(self.pitch)
-        
-        x_min, x_max = self.bev_x_range
-        y_min, y_max = self.bev_y_range
-        
-        ground_points_3d = np.array([
-            [x_max, y_max, 0],
-            [x_max, y_min, 0],
-            [x_min, y_min, 0],
-            [x_min, y_max, 0],
-        ], dtype=np.float64)
-        
-        R_pitch = np.array([
-            [1, 0, 0],
-            [0, np.cos(pitch_rad), -np.sin(pitch_rad)],
-            [0, np.sin(pitch_rad), np.cos(pitch_rad)]
-        ], dtype=np.float64)
-        
-        src_pts = []
-        for gp in ground_points_3d:
-            p_vehicle = np.array([gp[0], gp[1], gp[2] - self.camera_height])
-            p_cam_unrotated = np.array([-p_vehicle[1], -p_vehicle[2], p_vehicle[0]])
-            p_cam = R_pitch @ p_cam_unrotated
-            
-            if p_cam[2] > 0:
-                u = fx * p_cam[0] / p_cam[2] + cx
-                v = fy * p_cam[1] / p_cam[2] + cy
-                src_pts.append([u, v])
-            else:
-                src_pts.append([cx, 0])
-                
-        return np.float32(src_pts)
-
-
-class LaneDetectorDebugWindow:
-    """
-    Separate OpenCV window for visualizing lane detection intermediate images.
-    
-    Shows a 2x2 grid of:
-    - Original semantic (with ROI trapezoid)
-    - BEV combined (road + lane markings)
-    - BEV lane mask
-    - Lane fit visualization (sliding windows + polynomials)
-    """
-    
-    def __init__(self, window_name):
-        """
-        Initialize debug window.
-        
-        Args:
-            window_name: Name of the OpenCV window
-        """
-        self.window_name = window_name
-        self.window_created = False
-        self.panel_size = 400  # Each panel is 400x400
-    
-    def show(self, lane_detector, semantic_image=None, detection_result=None):
-        """
-        Update and show the debug window.
-        
-        Args:
-            lane_detector: LaneDetector instance (to get debug images)
-            semantic_image: Original semantic segmentation image (optional)
-            detection_result: Result from lane_detector.detect() (optional)
-        """
-        debug = lane_detector.get_debug_images()
-        
-        # Create 2x2 grid
-        grid = np.zeros((self.panel_size * 2, self.panel_size * 2, 3), dtype=np.uint8)
-        
-        # Panel 1 (top-left): Original semantic with ROI overlay
-        if semantic_image is not None:
-            panel1 = self._create_semantic_panel(semantic_image, lane_detector)
-        else:
-            panel1 = self._create_placeholder("Semantic Image")
-        grid[0:self.panel_size, 0:self.panel_size] = panel1
-        
-        # Panel 2 (top-right): BEV combined
-        if debug['bev_combined'] is not None:
-            panel2 = debug['bev_combined'].copy()
-            self._add_label(panel2, "Bird's Eye View")
-        else:
-            panel2 = self._create_placeholder("BEV Combined")
-        grid[0:self.panel_size, self.panel_size:self.panel_size*2] = panel2
-        
-        # Panel 3 (bottom-left): BEV lane mask
-        if debug['bev_lane_mask'] is not None:
-            panel3 = cv2.cvtColor(debug['bev_lane_mask'], cv2.COLOR_GRAY2BGR)
-            self._add_label(panel3, "Lane Mask (BEV)")
-        else:
-            panel3 = self._create_placeholder("Lane Mask")
-        grid[self.panel_size:self.panel_size*2, 0:self.panel_size] = panel3
-        
-        # Panel 4 (bottom-right): Lane fit visualization
-        if debug['lane_fit'] is not None:
-            panel4 = debug['lane_fit'].copy()
-            self._add_label(panel4, "Lane Fitting")
-            # Add detection info
-            if detection_result is not None:
-                self._add_detection_info(panel4, detection_result)
-        else:
-            panel4 = self._create_placeholder("Lane Fit")
-        grid[self.panel_size:self.panel_size*2, self.panel_size:self.panel_size*2] = panel4
-        
-        # Create window if not exists
-        if not self.window_created:
-            cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(self.window_name, self.panel_size * 2, self.panel_size * 2)
-            self.window_created = True
-        
-        # Show the grid
-        cv2.imshow(self.window_name, grid)
-    
-    def _create_semantic_panel(self, semantic_image, lane_detector):
-        """Create colored semantic image with ROI trapezoid overlay."""
-        h, w = semantic_image.shape[:2]
-        
-        # Color the semantic labels using LUT
-        panel = SEMANTIC_COLOR_LUT[semantic_image]
-        
-        # Draw ROI trapezoid
-        src_pts = lane_detector.get_source_points().astype(np.int32)
-        cv2.polylines(panel, [src_pts], True, (0, 255, 0), 2)
-        
-        # Resize to panel size
-        panel = cv2.resize(panel, (self.panel_size, self.panel_size))
-        self._add_label(panel, "Semantic + ROI")
-        
-        return panel
-    
-    def _create_placeholder(self, text):
-        """Create a placeholder panel with text."""
-        panel = np.zeros((self.panel_size, self.panel_size, 3), dtype=np.uint8)
-        panel[:] = (30, 30, 30)
-        cv2.putText(panel, text, (50, self.panel_size // 2),
-                   cv2.FONT_HERSHEY_SIMPLEX, 1, (100, 100, 100), 2)
-        return panel
-    
-    def _add_label(self, panel, text):
-        """Add label text to top of panel."""
-        cv2.rectangle(panel, (0, 0), (len(text) * 12 + 10, 25), (0, 0, 0), -1)
-        cv2.putText(panel, text, (5, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-    
-    def _add_detection_info(self, panel, result):
-        """Add detection metrics to panel."""
-        y = 50
-        info_lines = [
-            f"Confidence: {result.confidence:.2f}",
-            f"Valid: {result.valid}"
-        ]
-        
-        for line in info_lines:
-            cv2.putText(panel, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 
-                       0.4, (255, 255, 255), 1)
-            y += 18
-    
-    def close(self):
-        """Close the debug window."""
-        if self.window_created:
-            cv2.destroyWindow(self.window_name)
-            self.window_created = False
-    
-    @staticmethod
-    def wait_key(delay=1):
-        """
-        Wait for key press. Call this in your main loop.
-        
-        Args:
-            delay: Wait time in ms (1 = minimal wait, 0 = wait indefinitely)
-            
-        Returns:
-            Key code pressed, or -1 if no key
-        """
-        return cv2.waitKey(delay)
