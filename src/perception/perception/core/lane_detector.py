@@ -5,19 +5,6 @@ Lane Detector
 Detects lane boundaries from CARLA semantic segmentation images.
 Uses bird's eye view transform for better lane line fitting.
 Outputs polynomial fits and lane geometry for path planning.
-
-CLI Usage:
-    # Single semantic image with default camera params
-    python -m perception.core.lane_detector --image semantic.png --output ./output/
-
-    # With custom camera params
-    python -m perception.core.lane_detector --image semantic.png --fov 90 --pitch -5 --camera-height 2.0
-
-    # With config YAML (auto-loads camera params)
-    python -m perception.core.lane_detector --image semantic.png --config config/carla_sensors.yaml
-
-    # Batch process a folder of semantic images
-    python -m perception.core.lane_detector --folder /data/semantic_maps/ --output ./lane_results/
 """
 
 import argparse
