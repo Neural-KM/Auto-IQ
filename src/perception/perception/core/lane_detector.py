@@ -81,23 +81,6 @@ class LaneDetector:
             'lane_fit': None
         }
     
-    def to_birds_eye_view(self, image):
-        """Transform image to bird's eye view using global IPM utility."""
-        if image is None:
-            return None
-        
-        bev_img, bev_size, M = convert_to_ipm(
-            image=image,
-            fov=self.fov,
-            pitch=self.pitch,
-            camera_height=self.camera_height,
-            bev_x_range=self.bev_x_range,
-            bev_y_range=self.bev_y_range,
-            pixels_per_meter=self.pixels_per_meter
-        )
-        
-        return bev_img
-    
     def detect(self, semantic_image):
         """
         Detect lanes from semantic segmentation image.
@@ -111,13 +94,21 @@ class LaneDetector:
         if semantic_image is None:
             return self._invalid_result()
         
-        h, w = semantic_image.shape[:2]
+        _, w = semantic_image.shape[:2]
         
         # Extract lane marking mask
         lane_mask = (semantic_image == ROAD_LINE).astype(np.uint8) * 255
         
         # Transform to bird's eye view
-        bev_lane = self.to_birds_eye_view(lane_mask)
+        bev_lane, _, _ = convert_to_ipm(
+            image=lane_mask,
+            fov=self.fov,
+            pitch=self.pitch,
+            camera_height=self.camera_height,
+            bev_x_range=self.bev_x_range,
+            bev_y_range=self.bev_y_range,
+            pixels_per_meter=self.pixels_per_meter
+        )
         self.debug_images['bev_lane_mask'] = bev_lane
         
         # Fit lane polynomials using sliding window
