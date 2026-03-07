@@ -3,9 +3,9 @@ Perception Launch File
 =======================
 
 Launches the full perception stack:
-  1. YOLO-based object detection (perception_node)
+  1. YOLO-based object detection + ground truth obstacles (perception_node)
   2. Semantic Segmentation (SegFormer or CARLA Ground Truth)
-  3. Road Extraction + Road Lane Extraction (lane marking injection)
+  3. Lane Detection (polynomial fits on semantic segmentation)
   4. Semantic PointCloud projection
 
 Usage:

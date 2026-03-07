@@ -17,9 +17,6 @@
     conf_threshold: 0.5
     obstacle_radius: 50.0
     
-    # Lane Detection
-    enable_lane_detection: false
-    
     # Debug
     enable_debug_viz: false
     
