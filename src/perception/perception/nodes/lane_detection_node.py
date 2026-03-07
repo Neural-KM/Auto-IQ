@@ -18,14 +18,17 @@ Publishes:
 
 Subscribes:
 - /perception/semantic_map/road_lane_extraction  (mono8) — semantic map with lane markings
-  (falls back to /perception/semantic_map if road_lane_extraction is not available)
 - /carla/ego_vehicle/sensor/camera/rgb/front/camera_info  — camera intrinsics
 
 Parameters:
 - semantic_topic: Input semantic map topic
 - camera_info_topic: Camera info for intrinsics
+- camera_height: Camera height above ground in meters (default from CONFIG)
+- camera_pitch: Camera pitch angle in degrees (default from CONFIG)
 - enable_debug_viz: Publish debug BEV images
 """
+
+import time
 
 import numpy as np
 
@@ -42,18 +45,17 @@ from builtin_interfaces.msg import Time
 from autoiq_msgs.msg import LaneDetection as LaneDetectionMsg
 
 from cv_bridge import CvBridge
-import tf2_ros
-from tf2_ros import TransformException
 
-from perception.core.lane_detector import LaneDetector
+from perception.core.lane_detector import LaneDetector, CONFIG
 
 
 class LaneDetectionNode(Node):
     """
     ROS2 node for lane detection via polynomial fitting on semantic segmentation.
 
-    Initialization is gated on receiving CameraInfo and camera TF so
-    that the LaneDetector BEV transform is configured properly.
+    Initialization is gated on receiving CameraInfo so that the
+    LaneDetector BEV transform is configured with correct image dimensions
+    and FOV. Camera height and pitch are static parameters from CONFIG.
     """
 
     def __init__(self):
@@ -66,31 +68,28 @@ class LaneDetectionNode(Node):
         self.declare_parameter(
             'camera_info_topic',
             '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info')
-        self.declare_parameter(
-            'camera_frame',
-            'ego_vehicle/sensor/camera/rgb/front')
+        self.declare_parameter('camera_height', CONFIG.camera.height)
+        self.declare_parameter('camera_pitch', CONFIG.camera.pitch)
         self.declare_parameter('enable_debug_viz', False)
 
         semantic_topic = self.get_parameter('semantic_topic').value
         camera_info_topic = self.get_parameter('camera_info_topic').value
-        self.camera_frame = self.get_parameter('camera_frame').value
+        self.camera_height = self.get_parameter('camera_height').value
+        self.camera_pitch = self.get_parameter('camera_pitch').value
         self.enable_debug_viz = self.get_parameter('enable_debug_viz').value
 
         # ==================== Initialization Gate ====================
         self.initialized = False
         self.camera_info_received = False
-        self.camera_tf_received = False
 
-        # Camera parameters (filled on init)
+        # Camera intrinsics (filled from CameraInfo)
         self.img_width = None
         self.img_height = None
         self.fov_deg = None
-        self.camera_height = None
-        self.camera_pitch = None
 
-        # ==================== TF2 ====================
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        # ==================== Performance Stats ====================
+        self._frame_count = 0
+        self._total_time = 0.0
 
         # ==================== CV Bridge ====================
         self.cv_bridge = CvBridge()
@@ -132,7 +131,9 @@ class LaneDetectionNode(Node):
         # ==================== Init Timer ====================
         self.init_timer = self.create_timer(0.5, self._try_initialize)
 
-        self.get_logger().info('Lane Detection Node created — waiting for camera info & TF...')
+        self.get_logger().info(
+            f'Lane Detection Node created — waiting for CameraInfo... '
+            f'(camera_height={self.camera_height}m, camera_pitch={self.camera_pitch}°)')
 
     # ------------------------------------------------------------------ #
     #  Initialization                                                     #
@@ -142,39 +143,12 @@ class LaneDetectionNode(Node):
         if self.initialized:
             return
 
-        if not self.camera_tf_received:
-            self._try_get_camera_tf()
-
-        if self.camera_info_received and self.camera_tf_received:
+        if self.camera_info_received:
             self._complete_initialization()
         else:
-            missing = []
-            if not self.camera_info_received:
-                missing.append('CameraInfo')
-            if not self.camera_tf_received:
-                missing.append('Camera TF')
             self.get_logger().info(
-                f'Waiting for: {", ".join(missing)}',
+                'Waiting for CameraInfo...',
                 throttle_duration_sec=3.0)
-
-    def _try_get_camera_tf(self):
-        try:
-            transform = self.tf_buffer.lookup_transform(
-                'ego_vehicle', self.camera_frame,
-                rclpy.time.Time(),
-                timeout=rclpy.duration.Duration(seconds=0.1))
-
-            self.camera_height = transform.transform.translation.z
-            q = transform.transform.rotation
-            sinp = 2.0 * (q.w * q.y - q.z * q.x)
-            self.camera_pitch = np.degrees(np.arcsin(np.clip(sinp, -1.0, 1.0)))
-
-            self.camera_tf_received = True
-            self.get_logger().info(
-                f'Camera TF: z={self.camera_height:.2f}m, '
-                f'pitch={self.camera_pitch:.1f}°')
-        except TransformException:
-            pass
 
     def _complete_initialization(self):
         self.lane_detector = LaneDetector(
@@ -204,11 +178,13 @@ class LaneDetectionNode(Node):
         self.img_width = msg.width
         self.img_height = msg.height
         fx = msg.k[0]
-        if fx > 0:
-            self.fov_deg = np.degrees(2 * np.arctan(self.img_width / (2 * fx)))
-        else:
-            self.fov_deg = 90.0
+        if fx <= 0:
+            self.get_logger().error(
+                f'Invalid focal length fx={fx} in CameraInfo. '
+                f'Cannot compute FOV — check camera calibration.')
+            return
 
+        self.fov_deg = np.degrees(2 * np.arctan(self.img_width / (2 * fx)))
         self.camera_info_received = True
         self.get_logger().info(
             f'CameraInfo: {self.img_width}x{self.img_height}, '
@@ -218,11 +194,13 @@ class LaneDetectionNode(Node):
         if not self.initialized:
             return
 
+        start_time = time.perf_counter()
+
         try:
             semantic_img = self.cv_bridge.imgmsg_to_cv2(
                 msg, desired_encoding='mono8')
         except Exception as e:
-            self.get_logger().warn(f'cv_bridge failed: {e}')
+            self.get_logger().error(f'cv_bridge conversion failed: {e}')
             return
 
         # Run lane detection (BEV + sliding window + polynomial fit)
@@ -237,6 +215,25 @@ class LaneDetectionNode(Node):
         # Publish debug BEV
         if self.enable_debug_viz:
             self._publish_debug_bev(msg.header)
+
+        self._update_stats(start_time)
+
+    # ------------------------------------------------------------------ #
+    #  Performance Stats                                                  #
+    # ------------------------------------------------------------------ #
+
+    def _update_stats(self, start_time: float):
+        """Log average FPS every 30 frames."""
+        elapsed = (time.perf_counter() - start_time) * 1000
+        self._frame_count += 1
+        self._total_time += elapsed
+
+        if self._frame_count % 30 == 0:
+            avg_time = self._total_time / self._frame_count
+            fps = 1000.0 / avg_time if avg_time > 0 else 0
+            self.get_logger().info(
+                f'[LaneDetection] {elapsed:.1f}ms '
+                f'(avg: {avg_time:.1f}ms, ~{fps:.1f} FPS)')
 
     # ------------------------------------------------------------------ #
     #  Publishers                                                         #
@@ -261,26 +258,25 @@ class LaneDetectionNode(Node):
             det_msg.center_poly_coeffs = center_fit.tolist()
 
         # Image-space lane positions
-        det_msg.lane_center = result.lane_center if result.lane_center is not None else -1
+        det_msg.lane_center = result.lane_center
         det_msg.left_lane_x = result.left_lane if result.left_lane is not None else -1
         det_msg.right_lane_x = result.right_lane if result.right_lane is not None else -1
         det_msg.lane_width_px = result.lane_width if result.lane_width is not None else -1
 
-        # BEV parameters
+        # BEV parameters (always present after detect())
         bev = result.bev_params
-        if bev:
-            det_msg.bev_width = bev.get('width', 0)
-            det_msg.bev_height = bev.get('height', 0)
-            x_range = bev.get('x_range', (0.0, 0.0))
-            y_range = bev.get('y_range', (0.0, 0.0))
-            det_msg.bev_x_min = float(x_range[0])
-            det_msg.bev_x_max = float(x_range[1])
-            det_msg.bev_y_min = float(y_range[0])
-            det_msg.bev_y_max = float(y_range[1])
+        det_msg.bev_width = bev['width']
+        det_msg.bev_height = bev['height']
+        x_range = bev['x_range']
+        y_range = bev['y_range']
+        det_msg.bev_x_min = float(x_range[0])
+        det_msg.bev_x_max = float(x_range[1])
+        det_msg.bev_y_min = float(y_range[0])
+        det_msg.bev_y_max = float(y_range[1])
 
         # Real-world lane width
-        if result.lane_width_bev is not None and bev:
-            meters_per_px = (x_range[1] - x_range[0]) / bev.get('width', 1)
+        if result.lane_width_bev is not None:
+            meters_per_px = (x_range[1] - x_range[0]) / bev['width']
             det_msg.lane_width_m = float(result.lane_width_bev * meters_per_px)
         else:
             det_msg.lane_width_m = -1.0
@@ -364,11 +360,10 @@ class LaneDetectionNode(Node):
     def _publish_debug_bev(self, header):
         """Publish the BEV lane-fit debug image."""
         debug = self.lane_detector.get_debug_images()
-        lane_fit_img = debug.get('lane_fit')
-        if lane_fit_img is not None:
-            out = self.cv_bridge.cv2_to_imgmsg(lane_fit_img, encoding='bgr8')
-            out.header = header
-            self.debug_bev_pub.publish(out)
+        lane_fit_img = debug['lane_fit']
+        out = self.cv_bridge.cv2_to_imgmsg(lane_fit_img, encoding='bgr8')
+        out.header = header
+        self.debug_bev_pub.publish(out)
 
 
 def main(args=None):
