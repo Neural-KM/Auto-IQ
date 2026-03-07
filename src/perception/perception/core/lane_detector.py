@@ -11,6 +11,7 @@ import numpy as np
 import cv2
 from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME, SEMANTIC_COLOR_LUT
 from perception.data_classes.lane import LaneDetection
+from perception.utils.ipm_transform import convert_to_ipm
 
 # Semantic class IDs
 ROAD = SEMANTIC_BY_NAME['road']
@@ -50,18 +51,16 @@ class LaneDetector:
         
         # Bird's eye view output size and real-world coverage
         self.bev_width = 400
-        self.bev_height = 400
         
         # BEV real-world dimensions (meters)
-        # Looking ahead: 5m to 30m from vehicle, 10m lane width total
-        self.bev_x_range = (-5.0, 5.0)    # Left/right from vehicle center (meters)
-        self.bev_y_range = (5.0, 35.0)    # Forward distance range (meters)
+        # Using the same coordinate system as ipm_transform (X=forward, Y=left)
+        self.bev_x_range = (5.0, 35.0)    # Forward distance range (meters)
+        self.bev_y_range = (-5.0, 5.0)    # Lateral range: 5m left to -5m right (total 10m)
+        self.pixels_per_meter = self.bev_width / (self.bev_y_range[1] - self.bev_y_range[0])
         
-        # Compute camera intrinsic matrix
-        self._compute_camera_intrinsics()
-        
-        # Compute perspective transform matrices
-        self._compute_perspective_transform()
+        # convert_to_ipm dynamically calculates height to maintain 1:1 real-world scale
+        x_span = self.bev_x_range[1] - self.bev_x_range[0]
+        self.bev_height = int(x_span * self.pixels_per_meter)
         
         # Temporal smoothing factor
         self.smoothing = 0.7
@@ -88,106 +87,22 @@ class LaneDetector:
             'lane_fit': None
         }
     
-    def _compute_camera_intrinsics(self):
-        """Compute camera intrinsic matrix from FOV and image dimensions."""
-        # Focal length from horizontal FOV
-        # fov = 2 * atan(width / (2 * fx))
-        # fx = width / (2 * tan(fov/2))
-        fov_rad = np.radians(self.fov)
-        self.fx = self.width / (2.0 * np.tan(fov_rad / 2.0))
-        self.fy = self.fx  # Square pixels
-        self.cx = self.width / 2.0
-        self.cy = self.height / 2.0
-        
-        # Intrinsic matrix
-        self.K = np.array([
-            [self.fx, 0, self.cx],
-            [0, self.fy, self.cy],
-            [0, 0, 1]
-        ], dtype=np.float64)
-    
-    def _compute_perspective_transform(self):
-        """
-        Compute perspective transform for bird's eye view using camera geometry.
-        
-        Uses the pinhole camera model to project ground plane points to image,
-        then computes homography from image trapezoid to BEV rectangle.
-        """
-        pitch_rad = np.radians(self.pitch)
-        
-        # Define 4 ground plane points in vehicle coordinates (X=right, Y=forward, Z=up)
-        # These form a rectangle on the ground that we want to see in BEV
-        x_min, x_max = self.bev_x_range
-        y_min, y_max = self.bev_y_range
-        
-        # Ground plane points: (X, Y, Z) where Z=0 (ground level)
-        # Vehicle is at origin, camera is at (0, 0, camera_height)
-        ground_points_3d = np.array([
-            [x_min, y_max, 0],  # Far left
-            [x_max, y_max, 0],  # Far right
-            [x_max, y_min, 0],  # Near right
-            [x_min, y_min, 0],  # Near left
-        ], dtype=np.float64)
-        
-        # Transform to camera coordinates
-        # Camera frame: x=right, y=down, z=forward
-        # Rotation: pitch around x-axis (positive pitch = looking up)
-        R_pitch = np.array([
-            [1, 0, 0],
-            [0, np.cos(pitch_rad), -np.sin(pitch_rad)],
-            [0, np.sin(pitch_rad), np.cos(pitch_rad)]
-        ], dtype=np.float64)
-        
-        # Translation: camera is at height h above ground
-        # In camera coords: ground is at y = +h (below camera)
-        src_pts = []
-        for gp in ground_points_3d:
-            # Convert vehicle coords (X_v=right, Y_v=forward, Z_v=up) to 
-            # camera coords (X_c=right, Y_c=down, Z_c=forward)
-            # Point relative to camera position
-            p_vehicle = np.array([gp[0], gp[1], gp[2] - self.camera_height])
-            
-            # Transform to camera frame
-            # X_c = X_v, Y_c = -Z_v, Z_c = Y_v
-            p_cam_unrotated = np.array([p_vehicle[0], -p_vehicle[2], p_vehicle[1]])
-            
-            # Apply pitch rotation
-            p_cam = R_pitch @ p_cam_unrotated
-            
-            # Project to image using pinhole model
-            if p_cam[2] > 0:  # Only if in front of camera
-                u = self.fx * p_cam[0] / p_cam[2] + self.cx
-                v = self.fy * p_cam[1] / p_cam[2] + self.cy
-                src_pts.append([u, v])
-            else:
-                # Point behind camera, use a fallback
-                src_pts.append([self.cx, 0])
-        
-        src_pts = np.float32(src_pts)
-        
-        # Destination points in BEV image
-        # Map ground rectangle to BEV image rectangle
-        dst_pts = np.float32([
-            [0, 0],                           # Far left -> top-left
-            [self.bev_width, 0],              # Far right -> top-right
-            [self.bev_width, self.bev_height], # Near right -> bottom-right
-            [0, self.bev_height],             # Near left -> bottom-left
-        ])
-        
-        self.M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-        self.M_inv = cv2.getPerspectiveTransform(dst_pts, src_pts)
-        self.src_points = src_pts  # Store for visualization
-        
-        # Store meters-per-pixel for real-world measurements
-        self.meters_per_pixel_x = (x_max - x_min) / self.bev_width
-        self.meters_per_pixel_y = (y_max - y_min) / self.bev_height
-    
     def to_birds_eye_view(self, image):
-        """Transform image to bird's eye view."""
+        """Transform image to bird's eye view using global IPM utility."""
         if image is None:
             return None
-        return cv2.warpPerspective(image, self.M, (self.bev_width, self.bev_height),
-                                   flags=cv2.INTER_NEAREST)
+        
+        bev_img, bev_size, M = convert_to_ipm(
+            image=image,
+            fov=self.fov,
+            pitch=self.pitch,
+            camera_height=self.camera_height,
+            bev_x_range=self.bev_x_range,
+            bev_y_range=self.bev_y_range,
+            pixels_per_meter=self.pixels_per_meter
+        )
+        
+        return bev_img
     
     def detect(self, semantic_image):
         """
@@ -446,8 +361,8 @@ class LaneDetector:
             bev_params={
                 'width': self.bev_width,
                 'height': self.bev_height,
-                'x_range': self.bev_x_range,
-                'y_range': self.bev_y_range
+                'x_range': self.bev_y_range, # y_range is lateral (-5, 5) which was originally x_range
+                'y_range': self.bev_x_range  # x_range is forward (5, 35) which was originally y_range
             }
         )
     
@@ -489,7 +404,44 @@ class LaneDetector:
     
     def get_source_points(self):
         """Get the perspective transform source points for visualization."""
-        return self.src_points
+        # Calculate source points on the fly for visualization since we now use convert_to_ipm
+        fov_rad = np.radians(self.fov)
+        fx = self.width / (2.0 * np.tan(fov_rad / 2.0))
+        fy = fx
+        cx = self.width / 2.0
+        cy = self.height / 2.0
+        pitch_rad = np.radians(self.pitch)
+        
+        x_min, x_max = self.bev_x_range
+        y_min, y_max = self.bev_y_range
+        
+        ground_points_3d = np.array([
+            [x_max, y_max, 0],
+            [x_max, y_min, 0],
+            [x_min, y_min, 0],
+            [x_min, y_max, 0],
+        ], dtype=np.float64)
+        
+        R_pitch = np.array([
+            [1, 0, 0],
+            [0, np.cos(pitch_rad), -np.sin(pitch_rad)],
+            [0, np.sin(pitch_rad), np.cos(pitch_rad)]
+        ], dtype=np.float64)
+        
+        src_pts = []
+        for gp in ground_points_3d:
+            p_vehicle = np.array([gp[0], gp[1], gp[2] - self.camera_height])
+            p_cam_unrotated = np.array([-p_vehicle[1], -p_vehicle[2], p_vehicle[0]])
+            p_cam = R_pitch @ p_cam_unrotated
+            
+            if p_cam[2] > 0:
+                u = fx * p_cam[0] / p_cam[2] + cx
+                v = fy * p_cam[1] / p_cam[2] + cy
+                src_pts.append([u, v])
+            else:
+                src_pts.append([cx, 0])
+                
+        return np.float32(src_pts)
 
 
 class LaneDetectorDebugWindow:
