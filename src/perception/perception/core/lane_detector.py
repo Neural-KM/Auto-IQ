@@ -309,38 +309,76 @@ class LaneDetector:
                 if len(good_inds) > min_pixels:
                     right_current = int(np.mean(nonzero_x[good_inds]))
         
-        # Fit polynomials
-        left_fit = None
-        right_fit = None
+        # Collect lane pixel arrays
+        left_x = left_y = right_x = right_y = None
         
         if left_lane_inds:
             left_lane_inds = np.concatenate(left_lane_inds)
             if len(left_lane_inds) > 50:
                 left_x = nonzero_x[left_lane_inds]
                 left_y = nonzero_y[left_lane_inds]
-                left_fit = np.polyfit(left_y, left_x, 2)
-                
-                # Draw fitted curve
-                plot_y = np.linspace(0, self.bev_height - 1, self.bev_height)
-                plot_x = np.polyval(left_fit, plot_y)
-                pts = np.column_stack((plot_x, plot_y)).astype(np.int32)
-                cv2.polylines(vis_img, [pts], False, (255, 0, 0), 3)  # Blue
         
         if right_lane_inds:
             right_lane_inds = np.concatenate(right_lane_inds)
             if len(right_lane_inds) > 50:
                 right_x = nonzero_x[right_lane_inds]
                 right_y = nonzero_y[right_lane_inds]
-                right_fit = np.polyfit(right_y, right_x, 2)
-                
-                plot_y = np.linspace(0, self.bev_height - 1, self.bev_height)
-                plot_x = np.polyval(right_fit, plot_y)
-                pts = np.column_stack((plot_x, plot_y)).astype(np.int32)
-                cv2.polylines(vis_img, [pts], False, (0, 0, 255), 3)  # Red
+        
+        # ----- Shared-coefficient polynomial fitting -----
+        # Both lanes share curvature (a) and heading (b): x = a*y² + b*y + c
+        # Only the lateral offset c differs between left and right.
+        # This is solved as a single least-squares problem:
+        #   Design matrix columns: [y², y, is_left, is_right]
+        #   Unknowns:              [a,  b, c_left,  c_right ]
+        left_fit = None
+        right_fit = None
+        has_left = left_x is not None
+        has_right = right_x is not None
+        
+        if has_left and has_right:
+            # --- Both lanes: shared a, b with separate c_left, c_right ---
+            n_l = len(left_y)
+            n_r = len(right_y)
+            all_y = np.concatenate([left_y, right_y])
+            all_x = np.concatenate([left_x, right_x])
+            
+            # Indicator columns
+            is_left = np.concatenate([np.ones(n_l), np.zeros(n_r)])
+            is_right = np.concatenate([np.zeros(n_l), np.ones(n_r)])
+            
+            # Design matrix: [y², y, is_left, is_right]
+            A = np.column_stack([all_y ** 2, all_y, is_left, is_right])
+            
+            # Least-squares solve for [a, b, c_left, c_right]
+            coeffs, _, _, _ = np.linalg.lstsq(A, all_x, rcond=None)
+            a, b, c_left, c_right = coeffs
+            
+            left_fit = np.array([a, b, c_left])
+            right_fit = np.array([a, b, c_right])
+        
+        elif has_left:
+            # --- Only left lane: independent fit ---
+            left_fit = np.polyfit(left_y, left_x, 2)
+        
+        elif has_right:
+            # --- Only right lane: independent fit ---
+            right_fit = np.polyfit(right_y, right_x, 2)
+        
+        # ----- Visualize fitted curves -----
+        plot_y = np.linspace(0, self.bev_height - 1, self.bev_height)
+        
+        if left_fit is not None:
+            plot_x = np.polyval(left_fit, plot_y)
+            pts = np.column_stack((plot_x, plot_y)).astype(np.int32)
+            cv2.polylines(vis_img, [pts], False, (255, 0, 0), 3)  # Blue
+        
+        if right_fit is not None:
+            plot_x = np.polyval(right_fit, plot_y)
+            pts = np.column_stack((plot_x, plot_y)).astype(np.int32)
+            cv2.polylines(vis_img, [pts], False, (0, 0, 255), 3)  # Red
         
         # Draw lane center
         if left_fit is not None and right_fit is not None:
-            plot_y = np.linspace(0, self.bev_height - 1, self.bev_height)
             center_x = (np.polyval(left_fit, plot_y) + np.polyval(right_fit, plot_y)) / 2
             pts = np.column_stack((center_x, plot_y)).astype(np.int32)
             cv2.polylines(vis_img, [pts], False, (0, 255, 255), 2)  # Cyan
