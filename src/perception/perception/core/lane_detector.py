@@ -5,16 +5,74 @@ Lane Detector
 Detects lane boundaries from CARLA semantic segmentation images.
 Uses bird's eye view transform for better lane line fitting.
 Outputs polynomial fits and lane geometry for path planning.
+
+CLI Usage:
+    # Single semantic image with default camera params
+    python -m perception.core.lane_detector --image semantic.png --output ./output/
+
+    # With custom camera params
+    python -m perception.core.lane_detector --image semantic.png --fov 90 --pitch -5 --camera-height 2.0
+
+    # With config YAML (auto-loads camera params)
+    python -m perception.core.lane_detector --image semantic.png --config config/carla_sensors.yaml
+
+    # Batch process a folder of semantic images
+    python -m perception.core.lane_detector --folder /data/semantic_maps/ --output ./lane_results/
 """
+
+import argparse
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Tuple
 
 import numpy as np
 import cv2
+
 from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME
 from perception.data_classes.lane import LaneDetection
 from perception.utils.ipm_transform import convert_to_ipm
 
 # Semantic class ID
 ROAD_LINE = SEMANTIC_BY_NAME['road_line']
+
+
+# ============================================================================
+# Configuration (Dataclasses - frozen for immutability)
+# ============================================================================
+
+@dataclass(frozen=True)
+class CameraConfig:
+    """Camera intrinsic/extrinsic parameters."""
+    fov: float = 110.0          # horizontal field of view in degrees
+    pitch: float = 0.0          # camera pitch in degrees (negative = looking down)
+    height: float = 1.2         # camera height above ground in meters
+
+
+@dataclass(frozen=True)
+class BEVConfig:
+    """Bird's Eye View transform parameters."""
+    bev_width: int = 400
+    x_range: Tuple[float, float] = (5.0, 35.0)     # forward distance range (meters)
+    y_range: Tuple[float, float] = (-5.0, 5.0)     # lateral range (meters)
+
+
+@dataclass(frozen=True)
+class OutputConfig:
+    """Output paths configuration."""
+    default_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[4] / 'data' / 'lane_detection')
+    sensor_config: Path = field(default_factory=lambda: Path(__file__).resolve().parents[4] / 'config' / 'carla_sensors.yaml')
+
+
+@dataclass(frozen=True)
+class LaneDetectorConfig:
+    """Main configuration for lane detector module."""
+    camera: CameraConfig = field(default_factory=CameraConfig)
+    bev: BEVConfig = field(default_factory=BEVConfig)
+    output: OutputConfig = field(default_factory=OutputConfig)
+
+
+# Default configuration instance
+CONFIG = LaneDetectorConfig()
 
 
 class LaneDetector:
@@ -29,32 +87,33 @@ class LaneDetector:
     5. Return lane geometry and polynomial fits for path planning
     """
     
-    def __init__(self, image_width, image_height, camera_fov, camera_pitch, camera_height):
+    def __init__(self, image_width, image_height,
+                 camera_fov=None, camera_pitch=None, camera_height=None):
         """
         Initialize lane detector.
         
         Args:
             image_width: Camera image width in pixels
             image_height: Camera image height in pixels
-            camera_fov: Camera horizontal field of view in degrees
-            camera_pitch: Camera pitch angle in degrees (negative = looking down)
-            camera_height: Camera height above ground in meters
+            camera_fov: Camera horizontal field of view in degrees. Uses CONFIG.camera.fov if None.
+            camera_pitch: Camera pitch angle in degrees (negative = looking down). Uses CONFIG.camera.pitch if None.
+            camera_height: Camera height above ground in meters. Uses CONFIG.camera.height if None.
         """
         self.width = image_width
         self.height = image_height
         
-        # Camera parameters
-        self.fov = camera_fov
-        self.pitch = camera_pitch  # degrees, negative = looking down
-        self.camera_height = camera_height  # meters
+        # Camera parameters (fall back to config defaults)
+        self.fov = camera_fov if camera_fov is not None else CONFIG.camera.fov
+        self.pitch = camera_pitch if camera_pitch is not None else CONFIG.camera.pitch
+        self.camera_height = camera_height if camera_height is not None else CONFIG.camera.height
         
         # Bird's eye view output size and real-world coverage
-        self.bev_width = 400
+        self.bev_width = CONFIG.bev.bev_width
         
         # BEV real-world dimensions (meters)
         # Using the same coordinate system as ipm_transform (X=forward, Y=left)
-        self.bev_x_range = (5.0, 35.0)    # Forward distance range (meters)
-        self.bev_y_range = (-5.0, 5.0)    # Lateral range: 5m left to -5m right (total 10m)
+        self.bev_x_range = CONFIG.bev.x_range    # Forward distance range (meters)
+        self.bev_y_range = CONFIG.bev.y_range     # Lateral range (meters)
         self.pixels_per_meter = self.bev_width / (self.bev_y_range[1] - self.bev_y_range[0])
         
         # convert_to_ipm dynamically calculates height to maintain 1:1 real-world scale
@@ -92,7 +151,7 @@ class LaneDetector:
             dict with detection results including CTE, heading error, confidence
         """
         if semantic_image is None:
-            return self._invalid_result()
+            raise ValueError('semantic_image must not be None')
         
         _, w = semantic_image.shape[:2]
         
@@ -294,9 +353,6 @@ class LaneDetector:
             right_x = int(np.polyval(right_fit, y_eval))
             confidence += 0.4
         
-        # Use tracked average width if available, else default to 40% of BEV width
-        current_lane_width = self.avg_lane_width if self.avg_lane_width is not None else self.bev_width * 0.4
-        
         if left_x is not None and right_x is not None:
             lane_width_bev = right_x - left_x
             
@@ -307,11 +363,11 @@ class LaneDetector:
                 self.avg_lane_width = 0.95 * self.avg_lane_width + 0.05 * lane_width_bev
                 
             confidence += 0.2
-        elif left_x is not None:
-            lane_width_bev = current_lane_width
-        elif right_x is not None:
-            lane_width_bev = current_lane_width
+        elif self.avg_lane_width is not None:
+            # Use tracked average from previous frames (only one lane visible)
+            lane_width_bev = self.avg_lane_width
         else:
+            # No width data available — do not guess
             lane_width_bev = None
         
         # Map to original image coords (approximate)
@@ -340,19 +396,6 @@ class LaneDetector:
             }
         )
     
-    def _invalid_result(self):
-        """Return result when detection fails."""
-        return LaneDetection(
-            valid=False,
-            confidence=0.0,
-            lane_center=self.width // 2,
-            left_lane=None,
-            right_lane=None,
-            lane_width=None,
-            left_fit=None,
-            right_fit=None
-        )
-    
     def reset(self):
         """Reset detector state."""
         self.left_lane_x = None
@@ -373,4 +416,241 @@ class LaneDetector:
                 - 'lane_fit': BEV with sliding windows and fitted polynomials
         """
         return self.debug_images
+
+
+# ============================================================================
+# CLI
+# ============================================================================
+
+def _load_camera_config_from_yaml(config_path):
+    """Load camera parameters from carla_sensors.yaml.
     
+    Args:
+        config_path: Path to the YAML config file (must exist).
+    
+    Returns:
+        (fov, pitch, height) — values are None if not found in YAML.
+    
+    Raises:
+        FileNotFoundError: If config_path does not exist.
+        ValueError: If YAML is missing required 'cameras.front_rgb' section.
+    """
+    import yaml
+    config_path = Path(config_path)
+    if not config_path.exists():
+        raise FileNotFoundError(f'Config file not found: {config_path}')
+    
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    
+    if 'cameras' not in config or 'front_rgb' not in config['cameras']:
+        raise ValueError(f'Config {config_path} missing cameras.front_rgb section')
+    
+    cam_cfg = config['cameras']['front_rgb']
+    fov = pitch = height = None
+    
+    if 'attributes' in cam_cfg and 'fov' in cam_cfg['attributes']:
+        fov = float(cam_cfg['attributes']['fov'])
+    if 'rotation' in cam_cfg and len(cam_cfg['rotation']) >= 1:
+        pitch = float(cam_cfg['rotation'][0])
+    if 'location' in cam_cfg and len(cam_cfg['location']) >= 3:
+        height = float(cam_cfg['location'][2])
+    
+    print(f'Loaded camera config from {config_path}: '
+          f'FOV={fov}, Pitch={pitch}, Height={height}')
+    return fov, pitch, height
+
+
+def _process_single(detector, image_path, output_dir, show=False):
+    """Run lane detection on a single semantic image and save results."""
+    image_path = Path(image_path)
+    semantic_img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+    if semantic_img is None:
+        print(f'Error: Could not read image: {image_path}')
+        return 1
+
+    result = detector.detect(semantic_img)
+    debug = detector.get_debug_images()
+
+    base_name = image_path.stem
+
+    # Print results
+    print(f'\n--- {base_name} ---')
+    print(f'  Valid:      {result.valid}')
+    print(f'  Confidence: {result.confidence:.2f}')
+    if result.left_fit is not None:
+        print(f'  Left fit:   {result.left_fit}')
+    if result.right_fit is not None:
+        print(f'  Right fit:  {result.right_fit}')
+    if result.lane_width_bev is not None and result.bev_params:
+        x_range = result.bev_params['x_range']
+        mpp = (x_range[1] - x_range[0]) / result.bev_params['width']
+        print(f'  Lane width: {result.lane_width_bev * mpp:.2f} m '
+              f'({result.lane_width_bev:.0f} px BEV)')
+
+    # Save debug images
+    if output_dir:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        bev_mask = debug.get('bev_lane_mask')
+        lane_fit = debug.get('lane_fit')
+
+        if bev_mask is not None:
+            cv2.imwrite(str(output_dir / f'{base_name}_bev_lane_mask.png'), bev_mask)
+        if lane_fit is not None:
+            # lane_fit is RGB from vis_img, convert to BGR for imwrite
+            cv2.imwrite(str(output_dir / f'{base_name}_lane_fit.png'),
+                        cv2.cvtColor(lane_fit, cv2.COLOR_RGB2BGR))
+
+        print(f'  Saved to: {output_dir}')
+
+    if show:
+        lane_fit = debug.get('lane_fit')
+        if lane_fit is not None:
+            cv2.imshow(f'Lane Fit - {base_name}',
+                       cv2.cvtColor(lane_fit, cv2.COLOR_RGB2BGR))
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+
+    return 0
+
+
+def main():
+    """CLI entry point for lane detection.
+
+    Input Requirements:
+        --image           Path to a single semantic segmentation image (mono8/grayscale)
+        --folder          Path to folder of semantic segmentation images
+
+    Camera Parameters (optional — defaults from CameraConfig dataclass):
+        --fov             Camera horizontal field of view in degrees (default: 110)
+        --pitch           Camera pitch in degrees (default: 0)
+        --camera-height   Camera height above ground in meters (default: 1.2)
+        --config          Path to carla_sensors.yaml to load camera params
+
+    Output:
+        --output          Output directory for debug images (default: data/lane_detection/)
+        --show            Display results in OpenCV window
+    """
+    cli_examples = """
+Examples:
+    # Single semantic image with defaults
+    python -m perception.core.lane_detector --image semantic.png
+
+    # With custom camera params
+    python -m perception.core.lane_detector --image semantic.png --fov 90 --pitch -5 --camera-height 2.0
+
+    # With config YAML
+    python -m perception.core.lane_detector --image semantic.png --config config/carla_sensors.yaml
+
+    # Batch process a folder
+    python -m perception.core.lane_detector --folder /data/semantic_maps/ --output ./lane_results/
+
+    # Display results
+    python -m perception.core.lane_detector --image semantic.png --show
+"""
+
+    parser = argparse.ArgumentParser(
+        description='Detect lanes from semantic segmentation images',
+        epilog=cli_examples,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # Input options
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument('--image', type=str, help='Path to single semantic image (grayscale/mono8)')
+    input_group.add_argument('--folder', type=str, help='Path to folder of semantic images')
+
+    # Camera parameters
+    parser.add_argument('--fov', type=float, default=None,
+                        help=f'Camera horizontal FOV in degrees (default: {CONFIG.camera.fov})')
+    parser.add_argument('--pitch', type=float, default=None,
+                        help=f'Camera pitch in degrees (default: {CONFIG.camera.pitch})')
+    parser.add_argument('--camera-height', type=float, default=None, dest='camera_height',
+                        help=f'Camera height in meters (default: {CONFIG.camera.height})')
+    parser.add_argument('--config', type=str,
+                        help='Path to carla_sensors.yaml for camera params')
+
+    # Output
+    parser.add_argument('--output', type=str, default=None,
+                        help=f'Output directory (default: {CONFIG.output.default_dir})')
+    parser.add_argument('--show', action='store_true', help='Display results in OpenCV window')
+
+    args = parser.parse_args()
+
+    # ---- Resolve camera parameters: CLI > YAML > dataclass defaults ----
+    config_fov = CONFIG.camera.fov
+    config_pitch = CONFIG.camera.pitch
+    config_height = CONFIG.camera.height
+
+    if args.config:
+        # User explicitly requested a config file — error if it fails
+        yaml_fov, yaml_pitch, yaml_height = _load_camera_config_from_yaml(args.config)
+        if yaml_fov is not None:
+            config_fov = yaml_fov
+        if yaml_pitch is not None:
+            config_pitch = yaml_pitch
+        if yaml_height is not None:
+            config_height = yaml_height
+    elif CONFIG.output.sensor_config.exists():
+        # Auto-load default config if it exists
+        yaml_fov, yaml_pitch, yaml_height = _load_camera_config_from_yaml(
+            CONFIG.output.sensor_config)
+        if yaml_fov is not None:
+            config_fov = yaml_fov
+        if yaml_pitch is not None:
+            config_pitch = yaml_pitch
+        if yaml_height is not None:
+            config_height = yaml_height
+
+    # CLI overrides everything
+    fov = args.fov if args.fov is not None else config_fov
+    pitch = args.pitch if args.pitch is not None else config_pitch
+    camera_height = args.camera_height if args.camera_height is not None else config_height
+
+    output_dir = args.output or str(CONFIG.output.default_dir)
+
+    # ---- Collect images ----
+    if args.image:
+        image_paths = [Path(args.image)]
+    else:
+        folder = Path(args.folder)
+        image_paths = sorted(
+            p for p in folder.iterdir()
+            if p.suffix.lower() in ('.png', '.jpg', '.jpeg', '.bmp', '.tiff')
+        )
+        if not image_paths:
+            print(f'No images found in {folder}')
+            return 1
+
+    # ---- Read first image to get dimensions ----
+    first_img = cv2.imread(str(image_paths[0]), cv2.IMREAD_GRAYSCALE)
+    if first_img is None:
+        print(f'Error: Could not read image: {image_paths[0]}')
+        return 1
+    img_h, img_w = first_img.shape[:2]
+
+    # ---- Create detector ----
+    print(f'Camera: FOV={fov}°  Pitch={pitch}°  Height={camera_height}m')
+    print(f'Image:  {img_w}x{img_h}')
+
+    detector = LaneDetector(
+        image_width=img_w,
+        image_height=img_h,
+        camera_fov=fov,
+        camera_pitch=pitch,
+        camera_height=camera_height,
+    )
+
+    # ---- Process ----
+    for path in image_paths:
+        _process_single(detector, path, output_dir, show=args.show)
+        detector.reset()  # Reset state between independent images
+
+    print(f'\nDone! Processed {len(image_paths)} image(s).')
+    return 0
+
+
+if __name__ == '__main__':
+    exit(main())
