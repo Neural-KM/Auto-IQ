@@ -31,7 +31,7 @@ ROAD_LINE = SEMANTIC_BY_NAME['road_line']
 class CameraConfig:
     """Camera intrinsic/extrinsic parameters."""
     fov: float = 110.0          # horizontal field of view in degrees
-    pitch: float = 0.0          # camera pitch in degrees (negative = looking down)
+    pitch: float = 0.0          # camera pitch in degrees (positive = looking down)
     height: float = 1.2         # camera height above ground in meters
 
 
@@ -83,7 +83,7 @@ class LaneDetector:
             image_width: Camera image width in pixels
             image_height: Camera image height in pixels
             camera_fov: Camera horizontal field of view in degrees. Uses CONFIG.camera.fov if None.
-            camera_pitch: Camera pitch angle in degrees (negative = looking down). Uses CONFIG.camera.pitch if None.
+            camera_pitch: Camera pitch angle in degrees (positive = looking down). Uses CONFIG.camera.pitch if None.
             camera_height: Camera height above ground in meters. Uses CONFIG.camera.height if None.
         """
         self.width = image_width
@@ -103,9 +103,12 @@ class LaneDetector:
         self.bev_y_range = CONFIG.bev.y_range     # Lateral range (meters)
         self.pixels_per_meter = self.bev_width / (self.bev_y_range[1] - self.bev_y_range[0])
         
-        # convert_to_ipm dynamically calculates height to maintain 1:1 real-world scale
+        # By default, derive BEV height from the longitudinal span and pixels_per_meter.
+        # Allow CONFIG.bev to optionally override this to control BEV aspect ratio / size.
         x_span = self.bev_x_range[1] - self.bev_x_range[0]
-        self.bev_height = int(x_span * self.pixels_per_meter)
+        default_bev_height = int(x_span * self.pixels_per_meter)
+        configured_bev_height = getattr(CONFIG.bev, 'bev_height', None)
+        self.bev_height = int(configured_bev_height) if configured_bev_height is not None else default_bev_height
         
         # Temporal smoothing factor
         self.smoothing = 0.7
@@ -153,7 +156,8 @@ class LaneDetector:
             camera_height=self.camera_height,
             bev_x_range=self.bev_x_range,
             bev_y_range=self.bev_y_range,
-            pixels_per_meter=self.pixels_per_meter
+            pixels_per_meter=self.pixels_per_meter,
+            interpolation=cv2.INTER_NEAREST
         )
         self.debug_images['bev_lane_mask'] = bev_lane
         
@@ -378,8 +382,14 @@ class LaneDetector:
             bev_params={
                 'width': self.bev_width,
                 'height': self.bev_height,
-                'x_range': self.bev_y_range, # y_range is lateral (-5, 5) which was originally x_range
-                'y_range': self.bev_x_range  # x_range is forward (5, 35) which was originally y_range
+                # NOTE: For backward compatibility, x_range/y_range follow an image
+                # convention where X is lateral and Y is forward. Prefer using
+                # forward_range/lateral_range.
+                'x_range': self.bev_y_range,  # DEPRECATED: lateral range, kept for legacy consumers
+                'y_range': self.bev_x_range,  # DEPRECATED: forward range, kept for legacy consumers
+                # Normalized naming matching ipm_transform convention (X=forward, Y=lateral/left)
+                'forward_range': self.bev_x_range,
+                'lateral_range': self.bev_y_range
             }
         )
     
@@ -486,17 +496,15 @@ def _process_single(detector, image_path, output_dir, show=False):
         if bev_mask is not None:
             cv2.imwrite(str(output_dir / f'{base_name}_bev_lane_mask.png'), bev_mask)
         if lane_fit is not None:
-            # lane_fit is RGB from vis_img, convert to BGR for imwrite
             cv2.imwrite(str(output_dir / f'{base_name}_lane_fit.png'),
-                        cv2.cvtColor(lane_fit, cv2.COLOR_RGB2BGR))
+                        lane_fit)
 
         print(f'  Saved to: {output_dir}')
 
     if show:
         lane_fit = debug.get('lane_fit')
         if lane_fit is not None:
-            cv2.imshow(f'Lane Fit - {base_name}',
-                       cv2.cvtColor(lane_fit, cv2.COLOR_RGB2BGR))
+            cv2.imshow(f'Lane Fit - {base_name}', lane_fit)
             cv2.waitKey(0)
             cv2.destroyAllWindows()
 
