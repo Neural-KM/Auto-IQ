@@ -296,7 +296,10 @@ class CarlaBridgeNode(Node):
                     
         elif sensor_type in ('sensor.lidar.ray_cast', 'sensor.lidar.ray_cast_semantic'):
             for attr in ['channels', 'range', 'points_per_second', 'rotation_frequency', 
-                         'upper_fov', 'lower_fov', 'sensor_tick']:
+                         'upper_fov', 'lower_fov', 'horizontal_fov', 'sensor_tick',
+                         'atmosphere_attenuation_rate', 'dropoff_general_rate',
+                         'dropoff_intensity_limit', 'dropoff_zero_intensity',
+                         'noise_stddev']:
                 if attr in config:
                     bp.set_attribute(attr, str(config[attr]))
         
