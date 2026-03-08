@@ -93,7 +93,6 @@ def generate_launch_description():
                 'use_sim_time': True,
                 'semantic_topic': '/perception/semantic_map/road_lane_extraction',
                 'camera_info_topic': '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info',
-                'camera_frame': 'ego_vehicle/sensor/camera/rgb/front',
                 'enable_debug_viz': False,
             }],
         ),
