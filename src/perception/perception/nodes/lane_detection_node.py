@@ -242,7 +242,10 @@ class LaneDetectionNode(Node):
     def _publish_lane_detection(self, result, header):
         """Publish a LaneDetection message with polynomial coefficients."""
         det_msg = LaneDetectionMsg()
-        det_msg.header = header
+        # Use the original timestamp but explicitly set the frame to ego_vehicle,
+        # since all lane polynomials and BEV parameters are expressed in that frame.
+        det_msg.header.stamp = header.stamp
+        det_msg.header.frame_id = 'ego_vehicle'
         det_msg.valid = result.valid
         det_msg.confidence = float(result.confidence)
 
@@ -360,7 +363,11 @@ class LaneDetectionNode(Node):
     def _publish_debug_bev(self, header):
         """Publish the BEV lane-fit debug image."""
         debug = self.lane_detector.get_debug_images()
-        lane_fit_img = debug['lane_fit']
+        lane_fit_img = debug.get('lane_fit') if debug is not None else None
+        if lane_fit_img is None:
+            # No debug BEV image available (e.g., before first frame or on lane-fit failure)
+            return
+
         out = self.cv_bridge.cv2_to_imgmsg(lane_fit_img, encoding='bgr8')
         out.header = header
         self.debug_bev_pub.publish(out)
