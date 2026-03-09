@@ -2,7 +2,6 @@
 #
 # Polynomial fits are 2nd-order: x = a*y^2 + b*y + c
 # Coefficients are in BEV (bird's eye view) pixel space.
-# Use bev_* fields to convert to real-world meters.
 
 std_msgs/Header header
 
@@ -22,14 +21,6 @@ int32 lane_center             # Lane center x-pixel
 int32 left_lane_x             # Left lane boundary x-pixel  (-1 if unknown)
 int32 right_lane_x            # Right lane boundary x-pixel (-1 if unknown)
 int32 lane_width_px           # Lane width in pixels        (-1 if unknown)
-
-# BEV transform parameters (for converting poly fits to world coords)
-int32 bev_width               # BEV image width in pixels
-int32 bev_height              # BEV image height in pixels
-float64 bev_x_min             # BEV left  boundary in meters (from vehicle center)
-float64 bev_x_max             # BEV right boundary in meters
-float64 bev_y_min             # BEV near  boundary in meters (forward distance)
-float64 bev_y_max             # BEV far   boundary in meters
 
 # Real-world lane width (meters), derived from polynomial fits in BEV
 float64 lane_width_m          # -1.0 if unknown
