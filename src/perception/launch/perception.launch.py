@@ -89,12 +89,15 @@ def generate_launch_description():
             executable='lane_detection_node',
             name='lane_detection_node',
             output='screen',
-            parameters=[{
-                'use_sim_time': True,
-                'semantic_topic': '/perception/semantic_map/road_lane_extraction',
-                'camera_info_topic': '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info',
-                'enable_debug_viz': False,
-            }],
+            parameters=[
+                LaunchConfiguration('params_file'),
+                {
+                    'use_sim_time': True,
+                    'semantic_topic': '/perception/semantic_map/road_lane_extraction',
+                    'camera_info_topic': '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info',
+                    'enable_debug_viz': False,
+                },
+            ],
         ),
 
         # ==================== Node 4: Semantic PointCloud ====================

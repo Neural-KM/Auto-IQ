@@ -27,13 +27,6 @@ ROAD_LINE = SEMANTIC_BY_NAME['road_line']
 # Configuration (Dataclasses - frozen for immutability)
 # ============================================================================
 
-@dataclass(frozen=True)
-class CameraConfig:
-    """Camera intrinsic/extrinsic parameters."""
-    fov: float = 110.0          # horizontal field of view in degrees
-    pitch: float = 0.0          # camera pitch in degrees (positive = looking down)
-    height: float = 1.2         # camera height above ground in meters
-
 
 @dataclass(frozen=True)
 class BEVConfig:
@@ -53,7 +46,6 @@ class OutputConfig:
 @dataclass(frozen=True)
 class LaneDetectorConfig:
     """Main configuration for lane detector module."""
-    camera: CameraConfig = field(default_factory=CameraConfig)
     bev: BEVConfig = field(default_factory=BEVConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
@@ -74,25 +66,26 @@ class LaneDetector:
     5. Return lane geometry and polynomial fits for path planning
     """
     
-    def __init__(self, image_width, image_height,
-                 camera_fov=None, camera_pitch=None, camera_height=None):
+    def __init__(self, image_width, image_height):
         """
         Initialize lane detector.
         
         Args:
             image_width: Camera image width in pixels
             image_height: Camera image height in pixels
-            camera_fov: Camera horizontal field of view in degrees. Uses CONFIG.camera.fov if None.
-            camera_pitch: Camera pitch angle in degrees (positive = looking down). Uses CONFIG.camera.pitch if None.
-            camera_height: Camera height above ground in meters. Uses CONFIG.camera.height if None.
+        
+        Note:
+            Camera extrinsics (fov, pitch, height) must be set via
+            set_camera_params() before calling detect(). In the ROS
+            pipeline these come from tf lookup in the main node.
         """
         self.width = image_width
         self.height = image_height
         
-        # Camera parameters (fall back to config defaults)
-        self.fov = camera_fov if camera_fov is not None else CONFIG.camera.fov
-        self.pitch = camera_pitch if camera_pitch is not None else CONFIG.camera.pitch
-        self.camera_height = camera_height if camera_height is not None else CONFIG.camera.height
+        # Camera extrinsics — must be set via set_camera_params() before detect().
+        self.fov = None
+        self.pitch = None
+        self.camera_height = None
         
         # Bird's eye view output size and real-world coverage
         self.bev_width = CONFIG.bev.bev_width
@@ -103,12 +96,9 @@ class LaneDetector:
         self.bev_y_range = CONFIG.bev.y_range     # Lateral range (meters)
         self.pixels_per_meter = self.bev_width / (self.bev_y_range[1] - self.bev_y_range[0])
         
-        # By default, derive BEV height from the longitudinal span and pixels_per_meter.
-        # Allow CONFIG.bev to optionally override this to control BEV aspect ratio / size.
+        # Derive BEV height from the forward span and pixels_per_meter
         x_span = self.bev_x_range[1] - self.bev_x_range[0]
-        default_bev_height = int(x_span * self.pixels_per_meter)
-        configured_bev_height = getattr(CONFIG.bev, 'bev_height', None)
-        self.bev_height = int(configured_bev_height) if configured_bev_height is not None else default_bev_height
+        self.bev_height = int(x_span * self.pixels_per_meter)
         
         # Temporal smoothing factor
         self.smoothing = 0.7
@@ -387,6 +377,18 @@ class LaneDetector:
             }
         )
     
+    def set_camera_params(self, fov, pitch, camera_height):
+        """Set camera extrinsics (called by the node once available).
+        
+        Args:
+            fov: Camera horizontal field of view in degrees.
+            pitch: Camera pitch angle in degrees.
+            camera_height: Camera height above ground in meters.
+        """
+        self.fov = fov
+        self.pitch = pitch
+        self.camera_height = camera_height
+
     def reset(self):
         """Reset detector state."""
         self.left_lane_x = None
@@ -412,7 +414,6 @@ class LaneDetector:
 # ============================================================================
 # CLI
 # ============================================================================
-
 def _process_single(detector, image_path, output_dir, show=False):
     """Run lane detection on a single semantic image and save results."""
     image_path = Path(image_path)
@@ -474,8 +475,9 @@ def main():
         --folder          Path to folder of semantic segmentation images
 
     Camera Parameters:
-        Camera params (fov, pitch, height) come from CameraConfig defaults.
-        In the ROS pipeline, these must be provided by the node.
+        Camera params (fov, pitch, height) are received from camera_info
+        topic and tf lookup in the ROS pipeline. The CLI does not support
+        setting these values — it is for image output testing only.
 
     Output:
         --output          Output directory for debug images (default: data/lane_detection/)
@@ -483,7 +485,7 @@ def main():
     """
     cli_examples = """
 Examples:
-    # Single semantic image with defaults
+    # Single semantic image
     python -m perception.core.lane_detector --image semantic.png
 
     # Batch process a folder
@@ -511,12 +513,6 @@ Examples:
 
     args = parser.parse_args()
 
-    # ---- Camera parameters from dataclass defaults ----
-    # In the ROS pipeline, these are provided by the node, not CLI/YAML.
-    fov = CONFIG.camera.fov
-    pitch = CONFIG.camera.pitch
-    camera_height = CONFIG.camera.height
-
     output_dir = args.output or str(CONFIG.output.default_dir)
 
     # ---- Collect images ----
@@ -540,15 +536,12 @@ Examples:
     img_h, img_w = first_img.shape[:2]
 
     # ---- Create detector ----
-    print(f'Camera: FOV={fov}°  Pitch={pitch}°  Height={camera_height}m')
     print(f'Image:  {img_w}x{img_h}')
+    print('Note: Camera params not set (CLI mode). BEV transform will use None values.')
 
     detector = LaneDetector(
         image_width=img_w,
         image_height=img_h,
-        camera_fov=fov,
-        camera_pitch=pitch,
-        camera_height=camera_height,
     )
 
     # ---- Process ----

@@ -23,8 +23,8 @@ Subscribes:
 Parameters:
 - semantic_topic: Input semantic map topic
 - camera_info_topic: Camera info for intrinsics
-- camera_height: Camera height above ground in meters (default from CONFIG)
-- camera_pitch: Camera pitch angle in degrees (default from CONFIG)
+- camera_height: Camera height above ground in meters (required)
+- camera_pitch: Camera pitch angle in degrees (required)
 - enable_debug_viz: Publish debug BEV images
 """
 
@@ -55,7 +55,7 @@ class LaneDetectionNode(Node):
 
     Initialization is gated on receiving CameraInfo so that the
     LaneDetector BEV transform is configured with correct image dimensions
-    and FOV. Camera height and pitch are static parameters from CONFIG.
+    and FOV. Camera height and pitch must be provided as parameters.
     """
 
     def __init__(self):
@@ -68,15 +68,21 @@ class LaneDetectionNode(Node):
         self.declare_parameter(
             'camera_info_topic',
             '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info')
-        self.declare_parameter('camera_height', CONFIG.camera.height)
-        self.declare_parameter('camera_pitch', CONFIG.camera.pitch)
+        self.declare_parameter('camera_height')
+        self.declare_parameter('camera_pitch')
         self.declare_parameter('enable_debug_viz', False)
 
         semantic_topic = self.get_parameter('semantic_topic').value
         camera_info_topic = self.get_parameter('camera_info_topic').value
+        self.enable_debug_viz = self.get_parameter('enable_debug_viz').value
+
+        # Camera extrinsics — must be provided via launch file or command line.
         self.camera_height = self.get_parameter('camera_height').value
         self.camera_pitch = self.get_parameter('camera_pitch').value
-        self.enable_debug_viz = self.get_parameter('enable_debug_viz').value
+        if self.camera_height is None or self.camera_pitch is None:
+            raise RuntimeError(
+                'camera_height and camera_pitch parameters are required. '
+                'Provide them via launch file or ros2 run --ros-args -p camera_height:=<val> -p camera_pitch:=<val>')
 
         # ==================== Initialization Gate ====================
         self.initialized = False
@@ -154,8 +160,10 @@ class LaneDetectionNode(Node):
         self.lane_detector = LaneDetector(
             image_width=self.img_width,
             image_height=self.img_height,
-            camera_fov=self.fov_deg,
-            camera_pitch=self.camera_pitch,
+        )
+        self.lane_detector.set_camera_params(
+            fov=self.fov_deg,
+            pitch=self.camera_pitch,
             camera_height=self.camera_height,
         )
         self.init_timer.cancel()
