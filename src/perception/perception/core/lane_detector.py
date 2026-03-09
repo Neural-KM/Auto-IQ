@@ -382,12 +382,6 @@ class LaneDetector:
             bev_params={
                 'width': self.bev_width,
                 'height': self.bev_height,
-                # NOTE: For backward compatibility, x_range/y_range follow an image
-                # convention where X is lateral and Y is forward. Prefer using
-                # forward_range/lateral_range.
-                'x_range': self.bev_y_range,  # DEPRECATED: lateral range, kept for legacy consumers
-                'y_range': self.bev_x_range,  # DEPRECATED: forward range, kept for legacy consumers
-                # Normalized naming matching ipm_transform convention (X=forward, Y=lateral/left)
                 'forward_range': self.bev_x_range,
                 'lateral_range': self.bev_y_range
             }
@@ -441,8 +435,8 @@ def _process_single(detector, image_path, output_dir, show=False):
     if result.right_fit is not None:
         print(f'  Right fit:  {result.right_fit}')
     if result.lane_width_bev is not None and result.bev_params:
-        x_range = result.bev_params['x_range']
-        mpp = (x_range[1] - x_range[0]) / result.bev_params['width']
+        lateral_range = result.bev_params['lateral_range']
+        mpp = (lateral_range[1] - lateral_range[0]) / result.bev_params['width']
         print(f'  Lane width: {result.lane_width_bev * mpp:.2f} m '
               f'({result.lane_width_bev:.0f} px BEV)')
 

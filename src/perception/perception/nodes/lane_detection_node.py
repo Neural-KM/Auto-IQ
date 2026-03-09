@@ -270,16 +270,16 @@ class LaneDetectionNode(Node):
         bev = result.bev_params
         det_msg.bev_width = bev['width']
         det_msg.bev_height = bev['height']
-        x_range = bev['x_range']
-        y_range = bev['y_range']
-        det_msg.bev_x_min = float(x_range[0])
-        det_msg.bev_x_max = float(x_range[1])
-        det_msg.bev_y_min = float(y_range[0])
-        det_msg.bev_y_max = float(y_range[1])
+        lateral_range = bev['lateral_range']
+        forward_range = bev['forward_range']
+        det_msg.bev_x_min = float(lateral_range[0])
+        det_msg.bev_x_max = float(lateral_range[1])
+        det_msg.bev_y_min = float(forward_range[0])
+        det_msg.bev_y_max = float(forward_range[1])
 
         # Real-world lane width
         if result.lane_width_bev is not None:
-            meters_per_px = (x_range[1] - x_range[0]) / bev['width']
+            meters_per_px = (lateral_range[1] - lateral_range[0]) / bev['width']
             det_msg.lane_width_m = float(result.lane_width_bev * meters_per_px)
         else:
             det_msg.lane_width_m = -1.0
@@ -345,16 +345,16 @@ class LaneDetectionNode(Node):
 
         bw = bev_params['width']
         bh = bev_params['height']
-        x_range = bev_params['x_range']
-        y_range = bev_params['y_range']
+        lateral_range = bev_params['lateral_range']
+        forward_range = bev_params['forward_range']
 
         for y_bev in np.linspace(0, bh - 1, 30):
             x_bev = np.polyval(fit, y_bev)
             # BEV row 0 = far, row bh-1 = near
-            x_world = (y_range[1]
-                       - (y_bev / bh) * (y_range[1] - y_range[0]))
-            y_world = (x_range[0]
-                       + (x_bev / bw) * (x_range[1] - x_range[0]))
+            x_world = (forward_range[1]
+                       - (y_bev / bh) * (forward_range[1] - forward_range[0]))
+            y_world = (lateral_range[0]
+                       + (x_bev / bw) * (lateral_range[1] - lateral_range[0]))
             pt = Point(x=float(x_world), y=float(-y_world), z=0.0)
             marker.points.append(pt)
 
