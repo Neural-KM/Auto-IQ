@@ -419,45 +419,6 @@ class LaneDetector:
 # CLI
 # ============================================================================
 
-def _load_camera_config_from_yaml(config_path):
-    """Load camera parameters from carla_sensors.yaml.
-    
-    Args:
-        config_path: Path to the YAML config file (must exist).
-    
-    Returns:
-        (fov, pitch, height) — values are None if not found in YAML.
-    
-    Raises:
-        FileNotFoundError: If config_path does not exist.
-        ValueError: If YAML is missing required 'cameras.front_rgb' section.
-    """
-    import yaml
-    config_path = Path(config_path)
-    if not config_path.exists():
-        raise FileNotFoundError(f'Config file not found: {config_path}')
-    
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    if 'cameras' not in config or 'front_rgb' not in config['cameras']:
-        raise ValueError(f'Config {config_path} missing cameras.front_rgb section')
-    
-    cam_cfg = config['cameras']['front_rgb']
-    fov = pitch = height = None
-    
-    if 'attributes' in cam_cfg and 'fov' in cam_cfg['attributes']:
-        fov = float(cam_cfg['attributes']['fov'])
-    if 'rotation' in cam_cfg and len(cam_cfg['rotation']) >= 1:
-        pitch = float(cam_cfg['rotation'][0])
-    if 'location' in cam_cfg and len(cam_cfg['location']) >= 3:
-        height = float(cam_cfg['location'][2])
-    
-    print(f'Loaded camera config from {config_path}: '
-          f'FOV={fov}, Pitch={pitch}, Height={height}')
-    return fov, pitch, height
-
-
 def _process_single(detector, image_path, output_dir, show=False):
     """Run lane detection on a single semantic image and save results."""
     image_path = Path(image_path)
@@ -518,11 +479,9 @@ def main():
         --image           Path to a single semantic segmentation image (mono8/grayscale)
         --folder          Path to folder of semantic segmentation images
 
-    Camera Parameters (optional — defaults from CameraConfig dataclass):
-        --fov             Camera horizontal field of view in degrees (default: 110)
-        --pitch           Camera pitch in degrees (default: 0)
-        --camera-height   Camera height above ground in meters (default: 1.2)
-        --config          Path to carla_sensors.yaml to load camera params
+    Camera Parameters:
+        Camera params (fov, pitch, height) come from CameraConfig defaults.
+        In the ROS pipeline, these must be provided by the node.
 
     Output:
         --output          Output directory for debug images (default: data/lane_detection/)
@@ -532,12 +491,6 @@ def main():
 Examples:
     # Single semantic image with defaults
     python -m perception.core.lane_detector --image semantic.png
-
-    # With custom camera params
-    python -m perception.core.lane_detector --image semantic.png --fov 90 --pitch -5 --camera-height 2.0
-
-    # With config YAML
-    python -m perception.core.lane_detector --image semantic.png --config config/carla_sensors.yaml
 
     # Batch process a folder
     python -m perception.core.lane_detector --folder /data/semantic_maps/ --output ./lane_results/
@@ -557,16 +510,6 @@ Examples:
     input_group.add_argument('--image', type=str, help='Path to single semantic image (grayscale/mono8)')
     input_group.add_argument('--folder', type=str, help='Path to folder of semantic images')
 
-    # Camera parameters
-    parser.add_argument('--fov', type=float, default=None,
-                        help=f'Camera horizontal FOV in degrees (default: {CONFIG.camera.fov})')
-    parser.add_argument('--pitch', type=float, default=None,
-                        help=f'Camera pitch in degrees (default: {CONFIG.camera.pitch})')
-    parser.add_argument('--camera-height', type=float, default=None, dest='camera_height',
-                        help=f'Camera height in meters (default: {CONFIG.camera.height})')
-    parser.add_argument('--config', type=str,
-                        help='Path to carla_sensors.yaml for camera params')
-
     # Output
     parser.add_argument('--output', type=str, default=None,
                         help=f'Output directory (default: {CONFIG.output.default_dir})')
@@ -574,35 +517,11 @@ Examples:
 
     args = parser.parse_args()
 
-    # ---- Resolve camera parameters: CLI > YAML > dataclass defaults ----
-    config_fov = CONFIG.camera.fov
-    config_pitch = CONFIG.camera.pitch
-    config_height = CONFIG.camera.height
-
-    if args.config:
-        # User explicitly requested a config file — error if it fails
-        yaml_fov, yaml_pitch, yaml_height = _load_camera_config_from_yaml(args.config)
-        if yaml_fov is not None:
-            config_fov = yaml_fov
-        if yaml_pitch is not None:
-            config_pitch = yaml_pitch
-        if yaml_height is not None:
-            config_height = yaml_height
-    elif CONFIG.output.sensor_config.exists():
-        # Auto-load default config if it exists
-        yaml_fov, yaml_pitch, yaml_height = _load_camera_config_from_yaml(
-            CONFIG.output.sensor_config)
-        if yaml_fov is not None:
-            config_fov = yaml_fov
-        if yaml_pitch is not None:
-            config_pitch = yaml_pitch
-        if yaml_height is not None:
-            config_height = yaml_height
-
-    # CLI overrides everything
-    fov = args.fov if args.fov is not None else config_fov
-    pitch = args.pitch if args.pitch is not None else config_pitch
-    camera_height = args.camera_height if args.camera_height is not None else config_height
+    # ---- Camera parameters from dataclass defaults ----
+    # In the ROS pipeline, these are provided by the node, not CLI/YAML.
+    fov = CONFIG.camera.fov
+    pitch = CONFIG.camera.pitch
+    camera_height = CONFIG.camera.height
 
     output_dir = args.output or str(CONFIG.output.default_dir)
 
