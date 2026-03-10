@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Road Extraction (Segmentation Model Agnostic)
+Lane Extraction (Segmentation Model Agnostic)
 ==============================================
 
-This module provides the RoadExtractor class for extracting road masks and lane 
+This module provides the LaneExtractor class for extracting road masks and lane 
 markings from images. It is segmentation model agnostic - it receives pre-computed
 segmentation maps or road masks from any upstream source.
 
-RoadExtractor Class:
+LaneExtractor Class:
     Parameters:
         road_grayscale_id (int): Pixel value ID for road in the grayscale segmentation map (default: 90) we are converting the rgb id of the object to grayscale to get this value
     Core Methods:
@@ -23,9 +23,9 @@ Configuration:
         - OutputConfig: default_dir
 
 Example:
-    from perception.core.road_extraction import RoadExtractor
+    from perception.core.lane_extraction import LaneExtractor
     
-    extractor = RoadExtractor(road_grayscale_id=90)
+    extractor = LaneExtractor(road_grayscale_id=90)
     
     # Option 1: Provide segmentation map (class IDs per pixel)
     road_mask = extractor.extract_road_mask(segmentation_map)
@@ -76,7 +76,7 @@ class RoadExtractionConfig:
 CONFIG = RoadExtractionConfig()
 
 
-class RoadExtractor:
+class LaneExtractor:
     """
     Extracts road mask from images using pre-computed segmentation.
     
@@ -86,7 +86,7 @@ class RoadExtractor:
     
     def __init__(self, road_grayscale_id: int = 90):
         """
-        Initialize RoadExtractor.
+        Initialize LaneExtractor.
         
         Args:
             road_grayscale_id: Pixel value corresponding to road in the segmentation map.
@@ -382,11 +382,11 @@ class RoadExtractor:
         return semantic_map, lane_mask
 
 
-def process_single_image(extractor: RoadExtractor, args, segmentation_map: np.ndarray = None):
+def process_single_image(extractor: LaneExtractor, args, segmentation_map: np.ndarray = None):
     """Process a single image.
     
     Args:
-        extractor: RoadExtractor instance
+        extractor: LaneExtractor instance
         args: Command line arguments
         segmentation_map: Pre-computed segmentation map (H, W) with class IDs.
                          If None, a dummy road mask will be created for demonstration.
@@ -649,7 +649,7 @@ def process_single_image(extractor: RoadExtractor, args, segmentation_map: np.nd
     return 0
 
 
-def process_folder(extractor: RoadExtractor, args):
+def process_folder(extractor: LaneExtractor, args):
     """Process all images in a folder.
     
     Note: For batch processing, segmentation maps must be provided in a parallel folder
@@ -911,8 +911,8 @@ Examples:
         args.overlay = True
     
     # Initialize extractor (model-agnostic)
-    print(f'Initializing RoadExtractor (road_grayscale_id={args.road_grayscale_id})...')
-    extractor = RoadExtractor(road_grayscale_id=args.road_grayscale_id)
+    print(f'Initializing LaneExtractor (road_grayscale_id={args.road_grayscale_id})...')
+    extractor = LaneExtractor(road_grayscale_id=args.road_grayscale_id)
     
     # Process
     if args.image:

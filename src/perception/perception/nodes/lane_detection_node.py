@@ -7,7 +7,7 @@ ROS2 node that performs polynomial lane fitting on the semantic segmentation
 output from the semantic_segmentation_node.
 
 Subscribes to the processed semantic map (which already includes lane markings
-via ground truth or RoadExtractor-injected road_line class), applies a bird's
+via ground truth or LaneExtractor-injected road_line class), applies a bird's
 eye view transform, runs a sliding-window search, and fits 2nd-order
 polynomials to the left and right lane boundaries.
 
@@ -47,7 +47,7 @@ from autoiq_msgs.msg import LaneDetection as LaneDetectionMsg
 
 from cv_bridge import CvBridge
 
-from perception.core.lane_detector import LaneDetector, CONFIG
+from perception.core.lane_fitting import LaneDetector, CONFIG
 
 
 class LaneDetectionNode(Node):

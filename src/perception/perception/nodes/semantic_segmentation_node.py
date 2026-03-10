@@ -10,9 +10,9 @@ ROS2 node that publishes semantic segmentation maps from either:
 Flow:
 - **ground_truth mode**: CARLA ground truth already contains lane markings
   (class 24 road_line).  The map is published as-is to both the raw and
-  road_lane_extraction topics — no RoadExtractor processing is needed.
+  road_lane_extraction topics — no LaneExtractor processing is needed.
 - **segformer mode**: SegFormer output does NOT contain lane markings.
-  When *enable_road_lane_extraction* is True, the RoadExtractor detects lane
+  When *enable_road_lane_extraction* is True, the LaneExtractor detects lane
   markings via adaptive thresholding on the RGB image and injects class 24
   (road_line) into the semantic map.  The extracted map is published on a
   separate topic so that the mapping/costmap node receives lane-aware semantics.
@@ -25,7 +25,7 @@ Parameters:
 - ground_truth_topic: Input ground truth semantic topic (for ground_truth mode)
 - output_topic: Base semantic map topic (default: /perception/semantic_map)
 - road_lane_extraction_topic: Road lane extraction map with lane markings (default: /perception/semantic_map/road_lane_extraction)
-- enable_road_lane_extraction: Enable lane-marking extraction via RoadExtractor (segformer mode only, default: True)
+- enable_road_lane_extraction: Enable lane-marking extraction via LaneExtractor (segformer mode only, default: True)
 - publish_colored: Publish colored visualization (default: True)
 
 Subscribes:
@@ -52,7 +52,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 
 from sensor_msgs.msg import Image
 
-from perception.core.road_extraction import RoadExtractor
+from perception.core.lane_extraction import LaneExtractor
 from perception.data_classes.semantic_labels import (
     SEMANTIC_BY_NAME,
     colorize_mask,
@@ -108,12 +108,12 @@ class SemanticSegmentationNode(Node):
                 self.get_logger().error(f'Failed to load SegFormer: {e}')
                 raise RuntimeError(f'SegFormer loading failed: {e}')
 
-        # ==================== Initialize RoadExtractor (segformer + road lane extraction only) ==
+        # ==================== Initialize LaneExtractor (segformer + road lane extraction only) ==
         # Ground truth already contains lane markings — no extraction needed.
-        self.road_extractor: Optional[RoadExtractor] = None
+        self.lane_extractor: Optional[LaneExtractor] = None
         if self.segmentation_source == 'segformer' and self.enable_road_lane_extraction:
-            self.road_extractor = RoadExtractor(road_grayscale_id=0)
-            self.get_logger().info('RoadExtractor initialized for road lane extraction (segformer mode)')
+            self.lane_extractor = LaneExtractor(road_grayscale_id=0)
+            self.get_logger().info('LaneExtractor initialized for road lane extraction (segformer mode)')
 
         # Semantic class IDs used by road lane extraction
         self._road_id = SEMANTIC_BY_NAME.get('road', 1)
@@ -253,7 +253,7 @@ class SemanticSegmentationNode(Node):
                                 self.road_lane_extraction_colored_pub)
 
     def _extract_road(self, segmentation: np.ndarray):
-        """Extract road lane markings into segmentation via RoadExtractor.
+        """Extract road lane markings into segmentation via LaneExtractor.
         
         Returns:
             (extracted_map, True) on success, (segmentation, False) on skip/failure.
@@ -270,7 +270,7 @@ class SemanticSegmentationNode(Node):
             return segmentation, False
 
         try:
-            extracted_map, lane_mask = self.road_extractor.extract_road_lane_markings(
+            extracted_map, lane_mask = self.lane_extractor.extract_road_lane_markings(
                 segmentation, rgb,
                 road_class_id=self._road_id,
                 road_line_class_id=self._road_line_id,
