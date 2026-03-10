@@ -23,8 +23,7 @@ Subscribes:
 Parameters:
 - semantic_topic: Input semantic map topic
 - camera_info_topic: Camera info for intrinsics
-- camera_height: Camera height above ground in meters (required)
-- camera_pitch: Camera pitch angle in degrees (required)
+- camera_frame: TF frame name for the camera sensor
 - enable_debug_viz: Publish debug BEV images
 """
 
@@ -35,6 +34,8 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+import tf2_ros
+from tf2_ros import TransformException
 
 from sensor_msgs.msg import Image, CameraInfo
 from visualization_msgs.msg import Marker, MarkerArray
@@ -53,9 +54,9 @@ class LaneDetectionNode(Node):
     """
     ROS2 node for lane detection via polynomial fitting on semantic segmentation.
 
-    Initialization is gated on receiving CameraInfo so that the
-    LaneDetector BEV transform is configured with correct image dimensions
-    and FOV. Camera height and pitch must be provided as parameters.
+    Initialization is gated on receiving CameraInfo and the camera TF
+    transform so that the LaneDetector BEV transform is configured with
+    correct image dimensions, FOV, camera height, and pitch.
     """
 
     def __init__(self):
@@ -68,25 +69,24 @@ class LaneDetectionNode(Node):
         self.declare_parameter(
             'camera_info_topic',
             '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info')
-        self.declare_parameter('camera_height')
-        self.declare_parameter('camera_pitch')
+        self.declare_parameter(
+            'camera_frame',
+            'ego_vehicle/sensor/camera/rgb/front')
         self.declare_parameter('enable_debug_viz', False)
 
         semantic_topic = self.get_parameter('semantic_topic').value
         camera_info_topic = self.get_parameter('camera_info_topic').value
+        self.camera_frame = self.get_parameter('camera_frame').value
         self.enable_debug_viz = self.get_parameter('enable_debug_viz').value
 
-        # Camera extrinsics — must be provided via launch file or command line.
-        self.camera_height = self.get_parameter('camera_height').value
-        self.camera_pitch = self.get_parameter('camera_pitch').value
-        if self.camera_height is None or self.camera_pitch is None:
-            raise RuntimeError(
-                'camera_height and camera_pitch parameters are required. '
-                'Provide them via launch file or ros2 run --ros-args -p camera_height:=<val> -p camera_pitch:=<val>')
+        # Camera extrinsics — obtained from TF at runtime.
+        self.camera_height = None
+        self.camera_pitch = None
 
         # ==================== Initialization Gate ====================
         self.initialized = False
         self.camera_info_received = False
+        self.camera_tf_received = False
 
         # Camera intrinsics (filled from CameraInfo)
         self.img_width = None
@@ -96,6 +96,10 @@ class LaneDetectionNode(Node):
         # ==================== Performance Stats ====================
         self._frame_count = 0
         self._total_time = 0.0
+
+        # ==================== TF2 ====================
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         # ==================== CV Bridge ====================
         self.cv_bridge = CvBridge()
@@ -138,8 +142,7 @@ class LaneDetectionNode(Node):
         self.init_timer = self.create_timer(0.5, self._try_initialize)
 
         self.get_logger().info(
-            f'Lane Detection Node created — waiting for CameraInfo... '
-            f'(camera_height={self.camera_height}m, camera_pitch={self.camera_pitch}°)')
+            f'Lane Detection Node created — waiting for CameraInfo and camera TF...')
 
     # ------------------------------------------------------------------ #
     #  Initialization                                                     #
@@ -149,12 +152,42 @@ class LaneDetectionNode(Node):
         if self.initialized:
             return
 
-        if self.camera_info_received:
+        # Try to get camera TF
+        if not self.camera_tf_received:
+            self._try_get_camera_tf()
+
+        if self.camera_info_received and self.camera_tf_received:
             self._complete_initialization()
         else:
+            missing = []
+            if not self.camera_info_received:
+                missing.append('CameraInfo')
+            if not self.camera_tf_received:
+                missing.append('Camera TF')
             self.get_logger().info(
-                'Waiting for CameraInfo...',
+                f'Waiting for: {", ".join(missing)}...',
                 throttle_duration_sec=3.0)
+
+    def _try_get_camera_tf(self):
+        """Get camera height and pitch from the TF tree. Raises if unavailable."""
+        transform = self.tf_buffer.lookup_transform(
+            'ego_vehicle', self.camera_frame, rclpy.time.Time(),
+            timeout=rclpy.duration.Duration(seconds=2.0))
+
+        self.camera_height = transform.transform.translation.z
+        if self.camera_height is None or self.camera_height <= 0.0:
+            raise RuntimeError(
+                f'Invalid camera height from TF: {self.camera_height}')
+
+        # Extract pitch from quaternion
+        q = transform.transform.rotation
+        sinp = 2.0 * (q.w * q.y - q.z * q.x)
+        self.camera_pitch = np.degrees(np.arcsin(np.clip(sinp, -1.0, 1.0)))
+
+        self.camera_tf_received = True
+        self.get_logger().info(
+            f'Camera TF received: '
+            f'height={self.camera_height:.2f}m, pitch={self.camera_pitch:.1f}°')
 
     def _complete_initialization(self):
         self.lane_detector = LaneDetector(

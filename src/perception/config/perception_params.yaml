@@ -34,6 +34,4 @@
       bottom_left_x: 0.08
       bottom_right_x: 0.92
 
-    # Camera Extrinsics (used by lane detection / BEV transform)
-    camera_height: 1.2    # meters above ground
-    camera_pitch: 0.0     # degrees (positive = looking down)
+    # Camera Extrinsics (camera_height and camera_pitch come from TF at runtime)
