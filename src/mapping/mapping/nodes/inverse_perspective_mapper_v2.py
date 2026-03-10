@@ -26,11 +26,13 @@ Publishes:
 """
 
 import numpy as np
+import cv2
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image, CameraInfo
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Path
+from geometry_msgs.msg import PoseStamped
 import tf2_ros
 from tf2_ros import TransformException
 from scipy import ndimage
@@ -44,6 +46,11 @@ from mapping.utils.ipm_funcs import (
     reverse_project_grid, 
     apply_column_drop_skirt)
 from mapping.utils.geometry import mark_ego_footprint, mark_circular_clear_zone
+from mapping.core.boundary_extractor import (
+    extract_boundaries,
+    draw_boundary_overlay,
+    boundary_to_base_link,
+)
 # ================= CONFIGURATION =================
 ROAD_LABEL_ID = SEMANTIC_BY_NAME['road']           # 1 in CARLA
 ROAD_LINE_LABEL_ID = SEMANTIC_BY_NAME['road_line'] # 24 in CARLA
@@ -158,6 +165,15 @@ class InversePerspectiveMapperNode2(Node):
         # ==================== Publisher ====================
         self.costmap_pub = self.create_publisher(OccupancyGrid, costmap_topic, 1)
         self.debug_image_pub = self.create_publisher(Image, '/mapping/ipm_debug_image', 1)
+
+        # ---- Road boundary publishers (nav_msgs/Path) ----
+        self.left_boundary_pub = self.create_publisher(
+            Path, '/mapping/boundary/left', 1)
+        self.right_boundary_pub = self.create_publisher(
+            Path, '/mapping/boundary/right', 1)
+        self.boundary_debug_pub = self.create_publisher(
+            Image, '/mapping/boundary_debug_image', 1)
+
         self.get_logger().info('Inverse Perspective Mapper V2 (Reverse Projection) started')
         self.get_logger().info(f'  Semantic Image: {semantic_topic}')
         self.get_logger().info(f'  Camera Info: {camera_info_topic}')
@@ -317,7 +333,10 @@ class InversePerspectiveMapperNode2(Node):
         
         # 8. Publish OccupancyGrid
         self._publish_grid(grid=grid, stamp=msg.header.stamp)
-        
+
+        # 9. Road boundary extraction from drivable-area mask
+        self._extract_and_publish_boundaries(grid, msg.header.stamp)
+
         t_end = time.perf_counter()
         
         # Log stats
@@ -328,6 +347,75 @@ class InversePerspectiveMapperNode2(Node):
             f'IPM V2: {(t_end - t_start)*1000:.1f}ms | '
             f'Free: {n_free}, Occupied: {n_occupied}, Unknown: {n_unknown}', throttle_duration_sec=5.0
         )
+
+    # ─────────────── Road boundary helpers ───────────────────
+
+    def _extract_and_publish_boundaries(self, grid: np.ndarray, stamp):
+        """
+        Build a binary drivable mask from the occupancy grid, run the
+        sliding-window boundary extractor, and publish the left/right
+        boundaries as nav_msgs/Path plus a debug overlay image.
+        """
+        # Binary mask: 1 = drivable (FREE), 0 = everything else
+        binary_mask = np.uint8(grid == FREE)
+        # Observed mask: 1 = actually seen by camera/IPM projection
+        observed_mask = np.uint8(grid != UNKNOWN)
+
+        left, right, edge_img, l_diag, r_diag = extract_boundaries(binary_mask, observed_mask)
+
+        # Publish debug overlay
+        bev_vis = (binary_mask * 255).astype(np.uint8)
+        overlay = draw_boundary_overlay(bev_vis, left, right, l_diag, r_diag, edge_img)
+        debug_msg = self.cv_bridge.cv2_to_imgmsg(overlay, encoding='bgr8')
+        debug_msg.header.stamp = stamp
+        debug_msg.header.frame_id = self.base_frame
+        self.boundary_debug_pub.publish(debug_msg)
+
+        # Convert pixel boundaries → base_link coordinates and publish
+        min_path_points = 8
+        min_forward_span_m = 3.0
+        for result, pub, label in [
+            (left, self.left_boundary_pub, 'left'),
+            (right, self.right_boundary_pub, 'right'),
+        ]:
+            pts = boundary_to_base_link(
+                result,
+                grid_cells=self.grid_cells,
+                origin_x=self.origin_x,
+                origin_y=self.origin_y,
+                resolution=self.resolution,
+                sample_step=3,
+            )
+            if pts is None or len(pts) < min_path_points:
+                continue
+
+            forward_span = float(np.max(pts[:, 0]) - np.min(pts[:, 0]))
+            if forward_span < min_forward_span_m:
+                continue
+
+            self._publish_boundary_path(pts, stamp, pub)
+
+    def _publish_boundary_path(
+        self,
+        points: np.ndarray,
+        stamp,
+        publisher,
+    ):
+        """Publish an Nx2 array of (x, y) base_link points as a Path."""
+        path_msg = Path()
+        path_msg.header.stamp = stamp
+        path_msg.header.frame_id = self.base_frame
+
+        for x, y in points:
+            ps = PoseStamped()
+            ps.header = path_msg.header
+            ps.pose.position.x = float(x)
+            ps.pose.position.y = float(y)
+            ps.pose.position.z = 0.0
+            ps.pose.orientation.w = 1.0
+            path_msg.poses.append(ps)
+
+        publisher.publish(path_msg)
 
     def _apply_morphology(self, grid: np.ndarray) -> np.ndarray:
         """
