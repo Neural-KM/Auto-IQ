@@ -76,31 +76,12 @@ def generate_launch_description():
                 'segmentation_source': LaunchConfiguration('segmentation_source'),
                 'model_name': LaunchConfiguration('model_name'),
                 'device': LaunchConfiguration('device'),
+                'camera_info_topic': '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info',
+                'enable_debug_viz': False,
             }],
         ),
 
-        # ==================== Node 3: Lane Detection (polynomial fits) ====================
-        # Subscribes to the semantic segmentation output and fits lane polynomials.
-        # Publishes: /perception/lane_detection  (LaneDetection msg)
-        #            /perception/lanes           (MarkerArray for RViz)
-        #            /perception/debug/lane_bev  (debug BEV image)
-        Node(
-            package='perception',
-            executable='lane_detection_node',
-            name='lane_detection_node',
-            output='screen',
-            parameters=[
-                LaunchConfiguration('params_file'),
-                {
-                    'use_sim_time': True,
-                    'semantic_topic': '/perception/semantic_map/road_lane_extraction',
-                    'camera_info_topic': '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info',
-                    'enable_debug_viz': False,
-                },
-            ],
-        ),
-
-        # ==================== Node 4: Semantic PointCloud ====================
+        # ==================== Node 3: Semantic PointCloud ====================
         Node(
             package='perception',
             executable='semantic_pointcloud_node',

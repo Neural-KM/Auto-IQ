@@ -29,7 +29,6 @@ setup(
             'perception_node = perception.nodes.perception_node:main',
             'semantic_segmentation_node = perception.nodes.semantic_segmentation_node:main',
             'semantic_pointcloud_node = perception.nodes.semantic_pointcloud_node:main',
-            'lane_detection_node = perception.nodes.lane_detection_node:main',
             'save_camera_snapshot = perception.tools.save_camera_snapshot:main',
         ],
     },
