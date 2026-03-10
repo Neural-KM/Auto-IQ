@@ -482,9 +482,9 @@ def main():
         --folder          Path to folder of semantic segmentation images
 
     Camera Parameters:
-        Camera params (fov, pitch, height) are received from camera_info
-        topic and tf lookup in the ROS pipeline. The CLI does not support
-        setting these values — it is for image output testing only.
+        --fov             Camera horizontal field of view in degrees (default: 90.0)
+        --pitch           Camera pitch angle in degrees (default: 0.0)
+        --camera-height   Camera height above ground in meters (default: 1.5)
 
     Output:
         --output          Output directory for debug images (default: data/lane_detection/)
@@ -518,6 +518,14 @@ Examples:
                         help=f'Output directory (default: {CONFIG.output.default_dir})')
     parser.add_argument('--show', action='store_true', help='Display results in OpenCV window')
 
+    # Camera parameters (defaults from CARLA bridge objects.json front camera)
+    parser.add_argument('--fov', type=float, default=90.0,
+                        help='Camera horizontal field of view in degrees (default: 90.0)')
+    parser.add_argument('--pitch', type=float, default=0.0,
+                        help='Camera pitch angle in degrees (default: 0.0)')
+    parser.add_argument('--camera-height', type=float, default=1.5, dest='camera_height',
+                        help='Camera height above ground in meters (default: 1.5)')
+
     args = parser.parse_args()
 
     output_dir = args.output or str(CONFIG.output.default_dir)
@@ -544,11 +552,16 @@ Examples:
 
     # ---- Create detector ----
     print(f'Image:  {img_w}x{img_h}')
-    print('Note: Camera params not set (CLI mode). BEV transform will use None values.')
+    print(f'Camera: fov={args.fov}°, pitch={args.pitch}°, height={args.camera_height}m')
 
     detector = LaneDetector(
         image_width=img_w,
         image_height=img_h,
+    )
+    detector.set_camera_params(
+        fov=args.fov,
+        pitch=args.pitch,
+        camera_height=args.camera_height,
     )
 
     # ---- Process ----

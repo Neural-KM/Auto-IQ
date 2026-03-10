@@ -469,9 +469,9 @@ def process_single_image(extractor: LaneExtractor, args, segmentation_map: np.nd
         road_only, ipm_road_image, ipm_lane_mask, ipm_road_mask, ipm_size = extractor.extract_lanes_ipm(
             image_rgb,
             road_mask,
-            fov=None,
-            pitch=None,
-            camera_height=None,
+            fov=args.fov,
+            pitch=args.pitch,
+            camera_height=args.camera_height,
             ipm_x_range=ipm_x_range,
             ipm_y_range=ipm_y_range,
             pixels_per_meter=args.pixels_per_meter
@@ -870,9 +870,15 @@ Examples:
     # Inverse Perspective Mapping (IPM) Options
     # =========================================================================
     parser.add_argument('--ipm', action='store_true', default=False, dest='ipm',
-                        help='Enable IPM mode (requires camera params from node, not available in CLI)')
+                        help='Enable IPM mode (uses --fov, --pitch, --camera-height)')
     parser.add_argument('--no-ipm', action='store_false', dest='ipm',
                         help='Disable IPM mode (default in CLI)')
+    parser.add_argument('--fov', type=float, default=90.0,
+                        help='Camera horizontal field of view in degrees (default: 90.0, from objects.json)')
+    parser.add_argument('--pitch', type=float, default=0.0,
+                        help='Camera pitch angle in degrees (default: 0.0, from objects.json)')
+    parser.add_argument('--camera-height', type=float, default=1.5, dest='camera_height',
+                        help='Camera height above ground in meters (default: 1.5, from objects.json)')
     parser.add_argument('--ipm-x-min', type=float, default=CONFIG.ipm.x_range[0], dest='ipm_x_min',
                         help=f'IPM near boundary in meters (default: {CONFIG.ipm.x_range[0]})')
     parser.add_argument('--ipm-x-max', type=float, default=CONFIG.ipm.x_range[1], dest='ipm_x_max',
@@ -889,10 +895,6 @@ Examples:
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose/debug logging')
     parser.add_argument('--quiet', '-q', action='store_true', help='Suppress info messages, only show warnings/errors')
     args = parser.parse_args()
-
-    # IPM mode in CLI does not support camera params — they come from the node.
-    # CLI IPM will pass None for fov/pitch/camera_height, which extract_lanes_ipm
-    # will reject with a clear error.
 
     # Handle --all flag
     if args.all:
