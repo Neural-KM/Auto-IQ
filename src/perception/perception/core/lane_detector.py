@@ -100,8 +100,14 @@ class LaneDetector:
         x_span = self.bev_x_range[1] - self.bev_x_range[0]
         self.bev_height = int(x_span * self.pixels_per_meter)
         
-        # Temporal smoothing factor
+        # Sliding window parameters
+        self.n_windows = 9
+        self.sw_margin = 50
+        self.sw_min_pixels = 30
+        
+        # Temporal smoothing factors
         self.smoothing = 0.7
+        self.lane_width_smoothing = 0.95
         
         # State tracking
         self.left_lane_x = None
@@ -188,10 +194,10 @@ class LaneDetector:
         right_base = np.argmax(histogram[midpoint:]) + midpoint if np.max(histogram[midpoint:]) > 100 else None
         
         # Sliding window params
-        n_windows = 9
+        n_windows = self.n_windows
         window_height = self.bev_height // n_windows
-        margin = 50
-        min_pixels = 30
+        margin = self.sw_margin
+        min_pixels = self.sw_min_pixels
         
         # Get nonzero pixels
         nonzero = bev_lane_mask.nonzero()
@@ -341,7 +347,8 @@ class LaneDetector:
             if self.avg_lane_width is None:
                 self.avg_lane_width = lane_width_bev
             else:
-                self.avg_lane_width = 0.95 * self.avg_lane_width + 0.05 * lane_width_bev
+                self.avg_lane_width = (self.lane_width_smoothing * self.avg_lane_width
+                                       + (1 - self.lane_width_smoothing) * lane_width_bev)
                 
             confidence += 0.2
         elif self.avg_lane_width is not None:
