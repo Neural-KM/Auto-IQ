@@ -296,11 +296,6 @@ class LaneDetectionNode(Node):
         if result.right_fit is not None:
             det_msg.right_poly_coeffs = result.right_fit.tolist()
 
-        # Center polynomial (average of left and right)
-        if result.left_fit is not None and result.right_fit is not None:
-            center_fit = (result.left_fit + result.right_fit) / 2.0
-            det_msg.center_poly_coeffs = center_fit.tolist()
-
         # Image-space lane positions
         det_msg.lane_center = result.lane_center
         det_msg.left_lane_x = result.left_lane if result.left_lane is not None else -1

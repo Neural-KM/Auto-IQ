@@ -13,8 +13,6 @@ float32 confidence            # 0.0 - 1.0
 float64[] left_poly_coeffs
 # Right lane polynomial coefficients [a, b, c] (empty if not detected)
 float64[] right_poly_coeffs
-# Center lane polynomial coefficients [a, b, c] (derived from left+right)
-float64[] center_poly_coeffs
 
 # Lane geometry in image pixels (original image space)
 int32 lane_center             # Lane center x-pixel
