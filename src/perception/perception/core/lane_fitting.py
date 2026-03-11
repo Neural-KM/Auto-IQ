@@ -196,8 +196,6 @@ class LaneDetector:
         # Sliding window params
         n_windows = self.n_windows
         window_height = self.bev_height // n_windows
-        margin = self.sw_margin
-        min_pixels = self.sw_min_pixels
         
         # Get nonzero pixels
         nonzero = bev_lane_mask.nonzero()
@@ -216,8 +214,8 @@ class LaneDetector:
             
             # Left window
             if left_current is not None:
-                win_x_low = max(0, left_current - margin)
-                win_x_high = min(self.bev_width, left_current + margin)
+                win_x_low = max(0, left_current - self.sw_margin)
+                win_x_high = min(self.bev_width, left_current + self.sw_margin)
                 
                 cv2.rectangle(vis_img, (win_x_low, win_y_low), 
                              (win_x_high, win_y_high), (0, 255, 0), 2)
@@ -226,13 +224,13 @@ class LaneDetector:
                             (nonzero_x >= win_x_low) & (nonzero_x < win_x_high)).nonzero()[0]
                 left_lane_inds.append(good_inds)
                 
-                if len(good_inds) > min_pixels:
+                if len(good_inds) > self.sw_min_pixels:
                     left_current = int(np.mean(nonzero_x[good_inds]))
             
             # Right window
             if right_current is not None:
-                win_x_low = max(0, right_current - margin)
-                win_x_high = min(self.bev_width, right_current + margin)
+                win_x_low = max(0, right_current - self.sw_margin)
+                win_x_high = min(self.bev_width, right_current + self.sw_margin)
                 
                 cv2.rectangle(vis_img, (win_x_low, win_y_low),
                              (win_x_high, win_y_high), (0, 255, 0), 2)
@@ -241,7 +239,7 @@ class LaneDetector:
                             (nonzero_x >= win_x_low) & (nonzero_x < win_x_high)).nonzero()[0]
                 right_lane_inds.append(good_inds)
                 
-                if len(good_inds) > min_pixels:
+                if len(good_inds) > self.sw_min_pixels:
                     right_current = int(np.mean(nonzero_x[good_inds]))
         
         # Collect lane pixel arrays

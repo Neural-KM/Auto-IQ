@@ -381,7 +381,7 @@ class SemanticSegmentationNode(Node):
         lane_map = segmentation  # ground_truth already has road_line class
 
         if self.enable_road_lane_extraction:
-            extracted_map, extraction_ok = self._extract_road(segmentation)
+            extracted_map, extraction_ok = self._extract_road_lane_markings(segmentation)
 
             # Publish road lane extraction mono8
             self._publish_image(extracted_map, header, 'mono8', self.road_lane_extraction_pub)
@@ -409,9 +409,9 @@ class SemanticSegmentationNode(Node):
 
         # ---- Lane polynomial fitting (runs when LaneDetector is ready) ----
         if self._lane_detector_initialized:
-            self._run_lane_detection(lane_map, header)
+            self._run_lane_fitting(lane_map, header)
 
-    def _extract_road(self, segmentation: np.ndarray):
+    def _extract_road_lane_markings(self, segmentation: np.ndarray):
         """Extract road lane markings into segmentation via LaneExtractor.
         
         Returns:
@@ -444,7 +444,7 @@ class SemanticSegmentationNode(Node):
     #  Lane Detection (polynomial fitting)                                #
     # ------------------------------------------------------------------ #
 
-    def _run_lane_detection(self, semantic_img: np.ndarray, header):
+    def _run_lane_fitting(self, semantic_img: np.ndarray, header):
         """Run BEV + sliding window + polynomial fit and publish results."""
         result = self.lane_detector.detect(semantic_img)
 
