@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Road Extraction (Segmentation Model Agnostic)
+Lane Extraction (Segmentation Model Agnostic)
 ==============================================
 
-This module provides the RoadExtractor class for extracting road masks and lane 
+This module provides the LaneExtractor class for extracting road masks and lane 
 markings from images. It is segmentation model agnostic - it receives pre-computed
 segmentation maps or road masks from any upstream source.
 
-RoadExtractor Class:
+LaneExtractor Class:
     Parameters:
         road_grayscale_id (int): Pixel value ID for road in the grayscale segmentation map (default: 90) we are converting the rgb id of the object to grayscale to get this value
     Core Methods:
@@ -20,13 +20,12 @@ RoadExtractor Class:
 Configuration:
     RoadExtractionConfig dataclass provides default settings for:
         - IPMConfig: x_range, y_range, pixels_per_meter
-        - CameraConfig: fov, pitch, height
-        - OutputConfig: default_dir, sensor_config path
+        - OutputConfig: default_dir
 
 Example:
-    from perception.core.road_extraction import RoadExtractor
+    from perception.core.lane_extraction import LaneExtractor
     
-    extractor = RoadExtractor(road_grayscale_id=90)
+    extractor = LaneExtractor(road_grayscale_id=90)
     
     # Option 1: Provide segmentation map (class IDs per pixel)
     road_mask = extractor.extract_road_mask(segmentation_map)
@@ -40,7 +39,6 @@ Example:
 import numpy as np
 import cv2
 import argparse
-import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Tuple
@@ -62,25 +60,15 @@ class IPMConfig:
 
 
 @dataclass(frozen=True)
-class CameraConfig:
-    """Camera intrinsic/extrinsic parameters."""
-    fov: float = 110.0          # horizontal field of view in degrees
-    pitch: float = 0.0          # camera pitch in degrees
-    height: float = 1.2         # camera height above ground in meters
-
-
-@dataclass(frozen=True)
 class OutputConfig:
     """Output paths configuration."""
     default_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parents[4] / 'data' / 'rosbag_images_15jan' / 'inference')
-    sensor_config: Path = field(default_factory=lambda: Path(__file__).resolve().parents[4] / 'config' / 'carla_sensors.yaml')
 
 @dataclass(frozen=True)
 class RoadExtractionConfig:
     """Main configuration for road extraction module."""
     road_grayscale_id: int = 90          # Pixel intensity value for road (e.g. 90 for Cityscapes)
     ipm: IPMConfig = field(default_factory=IPMConfig)
-    camera: CameraConfig = field(default_factory=CameraConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
 
@@ -88,7 +76,7 @@ class RoadExtractionConfig:
 CONFIG = RoadExtractionConfig()
 
 
-class RoadExtractor:
+class LaneExtractor:
     """
     Extracts road mask from images using pre-computed segmentation.
     
@@ -98,7 +86,7 @@ class RoadExtractor:
     
     def __init__(self, road_grayscale_id: int = 90):
         """
-        Initialize RoadExtractor.
+        Initialize LaneExtractor.
         
         Args:
             road_grayscale_id: Pixel value corresponding to road in the segmentation map.
@@ -231,9 +219,9 @@ class RoadExtractor:
         Args:
             image: RGB image (H, W, 3)
             road_mask: Binary road mask (H, W) where 255 = road, 0 = non-road
-            fov: Camera horizontal field of view in degrees. Uses CONFIG.camera.fov if None.
-            pitch: Camera pitch angle in degrees. Uses CONFIG.camera.pitch if None.
-            camera_height: Camera height above ground in meters. Uses CONFIG.camera.height if None.
+            fov: Camera horizontal field of view in degrees (required).
+            pitch: Camera pitch angle in degrees (required).
+            camera_height: Camera height above ground in meters (required).
             ipm_x_range: (x_min, x_max) forward range in meters. Uses CONFIG.ipm.x_range if None.
             ipm_y_range: (y_min, y_max) lateral range in meters (left/right). Uses CONFIG.ipm.y_range if None.
             pixels_per_meter: Resolution - pixels per meter. Uses CONFIG.ipm.pixels_per_meter if None.
@@ -244,11 +232,15 @@ class RoadExtractor:
             ipm_lane_mask: Lane markings mask in IPM space
             ipm_road_mask: Road mask in IPM space
             ipm_size: (width, height) of the IPM output
+        
+        Raises:
+            ValueError: If fov, pitch, or camera_height is None.
         """
-        # Use CONFIG defaults if not provided
-        fov = fov if fov is not None else CONFIG.camera.fov
-        pitch = pitch if pitch is not None else CONFIG.camera.pitch
-        camera_height = camera_height if camera_height is not None else CONFIG.camera.height
+        # Camera extrinsics must be provided by the caller
+        if fov is None or pitch is None or camera_height is None:
+            raise ValueError(
+                'fov, pitch, and camera_height are required. '
+                'These must come from camera_info topic / tf lookup via the node.')
         
         height, width = image.shape[:2]
         
@@ -390,11 +382,11 @@ class RoadExtractor:
         return semantic_map, lane_mask
 
 
-def process_single_image(extractor: RoadExtractor, args, segmentation_map: np.ndarray = None):
+def process_single_image(extractor: LaneExtractor, args, segmentation_map: np.ndarray = None):
     """Process a single image.
     
     Args:
-        extractor: RoadExtractor instance
+        extractor: LaneExtractor instance
         args: Command line arguments
         segmentation_map: Pre-computed segmentation map (H, W) with class IDs.
                          If None, a dummy road mask will be created for demonstration.
@@ -657,7 +649,7 @@ def process_single_image(extractor: RoadExtractor, args, segmentation_map: np.nd
     return 0
 
 
-def process_folder(extractor: RoadExtractor, args):
+def process_folder(extractor: LaneExtractor, args):
     """Process all images in a folder.
     
     Note: For batch processing, segmentation maps must be provided in a parallel folder
@@ -810,10 +802,9 @@ def main():
 
     Inverse Perspective Mapping (IPM) Mode (DEFAULT):
         IPM mode is enabled by default for better lane detection accuracy.
+        Camera params (fov, pitch, height) are not configurable via CLI —
+        they come from camera_info topic and tf lookup in the ROS pipeline.
         --no-ipm              To run it without taking IPM
-        --fov                 Camera FOV in degrees (default: 110)
-        --pitch               Camera pitch in degrees (default: 0)
-        --camera-height       Camera height in meters (default: 1.2)
         --pixels-per-meter    IPM resolution (default: 30)
         --ipm-x-min/max       IPM lateral range in meters
         --ipm-y-min/max       IPM forward range in meters
@@ -830,9 +821,6 @@ Examples:
     
     # Single image with all outputs
     python -m perception.core.road_extraction --image input.jpg --seg-map-path seg_map.png --all
-    
-    # IPM with custom camera parameters
-    python -m perception.core.road_extraction --image input.jpg --seg-map-path seg_map.png --fov 90 --pitch 5 --camera-height 1.5 --all
     
     # To run it without taking IPM
     python -m perception.core.road_extraction --image input.jpg --seg-map-path seg_map.png --no-ipm --save-lanes --save-lane-overlay
@@ -865,7 +853,6 @@ Examples:
     
     # Output options
     parser.add_argument('--output', type=str, help='Output directory')
-    parser.add_argument('--config', type=str, help='Path to sensor config yaml')
     parser.add_argument('--colored', action='store_true', help='Save colored road visualization')
     parser.add_argument('--overlay', action='store_true', help='Save overlay on original image')
     parser.add_argument('--road-only', action='store_true', dest='road_only', 
@@ -882,16 +869,16 @@ Examples:
     # =========================================================================
     # Inverse Perspective Mapping (IPM) Options
     # =========================================================================
-    parser.add_argument('--ipm', action='store_true', default=True, dest='ipm',
-                        help='Enable Inverse Perspective Mapping mode (default: enabled)')
+    parser.add_argument('--ipm', action='store_true', default=False, dest='ipm',
+                        help='Enable IPM mode (uses --fov, --pitch, --camera-height)')
     parser.add_argument('--no-ipm', action='store_false', dest='ipm',
-                        help='To run it without taking IPM')
-    parser.add_argument('--fov', type=float, default=None,
-                        help='Camera horizontal field of view in degrees (default: 110 or from config)')
-    parser.add_argument('--pitch', type=float, default=None,
-                        help='Camera pitch angle in degrees (default: 0 or from config)')
-    parser.add_argument('--camera-height', type=float, default=None, dest='camera_height',
-                        help='Camera height above ground in meters (default: 1.2 or from config)')
+                        help='Disable IPM mode (default in CLI)')
+    parser.add_argument('--fov', type=float, default=90.0,
+                        help='Camera horizontal field of view in degrees (default: 90.0, from objects.json)')
+    parser.add_argument('--pitch', type=float, default=0.0,
+                        help='Camera pitch angle in degrees (default: 0.0, from objects.json)')
+    parser.add_argument('--camera-height', type=float, default=1.5, dest='camera_height',
+                        help='Camera height above ground in meters (default: 1.5, from objects.json)')
     parser.add_argument('--ipm-x-min', type=float, default=CONFIG.ipm.x_range[0], dest='ipm_x_min',
                         help=f'IPM near boundary in meters (default: {CONFIG.ipm.x_range[0]})')
     parser.add_argument('--ipm-x-max', type=float, default=CONFIG.ipm.x_range[1], dest='ipm_x_max',
@@ -908,36 +895,6 @@ Examples:
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose/debug logging')
     parser.add_argument('--quiet', '-q', action='store_true', help='Suppress info messages, only show warnings/errors')
     args = parser.parse_args()
-    
-    # Load defaults from dataclass config, optionally override from carla_sensors.yaml
-    config_fov = CONFIG.camera.fov
-    config_pitch = CONFIG.camera.pitch
-    config_height = CONFIG.camera.height
-    
-    config_path = Path(args.config) if args.config else CONFIG.output.sensor_config
-    if config_path.exists():
-        try:
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f)
-                if 'cameras' in config and 'front_rgb' in config['cameras']:
-                    cam_cfg = config['cameras']['front_rgb']
-                    if 'attributes' in cam_cfg and 'fov' in cam_cfg['attributes']:
-                        config_fov = float(cam_cfg['attributes']['fov'])
-                    if 'rotation' in cam_cfg and len(cam_cfg['rotation']) >= 1:
-                        config_pitch = float(cam_cfg['rotation'][0])
-                    if 'location' in cam_cfg and len(cam_cfg['location']) >= 3:
-                        config_height = float(cam_cfg['location'][2])
-                    print(f"Loaded camera config from {config_path}: FOV={config_fov}, Pitch={config_pitch}, Height={config_height}")
-        except Exception as e:
-            print(f"Warning: Failed to load config from {config_path}: {e}")
-
-    # Set values if not provided by CLI
-    if args.fov is None:
-        args.fov = config_fov
-    if args.pitch is None:
-        args.pitch = config_pitch
-    if args.camera_height is None:
-        args.camera_height = config_height
 
     # Handle --all flag
     if args.all:
@@ -956,8 +913,8 @@ Examples:
         args.overlay = True
     
     # Initialize extractor (model-agnostic)
-    print(f'Initializing RoadExtractor (road_grayscale_id={args.road_grayscale_id})...')
-    extractor = RoadExtractor(road_grayscale_id=args.road_grayscale_id)
+    print(f'Initializing LaneExtractor (road_grayscale_id={args.road_grayscale_id})...')
+    extractor = LaneExtractor(road_grayscale_id=args.road_grayscale_id)
     
     # Process
     if args.image:
