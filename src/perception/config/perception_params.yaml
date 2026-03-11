@@ -17,9 +17,6 @@
     conf_threshold: 0.5
     obstacle_radius: 50.0
     
-    # Lane Detection
-    enable_lane_detection: false
-    
     # Debug
     enable_debug_viz: false
     
@@ -36,3 +33,5 @@
       bottom_y: 1.0
       bottom_left_x: 0.08
       bottom_right_x: 0.92
+
+    # Camera Extrinsics (camera_height and camera_pitch come from TF at runtime)
