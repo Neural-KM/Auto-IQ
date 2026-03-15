@@ -13,6 +13,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
+        ('share/' + package_name + '/config', glob('config/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -29,6 +30,7 @@ setup(
         'console_scripts': [
             'planning_node = planning.nodes.planning_node:main',
             'planning_sampling_based_node = planning.nodes.planning_sampling_based_node:main',
+            'lane_follower_node = planning.nodes.lane_follower_node:main',
         ],
     },
 )

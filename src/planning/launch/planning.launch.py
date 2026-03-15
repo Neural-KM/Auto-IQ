@@ -15,6 +15,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_ground_truth', default_value='true'),
         DeclareLaunchArgument('planner_executable', default_value='planning_sampling_based_node'),
         DeclareLaunchArgument('costmap_topic', default_value='/mapping/ipm_costmap'),
+
         Node(
             package='planning',
             executable=LaunchConfiguration('planner_executable'),
