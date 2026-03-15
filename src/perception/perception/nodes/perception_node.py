@@ -3,7 +3,7 @@
 Perception Node
 ===============
 
-ROS2 node for perception (Object Detection + Lane Detection).
+ROS2 node for perception (Object Detection).
 Uses the Perception class directly (same as original PerceptionManager).
 
 Initialization Requirements (must all be received before processing starts):
@@ -15,11 +15,7 @@ Initialization Requirements (must all be received before processing starts):
 Publishes:
 - /perception/obstacles (ObstacleArray) - detected obstacles from YOLO + LiDAR
 - /perception/ground_truth/obstacles (ObstacleArray) - ground truth from CARLA
-- /perception/lanes (MarkerArray) - lane lines (visualization-only, polynomial fits)
 - /perception/debug/* (debug images)
-
-Note: Lane detection publishes MarkerArray directly because lane polynomial fits
-require coordinate transformation that's tightly coupled to the detection logic.
 """
 
 import numpy as np
@@ -30,10 +26,6 @@ import struct
 
 
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2
-from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import ColorRGBA
-from geometry_msgs.msg import Point
-from builtin_interfaces.msg import Time
 
 from autoiq_msgs.msg import ObstacleArray
 
@@ -42,8 +34,6 @@ import tf2_ros
 from tf2_ros import TransformException
 
 from perception.core.perception import Perception
-from perception.core.lane_detector import LaneDetector
-from perception.data_classes.lane import LaneDetection
 from perception.core.ground_truth_perception import GroundTruthPerception
 
 import carla
@@ -69,7 +59,6 @@ class PerceptionNode(Node):
         self.conf_threshold = self.declare_parameter('conf_threshold', 0.5).value
         self.obstacle_radius = self.declare_parameter('obstacle_radius', 50.0).value
         self.enable_object_detection = self.declare_parameter('enable_object_detection', True).value
-        self.enable_lane_detection = self.declare_parameter('enable_lane_detection', False).value
         self.enable_debug_viz = self.declare_parameter('enable_debug_viz', False).value
         self.perception_method = self.declare_parameter('perception_method', 0).value
         
@@ -152,7 +141,6 @@ class PerceptionNode(Node):
         
         # ==================== Perception Components (initialized later) ====================
         self.perception = None
-        self.lane_detector = None
         
         # ==================== QoS ====================
         sensor_qos = QoSProfile(
@@ -167,12 +155,6 @@ class PerceptionNode(Node):
         self.camera_info_sub = self.create_subscription(
             CameraInfo, '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info',
             self.camera_info_callback, sensor_qos)
-        
-        # Semantic camera for lane detection
-        if self.enable_lane_detection:
-            self.semantic_sub = self.create_subscription(
-                Image, '/carla/ego_vehicle/ground_truth/camera/semantic/front/image',
-                self.semantic_callback, sensor_qos)
         
         # Real perception mode (YOLO + LiDAR)
         if self.enable_object_detection:
@@ -193,11 +175,9 @@ class PerceptionNode(Node):
         
         # Detected obstacles from YOLO + LiDAR (ObstacleArray for planning)
         self.obstacles_pub = self.create_publisher(ObstacleArray, '/perception/obstacles', 10)
-        self.lanes_pub = self.create_publisher(MarkerArray, '/perception/lanes', 10)
         
         if self.enable_debug_viz:
             self.debug_rgb_pub = self.create_publisher(Image, '/perception/debug/rgb', 10)
-            self.debug_bev_pub = self.create_publisher(Image, '/perception/debug/bev', 10)
         
         # ==================== Ground Truth Timer ====================
         # Always publish ground truth at a fixed rate
@@ -307,18 +287,6 @@ class PerceptionNode(Node):
             )
             self.get_logger().info(f'Perception initialized: {self.model_path}, method={self.perception_method}')
         
-        # Initialize Lane Detector
-        if self.enable_lane_detection:
-            self.lane_detector = LaneDetector(
-                image_width=self.img_width,
-                image_height=self.img_height,
-                camera_fov=self.fov_deg,
-                camera_pitch=self.camera_pitch,
-                camera_height=self.camera_height
-            )
-            self.get_logger().info(
-                f'Lane detector initialized: {self.img_width}x{self.img_height}, FOV={self.fov_deg:.1f}°')
-        
         # Cancel init timer
         self.init_timer.cancel()
         
@@ -406,23 +374,6 @@ class PerceptionNode(Node):
         
         self.latest_lidar = points
     
-    def semantic_callback(self, msg: Image):
-        """Process semantic image for lane detection."""
-        if not self.initialized or self.lane_detector is None:
-            return
-        
-        try:
-            semantic_img = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
-        except Exception as e:
-            self.get_logger().warn(f'cv_bridge conversion failed: {e}')
-            return
-        
-        result = self.lane_detector.detect(semantic_img)
-        self._publish_lane_markers(result)
-        
-        if self.enable_debug_viz:
-            self._publish_debug_bev()
-    
     # ==================== Publishers ====================
     
     def _publish_obstacles(self, obstacles: list):
@@ -438,60 +389,6 @@ class PerceptionNode(Node):
         
         self.obstacles_pub.publish(obstacle_array)
     
-    def _publish_lane_markers(self, result: LaneDetection):
-        """Publish lane markers."""
-        marker_array = MarkerArray()
-        
-        # Use timestamp 0 to tell RViz to use the latest available TF
-        timestamp = Time(sec=0, nanosec=0)
-        
-        clear_marker = Marker()
-        clear_marker.header.frame_id = 'ego_vehicle'
-        clear_marker.header.stamp = timestamp
-        clear_marker.ns = 'lanes'
-        clear_marker.id = 0
-        clear_marker.action = Marker.DELETEALL
-        marker_array.markers.append(clear_marker)
-        
-        if not result.valid:
-            self.lanes_pub.publish(marker_array)
-            return
-        
-        bev_params = result.bev_params
-        
-        if result.left_fit is not None:
-            left_marker = self._create_lane_marker(
-                result.left_fit, bev_params, 1, ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.8), timestamp)
-            marker_array.markers.append(left_marker)
-        
-        if result.right_fit is not None:
-            right_marker = self._create_lane_marker(
-                result.right_fit, bev_params, 2, ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.8), timestamp)
-            marker_array.markers.append(right_marker)
-        
-        self.lanes_pub.publish(marker_array)
-    
-    def _create_lane_marker(self, fit, bev_params, marker_id, color, timestamp):
-        """Create a lane line marker."""
-        marker = Marker()
-        marker.header.frame_id = 'ego_vehicle'
-        marker.header.stamp = timestamp
-        marker.ns = 'lanes'
-        marker.id = marker_id
-        marker.type = Marker.LINE_STRIP
-        marker.action = Marker.ADD
-        marker.scale.x = 0.2
-        marker.color = color
-        
-        for y_bev in np.linspace(0, bev_params['height'] - 1, 20):
-            x_bev = np.polyval(fit, y_bev)
-            x_world = bev_params['y_range'][1] - (y_bev / bev_params['height']) * (bev_params['y_range'][1] - bev_params['y_range'][0])
-            y_world = bev_params['x_range'][0] + (x_bev / bev_params['width']) * (bev_params['x_range'][1] - bev_params['x_range'][0])
-            pt = Point(x=float(x_world), y=float(-y_world), z=0.0)
-            marker.points.append(pt)
-        
-        return marker
-    
     # ==================== Debug Visualization ====================
     
     def _publish_debug_rgb(self, msg: Image, annotated: np.ndarray):
@@ -499,18 +396,6 @@ class PerceptionNode(Node):
         out_msg = self.cv_bridge.cv2_to_imgmsg(annotated, encoding='rgb8')
         out_msg.header = msg.header
         self.debug_rgb_pub.publish(out_msg)
-    
-    def _publish_debug_bev(self):
-        """Publish debug BEV image."""
-        if self.lane_detector is None:
-            return
-        debug_images = self.lane_detector.get_debug_images()
-        lane_fit_img = debug_images.get('lane_fit')
-        if lane_fit_img is not None:
-            out_msg = self.cv_bridge.cv2_to_imgmsg(lane_fit_img, encoding='bgr8')
-            out_msg.header.stamp = self.get_clock().now().to_msg()
-            out_msg.header.frame_id = 'ego_vehicle'
-            self.debug_bev_pub.publish(out_msg)
     
     # ==================== Ground Truth Detection ====================
     

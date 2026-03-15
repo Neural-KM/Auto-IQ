@@ -9,6 +9,7 @@ def convert_to_ipm(
     bev_x_range: Tuple[float, float],
     bev_y_range: Tuple[float, float],
     pixels_per_meter: float,
+    interpolation: int = cv2.INTER_LINEAR,
 ) -> Tuple[np.ndarray, Tuple[int, int], np.ndarray]:
     """
     Convert an image to Bird's Eye View using camera intrinsics and extrinsics.
@@ -123,7 +124,7 @@ def convert_to_ipm(
     M = cv2.getPerspectiveTransform(src_pts, dst_pts)
     
     # Apply transform to image
-    bev_img = cv2.warpPerspective(image, M, (bev_width, bev_height), flags=cv2.INTER_LINEAR)
+    bev_img = cv2.warpPerspective(image, M, (bev_width, bev_height), flags=interpolation)
     
     bev_size = (bev_width, bev_height)
     
