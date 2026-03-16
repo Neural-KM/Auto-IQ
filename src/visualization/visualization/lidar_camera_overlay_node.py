@@ -5,7 +5,7 @@ LiDAR-Camera Overlay Node
 
 Projects AT128 LiDAR points onto the front RGB camera image to visualize
 exactly where the LiDAR beams hit in camera view. Points are colored by
-distance (near=red, far=blue).
+distance using an OpenCV JET colormap (near=blue, far=red).
 
 This gives an intuitive understanding of the LiDAR's vertical and horizontal
 FOV relative to what the camera sees.
@@ -30,6 +30,11 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 from sensor_msgs.msg import PointCloud2, Image
 from cv_bridge import CvBridge
 from ament_index_python.packages import get_package_share_directory
+
+# Minimum forward distance (in meters) for considering LiDAR points "in front"
+# of the camera for projection. This helps avoid instability and noise from
+# points extremely close to the camera (near z ≈ 0 in camera frame).
+MIN_FORWARD_DISTANCE = 0.5
 
 
 class LidarCameraOverlayNode(Node):
@@ -57,6 +62,11 @@ class LidarCameraOverlayNode(Node):
         # Visualization
         self.declare_parameter('point_size', 2)
         self.declare_parameter('max_range', float(lidar_cfg.get('range', 200.0)))
+        
+        # Topics
+        self.declare_parameter('camera_topic', '/carla/ego_vehicle/sensor/camera/rgb/front/image')
+        self.declare_parameter('lidar_topic', '/carla/ego_vehicle/sensor/lidar/at128_front/point_cloud')
+        self.declare_parameter('output_topic', '/visualization/lidar_camera_overlay')
 
         self.point_size = self.get_parameter('point_size').value
         self.max_range = self.get_parameter('max_range').value
@@ -109,20 +119,20 @@ class LidarCameraOverlayNode(Node):
         # ---- Subscribers ----
         self.image_sub = self.create_subscription(
             Image,
-            '/carla/ego_vehicle/sensor/camera/rgb/front/image',
+            self.get_parameter('camera_topic').value,
             self.image_callback,
             sensor_qos
         )
         self.cloud_sub = self.create_subscription(
             PointCloud2,
-            '/carla/ego_vehicle/sensor/lidar/at128_front/point_cloud',
+            self.get_parameter('lidar_topic').value,
             self.cloud_callback,
             sensor_qos
         )
 
         # ---- Publisher ----
         self.overlay_pub = self.create_publisher(
-            Image, '/visualization/lidar_camera_overlay', 10)
+            Image, self.get_parameter('output_topic').value, 10)
 
         # ---- Performance stats ----
         self._frame_count = 0
@@ -136,8 +146,14 @@ class LidarCameraOverlayNode(Node):
         self._publish_overlay()
 
     def cloud_callback(self, msg: PointCloud2):
-        """Store latest point cloud."""
+        """Store latest point cloud and cached parsed points."""
         self.latest_cloud = msg
+        
+        # Parse once per new cloud and cache the result to avoid
+        # reparsing on every incoming image frame.
+        self.latest_points = self._parse_pointcloud2(msg)
+        
+        self._publish_overlay()
 
     def _publish_overlay(self):
         """Project LiDAR points onto image and publish."""
@@ -150,7 +166,7 @@ class LidarCameraOverlayNode(Node):
         cv_img = self.cv_bridge.imgmsg_to_cv2(self.latest_image, desired_encoding='bgr8')
 
         # ---- Parse point cloud ----
-        points = self._parse_pointcloud2(self.latest_cloud)
+        points = getattr(self, "latest_points", None)
         if points is None or len(points) == 0:
             # Publish image without overlay
             out_msg = self.cv_bridge.cv2_to_imgmsg(cv_img, encoding='bgr8')
@@ -173,8 +189,8 @@ class LidarCameraOverlayNode(Node):
         y_cam = y_lidar + self.t_cam_lidar[1]
         z_cam = z_lidar + self.t_cam_lidar[2]
 
-        # ---- Only keep points in front of camera (x > 0) ----
-        front_mask = x_cam > 0.5
+        # ---- Only keep points in front of camera (x > MIN_FORWARD_DISTANCE) ----
+        front_mask = x_cam > MIN_FORWARD_DISTANCE
         x_cam = x_cam[front_mask]
         y_cam = y_cam[front_mask]
         z_cam = z_cam[front_mask]
@@ -270,8 +286,12 @@ class LidarCameraOverlayNode(Node):
         pkg_share = get_package_share_directory('autoiq_bridge')
         objects_path = os.path.join(pkg_share, 'config', 'objects.json')
 
-        with open(objects_path, 'r') as f:
-            data = json.load(f)
+        try:
+            with open(objects_path, 'r') as f:
+                data = json.load(f)
+        except Exception as e:
+            self.get_logger().fatal(f"Failed to load sensor config from {objects_path}: {e}")
+            raise
 
         cam_cfg = None
         lidar_cfg = None
@@ -301,8 +321,15 @@ class LidarCameraOverlayNode(Node):
                         'horizontal_fov': float(sensor['horizontal_fov']),
                     }
 
-        assert cam_cfg is not None, 'Front RGB camera (id=front) not found in objects.json'
-        assert lidar_cfg is not None, 'AT128 lidar (id=at128_front) not found in objects.json'
+        if cam_cfg is None:
+            msg = f"Front RGB camera (id=front) not found in {objects_path}"
+            self.get_logger().error(msg)
+            raise RuntimeError(msg)
+            
+        if lidar_cfg is None:
+            msg = f"AT128 lidar (id=at128_front) not found in {objects_path}"
+            self.get_logger().error(msg)
+            raise RuntimeError(msg)
 
         self.get_logger().info(f'Loaded sensor configs from {objects_path}')
         return cam_cfg, lidar_cfg
