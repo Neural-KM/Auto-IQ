@@ -381,7 +381,7 @@ class SemanticSegmentationNode(Node):
         lane_map = segmentation  # ground_truth already has road_line class
 
         if self.enable_road_lane_extraction:
-            extracted_map, extraction_ok = self._extract_road_lane_markings(segmentation)
+            extracted_map, extraction_ok = self._extract_road_lane_markings(segmentation.copy())
 
             # Publish road lane extraction mono8
             self._publish_image(extracted_map, header, 'mono8', self.road_lane_extraction_pub)

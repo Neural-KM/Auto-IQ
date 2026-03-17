@@ -141,6 +141,26 @@
                     "sensor_tick": 0.0
                 },
                 {
+                    "type": "sensor.lidar.ray_cast",
+                    "id": "at128_front",
+                    "spawn_point": {
+                        "x": 2.0,
+                        "y": 0.0,
+                        "z": 1.0,
+                        "roll": 0.0,
+                        "pitch": 0.0,
+                        "yaw": 0.0
+                    },
+                    "channels": 128,
+                    "range": 200.0,
+                    "points_per_second": 1536000,
+                    "rotation_frequency": 20.0,
+                    "upper_fov": 12.9,
+                    "lower_fov": -12.5,
+                    "horizontal_fov": 120.0,
+                    "sensor_tick": 0.0
+                },
+                {
                     "type": "sensor.other.gnss",
                     "id": "gnss",
                     "spawn_point": {

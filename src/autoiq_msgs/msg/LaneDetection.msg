@@ -20,5 +20,15 @@ int32 left_lane_x             # Left lane boundary x-pixel  (-1 if unknown)
 int32 right_lane_x            # Right lane boundary x-pixel (-1 if unknown)
 int32 lane_width_px           # Lane width in pixels        (-1 if unknown)
 
+
+# BEV (Bird's Eye View) parameters for interpreting polynomial coefficients.
+# In BEV image coordinates: image X is lateral (vehicle Y), image Y is forward (vehicle X).
+int32 bev_width               # BEV image width in pixels
+int32 bev_height              # BEV image height in pixels
+float64 bev_x_min             # Lateral range min (meters) along image X
+float64 bev_x_max             # Lateral range max (meters) along image X
+float64 bev_y_min             # Forward range min (meters) along image Y
+float64 bev_y_max             # Forward range max (meters) along image Y 
+
 # Real-world lane width (meters), derived from polynomial fits in BEV
 float64 lane_width_m          # -1.0 if unknown
