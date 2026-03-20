@@ -112,11 +112,11 @@ class InversePerspectiveMapperNode2(Node):
 
         # Drivable area / lane structure parameters
         self.declare_parameter('lane_count', 4)
-        self.declare_parameter('total_road_width', 14.0)
+        self.declare_parameter('total_road_width', 22.0)  # Updated to match actual road
         self.declare_parameter('clearance_from_wall', 0.3)
         self.declare_parameter('clearance_from_divider', 0.3)
         self.declare_parameter('min_road_width', 10.0)
-        self.declare_parameter('max_road_width', 20.0)
+        self.declare_parameter('max_road_width', 30.0)  # Increased to accommodate wider roads
         
         # Resolve semantic source → only the image topic changes
         # Camera intrinsics and frame are shared (same physical camera)

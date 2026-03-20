@@ -4,7 +4,6 @@ Panels:
     Name: Displays
     Property Tree Widget:
       Expanded:
-        - /Image5
         - /Image5/Topic1
       Splitter Ratio: 0.5
     Tree Height: 506
@@ -510,6 +509,28 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /mapping/boundary_debug_image
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: MarkerArray
+      Namespaces:
+        lane_0_boundary: true
+        lane_0_centerline: true
+        lane_1_boundary: true
+        lane_1_centerline: true
+        lane_2_boundary: true
+        lane_2_centerline: true
+        lane_3_boundary: true
+        lane_3_centerline: true
+        lane_labels: true
+        road_boundary: true
+        status: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /visualization/drivable_area
       Value: true
   Enabled: true
   Global Options:

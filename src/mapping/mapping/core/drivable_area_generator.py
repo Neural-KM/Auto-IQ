@@ -75,12 +75,12 @@ class DrivableAreaGenerator:
 
     def __init__(
         self,
-        lane_count: int = 4,
-        total_road_width: float = 14.0,
-        clearance_from_wall: float = 0.3,
-        clearance_from_divider: float = 0.3,
-        min_road_width: float = 10.0,
-        max_road_width: float = 20.0,
+        lane_count: int,
+        total_road_width: float,
+        clearance_from_wall: float,
+        clearance_from_divider: float,
+        min_road_width: float,
+        max_road_width: float,
         resample_spacing: float = 0.5,
         min_forward_range: float = 3.0,
         near_field_skip: float = 1.0,
