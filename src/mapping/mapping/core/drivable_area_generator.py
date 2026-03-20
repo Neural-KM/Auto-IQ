@@ -211,29 +211,31 @@ class DrivableAreaGenerator:
             left_y = uniform_filter1d(left_y, size=self.smoothing_window, mode='nearest')
             right_y = uniform_filter1d(right_y, size=self.smoothing_window, mode='nearest')
 
-        # Inset edges by clearances
+        # Inset edges by clearances to get usable lane area
         inner_right = right_y + self.clearance_from_wall
         inner_left = left_y - self.clearance_from_divider
 
-        # Compute lane width and all lane centerlines
+        # Compute actual usable width from detected boundaries (after clearances)
         usable_width = inner_left - inner_right
-        lane_w = usable_width / self.lane_count
+
+        # Compute lane width from actual detected road width
+        lane_width = usable_width / self.lane_count
 
         lanes = []
         for idx in range(self.lane_count):
-            # Lane boundaries
-            lane_right_y = inner_right + lane_w * idx
-            lane_left_y = inner_right + lane_w * (idx + 1)
+            # Lane boundaries positioned from the inner right edge (wall side)
+            lane_right_y = inner_right + lane_width * idx
+            lane_left_y = inner_right + lane_width * (idx + 1)
 
             # Lane centerline
-            centerline_y = inner_right + lane_w * (idx + 0.5)
+            centerline_y = inner_right + lane_width * (idx + 0.5)
 
             lane_result = LaneResult(
                 lane_index=idx,
                 left_boundary=np.column_stack([x_grid, lane_left_y]),
                 right_boundary=np.column_stack([x_grid, lane_right_y]),
                 centerline=np.column_stack([x_grid, centerline_y]),
-                width_avg=float(np.mean(lane_w)),
+                width_avg=float(np.mean(lane_width)),
                 is_valid=True,
                 is_partial=False,
             )
