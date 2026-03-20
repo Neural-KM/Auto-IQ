@@ -359,8 +359,20 @@ class HDMapDataCollector:
             bag_name = os.path.join(bag_dir, f"hdmap_{timestamp}")
             os.makedirs(bag_dir, exist_ok=True)
             print(f"Starting ROS 2 bag record at {bag_name}...")
-            # Run rosbag in the background
-            self.rosbag_process = subprocess.Popen(['ros2', 'bag', 'record', '-a', '-o', bag_name])
+            # Record only topics needed for HD map creation
+            hdmap_topics = [
+                '/carla/ego_vehicle/sensor/lidar/top/point_cloud',
+                '/carla/ego_vehicle/sensor/lidar/at128_front/point_cloud',
+                '/carla/ego_vehicle/sensor/gnss/gnss/fix',
+                '/carla/ego_vehicle/sensor/imu/imu/data',
+                '/carla/ego_vehicle/ground_truth/odometry',
+                '/carla/ego_vehicle/sensor/camera/rgb/front/image',
+                '/tf',
+                '/tf_static',
+            ]
+            cmd = ['ros2', 'bag', 'record', '-o', bag_name, '--max-cache-size', '200000000']
+            cmd.extend(hdmap_topics)
+            self.rosbag_process = subprocess.Popen(cmd)
 
         print(f"\n{'='*60}")
         print(" Running... (Ctrl+C to stop)")
