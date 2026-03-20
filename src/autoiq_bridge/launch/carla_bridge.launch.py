@@ -6,7 +6,7 @@ Launches the CARLA bridge node with configurable parameters.
 
 Usage:
     ros2 launch autoiq_bridge carla_bridge.launch.py
-    ros2 launch autoiq_bridge carla_bridge.launch.py host:=192.168.1.100 port:=2000
+    ros2 launch autoiq_bridge carla_bridge.launch.py carla_host:=192.168.1.100 carla_port:=2000
 """
 
 import os
@@ -26,13 +26,13 @@ def generate_launch_description():
     
     # Declare launch arguments
     host_arg = DeclareLaunchArgument(
-        'host',
+        'carla_host',
         default_value='localhost',
         description='CARLA server hostname'
     )
-    
+
     port_arg = DeclareLaunchArgument(
-        'port',
+        'carla_port',
         default_value='2000',
         description='CARLA server port'
     )
@@ -75,8 +75,8 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'use_sim_time': True,
-            'host': LaunchConfiguration('host'),
-            'port': LaunchConfiguration('port'),
+            'carla_host': LaunchConfiguration('carla_host'),
+            'carla_port': LaunchConfiguration('carla_port'),
             'timeout': LaunchConfiguration('timeout'),
             'synchronous_mode': LaunchConfiguration('synchronous_mode'),
             'fixed_delta_seconds': LaunchConfiguration('fixed_delta_seconds'),

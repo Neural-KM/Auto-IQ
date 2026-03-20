@@ -34,6 +34,14 @@ def generate_launch_description():
             description='Path to perception parameters YAML file'
         ),
         DeclareLaunchArgument(
+            'carla_host', default_value='localhost',
+            description='CARLA simulator host'
+        ),
+        DeclareLaunchArgument(
+            'carla_port', default_value='2000',
+            description='CARLA simulator port'
+        ),
+        DeclareLaunchArgument(
             'segmentation_source', default_value='segformer',
             description="'segformer' (camera-based) or 'ground_truth' (CARLA sim)"
         ),
@@ -54,7 +62,11 @@ def generate_launch_description():
             output='screen',
             parameters=[
                 LaunchConfiguration('params_file'),
-                {'use_sim_time': True}
+                {
+                    'use_sim_time': True,
+                    'carla_host': LaunchConfiguration('carla_host'),
+                    'carla_port': LaunchConfiguration('carla_port'),
+                }
             ]
         ),
 

@@ -11,6 +11,10 @@ def generate_launch_description():
     return LaunchDescription([
         # ==================== Launch Arguments ====================
 
+        # CARLA connection
+        DeclareLaunchArgument('carla_host', default_value='localhost'),
+        DeclareLaunchArgument('carla_port', default_value='2000'),
+
         # Node enable flags
         DeclareLaunchArgument('enable_semantic_colorizer', default_value='true'),
         DeclareLaunchArgument('enable_2d_viz', default_value='false'),
@@ -50,6 +54,8 @@ def generate_launch_description():
             condition=IfCondition(LaunchConfiguration('enable_carla_viz')),
             parameters=[{
                 'use_sim_time': True,
+                'carla_host': LaunchConfiguration('carla_host'),
+                'carla_port': LaunchConfiguration('carla_port'),
                 'carla_debug_draw': LaunchConfiguration('carla_debug_draw'),
             }]
         ),

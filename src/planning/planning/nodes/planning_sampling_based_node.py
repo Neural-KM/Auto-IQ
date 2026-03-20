@@ -27,16 +27,18 @@ class PlanningNode(Node):
         
         # --- Parameters ---
         self.declare_parameter('carla_host', 'localhost')
+        self.declare_parameter('carla_port', 2000)
         self.declare_parameter('target_speed', 10.0) # km/h
         self.declare_parameter('vehicle_radius', 1.5) # meters (for C-space inflation)
         self.declare_parameter('costmap_topic', '/mapping/ipm_costmap')
         carla_host = self.get_parameter('carla_host').value
+        carla_port = self.get_parameter('carla_port').value
         self.target_speed = self.get_parameter('target_speed').value / 3.6 # m/s
         self.vehicle_radius = self.get_parameter('vehicle_radius').value
-        
+
         # --- CARLA Connection (Only for Global Route) ---
         self.get_logger().info('Connecting to CARLA...')
-        client = carla.Client(carla_host, 2000)
+        client = carla.Client(carla_host, carla_port)
         client.set_timeout(4.0)
         self.carla_map = client.get_world().get_map()
         
