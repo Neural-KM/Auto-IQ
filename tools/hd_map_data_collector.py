@@ -1,0 +1,397 @@
+#!/usr/bin/env python3
+"""
+HD Map Data Collection Script (Standalone)
+==========================================
+
+Standalone script that spawns a vehicle with sensors, drives between two spawn
+points using CARLA autopilot.
+
+NO need for carla_bridge_node - this script handles everything independently.
+
+Features:
+- Spawns vehicle at configurable start spawn point
+- Loads sensors from existing config (src/autoiq_bridge/config/objects.json)
+- Drives to end spawn point using Traffic Manager autopilot
+
+Usage:
+    # Drive from spawn 10 to spawn 50
+    python tools/hd_map_data_collector.py --start 10 --end 50
+
+    # List all spawn points
+    python tools/hd_map_data_collector.py --list-spawns
+
+    # Visualize spawn points in CARLA
+    python tools/hd_map_data_collector.py --show-spawns
+"""
+
+import argparse
+import json
+import math
+import os
+import signal
+import sys
+import time
+import atexit
+from typing import Dict, List, Optional, Tuple
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import carla
+
+# Global cleanup tracking
+_spawned_actors: List[int] = []
+_world: Optional[carla.World] = None
+
+
+def cleanup():
+    """Clean up spawned actors on exit."""
+    global _spawned_actors, _world
+
+    if _world is None:
+        return
+
+    for actor_id in _spawned_actors:
+        try:
+            actor = _world.get_actor(actor_id)
+            if actor:
+                if hasattr(actor, 'stop'):
+                    actor.stop()
+                actor.destroy()
+        except Exception:
+            pass
+    _spawned_actors.clear()
+
+
+def signal_handler(sig, frame):
+    """Handle Ctrl+C gracefully."""
+    print("\n\nReceived interrupt signal. Cleaning up...")
+    cleanup()
+    sys.exit(0)
+
+
+class HDMapDataCollector:
+    """
+    Standalone HD map data collector.
+
+    Spawns vehicle with sensors from config, drives to destination.
+    """
+
+    # Default config file path
+    DEFAULT_CONFIG = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'src/autoiq_bridge/config/objects.json'
+    )
+
+    def __init__(self, host='127.0.0.1', port=2000, timeout=10.0):
+        """Connect to CARLA server."""
+        global _world
+
+        print(f"Connecting to CARLA at {host}:{port}...")
+        self.client = carla.Client(host, port)
+        self.client.set_timeout(timeout)
+
+        self.world = self.client.get_world()
+        _world = self.world
+
+        self.map = self.world.get_map()
+        self.blueprint_library = self.world.get_blueprint_library()
+        self.traffic_manager = self.client.get_trafficmanager()
+
+        # Actors
+        self.vehicle = None
+        self.sensors: Dict[str, carla.Actor] = {}
+
+        # Route state
+        self.start_location = None
+        self.end_location = None
+        self.route_complete = False
+
+        print(f"Connected to CARLA, map: {self.map.name}")
+
+    def get_spawn_points(self) -> List[Tuple[int, carla.Transform]]:
+        """Get all spawn points with indices."""
+        return list(enumerate(self.map.get_spawn_points()))
+
+    def list_spawn_points(self):
+        """Print all available spawn points."""
+        spawn_points = self.get_spawn_points()
+
+        print(f"\n{'='*60}")
+        print(f" Available Spawn Points ({len(spawn_points)} total)")
+        print(f"{'='*60}")
+        print(f"{'Index':<8}{'X':>10}{'Y':>10}{'Z':>10}{'Yaw':>10}")
+        print(f"{'-'*60}")
+
+        for idx, sp in spawn_points:
+            loc = sp.location
+            rot = sp.rotation
+            print(f"{idx:<8}{loc.x:>10.1f}{loc.y:>10.1f}{loc.z:>10.1f}{rot.yaw:>10.1f}")
+
+        print(f"{'='*60}\n")
+
+    def visualize_spawn_points(self, lifetime=60.0):
+        """Draw spawn points in CARLA with index numbers."""
+        spawn_points = self.get_spawn_points()
+        debug = self.world.debug
+
+        print(f"\nDrawing {len(spawn_points)} spawn points (visible for {lifetime}s)...")
+
+        for idx, sp in spawn_points:
+            debug.draw_point(
+                sp.location + carla.Location(z=0.5),
+                size=0.15,
+                color=carla.Color(0, 255, 255),
+                life_time=lifetime
+            )
+            debug.draw_string(
+                sp.location + carla.Location(z=1.2),
+                str(idx),
+                draw_shadow=True,
+                color=carla.Color(255, 255, 255),
+                life_time=lifetime
+            )
+
+        print("Check the CARLA simulator window to see spawn points.")
+
+    def load_config(self) -> dict:
+        """Load and return ego_vehicle config."""
+        if not os.path.exists(self.DEFAULT_CONFIG):
+            raise FileNotFoundError(f"Config file not found: {self.DEFAULT_CONFIG}")
+
+        with open(self.DEFAULT_CONFIG, 'r') as f:
+            config = json.load(f)
+
+        for obj in config.get('objects', []):
+            if obj.get('id') == 'ego_vehicle':
+                return obj
+
+        raise ValueError("No ego_vehicle found in config file")
+
+    def spawn_vehicle(self, spawn_point_index: int) -> carla.Actor:
+        """Spawn vehicle at specified spawn point using config."""
+        spawn_points = self.map.get_spawn_points()
+
+        if spawn_point_index >= len(spawn_points):
+            raise ValueError(f"Spawn point {spawn_point_index} out of range (max: {len(spawn_points)-1})")
+
+        spawn_point = spawn_points[spawn_point_index]
+        self.start_location = spawn_point.location
+
+        # Get vehicle type from config
+        ego_config = self.load_config()
+        vehicle_type = ego_config.get('type', 'vehicle.tesla.model3')
+
+        vehicle_bp = self.blueprint_library.find(vehicle_type)
+        if vehicle_bp is None:
+            vehicle_bp = self.blueprint_library.filter('vehicle.*')[0]
+            print(f"Warning: {vehicle_type} not found, using {vehicle_bp.id}")
+
+        vehicle_bp.set_attribute('role_name', 'hero')
+
+        self.vehicle = self.world.spawn_actor(vehicle_bp, spawn_point)
+        _spawned_actors.append(self.vehicle.id)
+
+        print(f"Spawned {self.vehicle.type_id} at spawn point {spawn_point_index}")
+        return self.vehicle
+
+    def spawn_sensors(self) -> Dict[str, carla.Actor]:
+        """Spawn sensors from config file attached to vehicle."""
+        if self.vehicle is None:
+            raise RuntimeError("Vehicle must be spawned before sensors")
+
+        ego_config = self.load_config()
+        sensor_configs = ego_config.get('sensors', [])
+
+        print(f"Spawning {len(sensor_configs)} sensors from config...")
+
+        sensors = {}
+        for sensor_cfg in sensor_configs:
+            sensor_type = sensor_cfg['type']
+            sensor_id = sensor_cfg['id']
+            sp = sensor_cfg.get('spawn_point', {})
+
+            bp = self.blueprint_library.find(sensor_type)
+            if bp is None:
+                print(f"  Warning: {sensor_type} not found, skipping")
+                continue
+
+            # Set attributes
+            for attr in ['image_size_x', 'image_size_y', 'fov', 'sensor_tick',
+                         'channels', 'range', 'points_per_second', 'rotation_frequency',
+                         'upper_fov', 'lower_fov', 'horizontal_fov']:
+                if attr in sensor_cfg and bp.has_attribute(attr):
+                    bp.set_attribute(attr, str(sensor_cfg[attr]))
+
+            transform = carla.Transform(
+                carla.Location(x=sp.get('x', 0), y=sp.get('y', 0), z=sp.get('z', 0)),
+                carla.Rotation(pitch=sp.get('pitch', 0), yaw=sp.get('yaw', 0), roll=sp.get('roll', 0))
+            )
+
+            sensor = self.world.spawn_actor(bp, transform, attach_to=self.vehicle)
+            _spawned_actors.append(sensor.id)
+            sensors[sensor_id] = sensor
+
+        self.sensors = sensors
+        print(f"  Spawned {len(sensors)} sensors")
+        return sensors
+
+    def set_destination(self, end_spawn_point_index: int):
+        """Set destination spawn point."""
+        spawn_points = self.map.get_spawn_points()
+
+        if end_spawn_point_index >= len(spawn_points):
+            raise ValueError(f"End spawn point {end_spawn_point_index} out of range")
+
+        self.end_location = spawn_points[end_spawn_point_index].location
+
+        if self.start_location:
+            distance = self.start_location.distance(self.end_location)
+            print(f"Destination: spawn point {end_spawn_point_index} ({distance:.0f}m away)")
+
+    def enable_autopilot(self, target_speed_kmh=30.0, ignore_lights=True):
+        """Enable autopilot with Traffic Manager."""
+        if self.vehicle is None:
+            raise RuntimeError("Vehicle must be spawned first")
+
+        tm_port = self.traffic_manager.get_port()
+        self.vehicle.set_autopilot(True, tm_port)
+
+        self.traffic_manager.set_desired_speed(self.vehicle, target_speed_kmh)
+        self.traffic_manager.auto_lane_change(self.vehicle, False)
+
+        if ignore_lights:
+            self.traffic_manager.ignore_lights_percentage(self.vehicle, 100.0)
+            self.traffic_manager.ignore_signs_percentage(self.vehicle, 100.0)
+
+        if self.end_location:
+            self.traffic_manager.set_path(self.vehicle, [self.end_location])
+
+        print(f"Autopilot enabled at {target_speed_kmh} km/h")
+
+    def check_destination_reached(self, threshold=15.0) -> bool:
+        """Check if vehicle has reached the destination."""
+        if self.vehicle is None or self.end_location is None:
+            return False
+        return self.vehicle.get_location().distance(self.end_location) < threshold
+
+    def stop_vehicle(self):
+        """Stop the vehicle by disabling autopilot and applying brake."""
+        if self.vehicle is None:
+            return
+        self.vehicle.set_autopilot(False)
+        control = carla.VehicleControl()
+        control.brake = 1.0
+        control.throttle = 0.0
+        self.vehicle.apply_control(control)
+
+    def run(self, duration_limit=600.0):
+        """Run until destination reached or duration limit."""
+        if self.vehicle is None:
+            raise RuntimeError("Vehicle must be spawned first")
+
+        print(f"\n{'='*60}")
+        print(" Running... (Ctrl+C to stop)")
+        print(f"{'='*60}\n")
+
+        start_time = time.time()
+        last_status = 0
+
+        while True:
+            elapsed = time.time() - start_time
+
+            if elapsed > duration_limit:
+                print(f"\nDuration limit ({duration_limit}s) reached.")
+                self.stop_vehicle()
+                break
+
+            if self.check_destination_reached():
+                print(f"\nDestination reached!")
+                self.stop_vehicle()
+                self.route_complete = True
+                break
+
+            # Status every 5 seconds
+            if elapsed - last_status >= 5.0:
+                velocity = self.vehicle.get_velocity()
+                speed = math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2) * 3.6
+                pos = self.vehicle.get_location()
+
+                dist = "N/A"
+                if self.end_location:
+                    dist = f"{pos.distance(self.end_location):.0f}m"
+
+                print(f"[{elapsed:5.0f}s] {speed:4.1f} km/h | Pos: ({pos.x:.0f}, {pos.y:.0f}) | To dest: {dist}")
+                last_status = elapsed
+
+            time.sleep(0.1)
+
+        print(f"\nDone! Duration: {time.time() - start_time:.0f}s")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Standalone HD Map Data Collection',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python tools/hd_map_data_collector.py --start 10 --end 50
+  python tools/hd_map_data_collector.py --list-spawns
+  python tools/hd_map_data_collector.py --show-spawns
+        """
+    )
+
+    parser.add_argument('--host', default='127.0.0.1', help='CARLA server host')
+    parser.add_argument('--port', type=int, default=2000, help='CARLA server port')
+    parser.add_argument('--start', type=int, default=0, help='Start spawn point index')
+    parser.add_argument('--end', type=int, default=None, help='End spawn point index')
+    parser.add_argument('--speed', type=float, default=30.0, help='Target speed in km/h')
+    parser.add_argument('--duration', type=float, default=600.0, help='Max duration (seconds)')
+    parser.add_argument('--respect-lights', action='store_true', help='Respect traffic lights')
+    parser.add_argument('--list-spawns', action='store_true', help='List spawn points and exit')
+    parser.add_argument('--show-spawns', action='store_true', help='Visualize spawn points in CARLA')
+
+    args = parser.parse_args()
+
+    atexit.register(cleanup)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    try:
+        collector = HDMapDataCollector(args.host, args.port)
+
+        if args.list_spawns:
+            collector.list_spawn_points()
+            return 0
+
+        if args.show_spawns:
+            collector.visualize_spawn_points()
+            input("\nPress Enter to exit...")
+            return 0
+
+        # Spawn vehicle and sensors
+        collector.spawn_vehicle(args.start)
+        collector.spawn_sensors()
+
+        if args.end is not None:
+            collector.set_destination(args.end)
+
+        time.sleep(1.0)  # Let sensors initialize
+
+        collector.enable_autopilot(
+            target_speed_kmh=args.speed,
+            ignore_lights=not args.respect_lights
+        )
+
+        collector.run(duration_limit=args.duration)
+        return 0
+
+    except Exception as e:
+        print(f"\nError: {e}")
+        return 1
+    finally:
+        cleanup()
+
+
+if __name__ == '__main__':
+    sys.exit(main())
