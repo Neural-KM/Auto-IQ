@@ -7,12 +7,11 @@ A lightweight ROS 2 node that follows detected lane boundaries
 without any global planning or CARLA dependency.
 
 Pipeline:
-  mapping publishes boundaries → this node subscribes
-  → LaneMidlineGenerator computes midline → trajectory published to control
+  mapping publishes DrivableArea → this node subscribes
+  → selects preferred lane → trajectory published to control
 
 Topics subscribed:
-  /mapping/boundary/left   (nav_msgs/Path, base_link)
-  /mapping/boundary/right  (nav_msgs/Path, base_link)
+  /mapping/drivable_area  (autoiq_msgs/DrivableArea, base_link)
   /carla/ego_vehicle/ground_truth/odometry  (nav_msgs/Odometry)
 
 Topics published:
@@ -29,31 +28,31 @@ from typing import List, Optional
 
 from nav_msgs.msg import Path, Odometry
 from geometry_msgs.msg import PoseStamped
-from autoiq_msgs.msg import Trajectory, TrajectoryPoint
+from autoiq_msgs.msg import Trajectory, TrajectoryPoint, DrivableArea
 
 from autoiq_common.types import VehicleState
 from autoiq_common.types import TrajectoryPoint as TrajectoryPointDC
 from autoiq_common.converters import vehicle_state_from_odometry
 
 from planning.core.road_knowledge import RoadKnowledge
-from planning.core.lane_midline_generator import LaneMidlineGenerator
 
 
 class LaneFollowerNode(Node):
     def __init__(self):
         super().__init__('lane_follower_node')
 
-        # --- Road knowledge (from YAML) ---
+        # --- Road knowledge (from YAML) - for speed profile and lane selection ---
         self.road_knowledge = RoadKnowledge.from_yaml(RoadKnowledge.default_path())
-        self.midline_generator = LaneMidlineGenerator(self.road_knowledge)
         self.get_logger().info(f'Road knowledge: {self.road_knowledge}')
 
         # --- State ---
         self.vehicle_state = VehicleState()
-        self._left_boundary: Optional[np.ndarray] = None
-        self._right_boundary: Optional[np.ndarray] = None
-        self._boundary_stamp = None
-        self._boundary_timeout: float = 1.0  # seconds
+        self._drivable_area: Optional[DrivableArea] = None
+        self._drivable_area_stamp = None
+        self._drivable_area_timeout: float = 1.0  # seconds
+
+        # Temporal fallback for robustness
+        self._last_midline_bl: Optional[np.ndarray] = None
 
         # --- Subscribers ---
         self.create_subscription(
@@ -61,16 +60,13 @@ class LaneFollowerNode(Node):
             '/carla/ego_vehicle/ground_truth/odometry',
             self._odom_cb, 1)
 
-        boundary_qos = QoSProfile(
+        drivable_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST, depth=1)
         self.create_subscription(
-            Path, '/mapping/boundary/left',
-            self._left_boundary_cb, boundary_qos)
-        self.create_subscription(
-            Path, '/mapping/boundary/right',
-            self._right_boundary_cb, boundary_qos)
+            DrivableArea, '/mapping/drivable_area',
+            self._drivable_area_cb, drivable_qos)
 
         # --- Publishers ---
         self.traj_pub = self.create_publisher(Trajectory, '/planning/trajectory', 1)
@@ -78,50 +74,44 @@ class LaneFollowerNode(Node):
 
         # --- Timer (10 Hz) ---
         self.create_timer(0.1, self._loop)
-        self.get_logger().info('Lane Follower Node ready')
+        self.get_logger().info('Lane Follower Node ready (using DrivableArea message)')
 
     # ==================== Callbacks ============================
 
     def _odom_cb(self, msg: Odometry):
         self.vehicle_state = vehicle_state_from_odometry(msg)
 
-    def _left_boundary_cb(self, msg: Path):
-        self.get_logger().info('Left boundary received')
-        self._left_boundary = self._path_to_array(msg)
-        self._boundary_stamp = self.get_clock().now()
-
-    def _right_boundary_cb(self, msg: Path):
-        self.get_logger().info('Right boundary received')
-        self._right_boundary = self._path_to_array(msg)
-        self._boundary_stamp = self.get_clock().now()
-
-    @staticmethod
-    def _path_to_array(msg: Path) -> Optional[np.ndarray]:
-        if len(msg.poses) < 3:
-            return None
-        return np.array([[p.pose.position.x, p.pose.position.y]
-                         for p in msg.poses])
+    def _drivable_area_cb(self, msg: DrivableArea):
+        self.get_logger().info(
+            f'DrivableArea received: valid={msg.valid}, lanes={len(msg.lanes)}',
+            throttle_duration_sec=2.0)
+        self._drivable_area = msg
+        self._drivable_area_stamp = self.get_clock().now()
 
     # ==================== Main Loop ============================
 
     def _loop(self):
-        if not self._boundaries_valid():
-            self.get_logger().warn('No valid boundaries', throttle_duration_sec=2.0)
+        if not self._drivable_area_valid():
+            self.get_logger().warn('No valid drivable area', throttle_duration_sec=2.0)
             return
-        self.get_logger().info('Boundaries valid, generating midline', throttle_duration_sec=2.0)
-        # Generate midline in base_link
-        midline_bl, status_code = self.midline_generator.generate(
-            self._left_boundary, self._right_boundary)
-        
-        status_msg = self.midline_generator.STATUS_MSGS.get(status_code, "Unknown status")
-        
-        if status_code == self.midline_generator.SUCCESS:
-            self.get_logger().info(f'{status_msg} ({len(midline_bl)} points)', throttle_duration_sec=2.0)
-        elif status_code > 0:
-            self.get_logger().warn(f'{status_msg} ({len(midline_bl)} points)', throttle_duration_sec=2.0)
+
+        # Get midline from selected lane
+        midline_bl = self._select_lane_midline()
+
+        if midline_bl is None or len(midline_bl) < 3:
+            # Fallback to previous midline
+            if self._last_midline_bl is not None:
+                midline_bl = self._last_midline_bl
+                self.get_logger().warn('Using previous midline (fallback)', throttle_duration_sec=2.0)
+            else:
+                self.get_logger().error('No valid midline available')
+                return
         else:
-            self.get_logger().error(status_msg)
-            return
+            # Store for fallback
+            self._last_midline_bl = midline_bl
+            self.get_logger().info(
+                f'Midline selected ({len(midline_bl)} points)',
+                throttle_duration_sec=2.0)
 
         # Transform base_link → map
         midline_map = self._base_link_to_map(midline_bl)
@@ -134,14 +124,48 @@ class LaneFollowerNode(Node):
         if trajectory:
             self._publish_trajectory(trajectory)
 
-    def _boundaries_valid(self) -> bool:
-        if self._boundary_stamp is None:
+    def _drivable_area_valid(self) -> bool:
+        if self._drivable_area is None or self._drivable_area_stamp is None:
             return False
-        age = (self.get_clock().now() - self._boundary_stamp).nanoseconds * 1e-9
-        if age > self._boundary_timeout:
+        age = (self.get_clock().now() - self._drivable_area_stamp).nanoseconds * 1e-9
+        if age > self._drivable_area_timeout:
             return False
-        return (self._left_boundary is not None or
-                self._right_boundary is not None)
+        return self._drivable_area.valid
+
+    def _select_lane_midline(self) -> Optional[np.ndarray]:
+        """
+        Select the preferred lane's centerline from the drivable area.
+
+        Returns (N, 2) numpy array of (x, y) in base_link frame, or None.
+        """
+        if not self._drivable_area.lanes:
+            return None
+
+        # Get preferred lane index from road knowledge
+        preferred_idx = self.road_knowledge.preferred_lane
+
+        # Clamp to available lanes
+        if preferred_idx >= len(self._drivable_area.lanes):
+            preferred_idx = len(self._drivable_area.lanes) - 1
+
+        lane = self._drivable_area.lanes[preferred_idx]
+
+        # If preferred lane invalid, find first valid lane
+        if not lane.is_valid:
+            for l in self._drivable_area.lanes:
+                if l.is_valid:
+                    lane = l
+                    self.get_logger().warn(
+                        f'Preferred lane {preferred_idx} invalid, using lane {l.lane_index}',
+                        throttle_duration_sec=2.0)
+                    break
+
+        if not lane.centerline:
+            return None
+
+        # Convert geometry_msgs/Point[] to numpy array
+        centerline = np.array([[p.x, p.y] for p in lane.centerline])
+        return centerline
 
     # ==================== Geometry =============================
 

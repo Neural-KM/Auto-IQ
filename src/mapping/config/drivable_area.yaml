@@ -1,0 +1,22 @@
+# Drivable Area Generator Configuration
+# =====================================
+# These parameters define lane structure for the mapping package.
+# Used by DrivableAreaGenerator to compute lane centerlines.
+
+# Road geometry
+lane_count: 4                   # Number of lanes to divide road into
+total_road_width: 14.0          # Expected total road width (meters)
+
+# Safety clearances (meters)
+clearance_from_wall: 0.3        # Margin from right edge (kerb/wall)
+clearance_from_divider: 0.3     # Margin from left edge (center divider)
+
+# Validation thresholds
+min_road_width: 10.0            # Minimum valid road width (meters)
+max_road_width: 20.0            # Maximum valid road width (meters)
+
+# Processing parameters
+resample_spacing: 0.5           # Distance between resampled points (meters)
+min_forward_range: 3.0          # Minimum useful forward span (meters)
+near_field_skip: 1.0            # Skip points closer than this (meters)
+smoothing_window: 7             # Moving average window size (samples)

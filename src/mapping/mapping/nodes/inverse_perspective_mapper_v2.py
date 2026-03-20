@@ -51,6 +51,16 @@ from mapping.core.boundary_extractor import (
     draw_boundary_overlay,
     boundary_to_base_link,
 )
+from mapping.core.drivable_area_generator import (
+    DrivableAreaGenerator,
+    DrivableAreaResult,
+    STATUS_OK,
+    STATUS_NO_BOUNDARIES,
+    STATUS_INVALID_WIDTH,
+    STATUS_INSUFFICIENT_POINTS,
+)
+from autoiq_msgs.msg import DrivableArea, Lane
+from geometry_msgs.msg import Point
 # ================= CONFIGURATION =================
 ROAD_LABEL_ID = SEMANTIC_BY_NAME['road']           # 1 in CARLA
 ROAD_LINE_LABEL_ID = SEMANTIC_BY_NAME['road_line'] # 24 in CARLA
@@ -99,6 +109,14 @@ class InversePerspectiveMapperNode2(Node):
         self.declare_parameter('vehicle_width', 1.5)
         self.declare_parameter('rear_to_base_link', 1.7)  # Distance from base_link to vehicle center
         self.declare_parameter('clear_zone_radius', 5.0)  # Circular free zone around vehicle (meters)
+
+        # Drivable area / lane structure parameters
+        self.declare_parameter('lane_count', 4)
+        self.declare_parameter('total_road_width', 14.0)
+        self.declare_parameter('clearance_from_wall', 0.3)
+        self.declare_parameter('clearance_from_divider', 0.3)
+        self.declare_parameter('min_road_width', 10.0)
+        self.declare_parameter('max_road_width', 20.0)
         
         # Resolve semantic source → only the image topic changes
         # Camera intrinsics and frame are shared (same physical camera)
@@ -173,6 +191,21 @@ class InversePerspectiveMapperNode2(Node):
             Path, '/mapping/boundary/right', 1)
         self.boundary_debug_pub = self.create_publisher(
             Image, '/mapping/boundary_debug_image', 1)
+
+        self.get_logger().info('Inverse Perspective Mapper V2 (Reverse Projection) initialized with parameters:')        
+        # ---- Drivable area publisher (structured lane data) ----
+        self.drivable_area_pub = self.create_publisher(
+            DrivableArea, '/mapping/drivable_area', 1)
+
+        # ---- Drivable area generator ----
+        self.drivable_area_generator = DrivableAreaGenerator(
+            lane_count=self.get_parameter('lane_count').value,
+            total_road_width=self.get_parameter('total_road_width').value,
+            clearance_from_wall=self.get_parameter('clearance_from_wall').value,
+            clearance_from_divider=self.get_parameter('clearance_from_divider').value,
+            min_road_width=self.get_parameter('min_road_width').value,
+            max_road_width=self.get_parameter('max_road_width').value,
+        )
 
         self.get_logger().info('Inverse Perspective Mapper V2 (Reverse Projection) started')
         self.get_logger().info(f'  Semantic Image: {semantic_topic}')
@@ -355,6 +388,7 @@ class InversePerspectiveMapperNode2(Node):
         Build a binary drivable mask from the occupancy grid, run the
         sliding-window boundary extractor, and publish the left/right
         boundaries as nav_msgs/Path plus a debug overlay image.
+        Also generates and publishes structured DrivableArea message.
         """
         # Binary mask: 1 = drivable (FREE), 0 = everything else
         binary_mask = np.uint8(grid == FREE)
@@ -371,13 +405,13 @@ class InversePerspectiveMapperNode2(Node):
         debug_msg.header.frame_id = self.base_frame
         self.boundary_debug_pub.publish(debug_msg)
 
-        # Convert pixel boundaries → base_link coordinates and publish
+        # Convert pixel boundaries → base_link coordinates
         min_path_points = 8
         min_forward_span_m = 3.0
-        for result, pub, label in [
-            (left, self.left_boundary_pub, 'left'),
-            (right, self.right_boundary_pub, 'right'),
-        ]:
+        left_pts = None
+        right_pts = None
+
+        for result, label in [(left, 'left'), (right, 'right')]:
             pts = boundary_to_base_link(
                 result,
                 grid_cells=self.grid_cells,
@@ -393,7 +427,48 @@ class InversePerspectiveMapperNode2(Node):
             if forward_span < min_forward_span_m:
                 continue
 
-            self._publish_boundary_path(pts, stamp, pub)
+            if label == 'left':
+                left_pts = pts
+                self._publish_boundary_path(pts, stamp, self.left_boundary_pub)
+            else:
+                right_pts = pts
+                self._publish_boundary_path(pts, stamp, self.right_boundary_pub)
+
+        # Generate and publish structured drivable area
+        drivable_result = self.drivable_area_generator.generate(left_pts, right_pts)
+        self._publish_drivable_area(drivable_result, stamp)
+
+    def _publish_drivable_area(self, result: DrivableAreaResult, stamp):
+        """Publish DrivableArea message with structured lane data."""
+        msg = DrivableArea()
+        msg.header.stamp = stamp
+        msg.header.frame_id = self.base_frame
+        msg.valid = result.valid
+        msg.status_code = result.status_code
+        msg.road_width_avg = result.road_width_avg
+        msg.lane_count = result.lane_count
+        # Convert numpy arrays to geometry_msgs/Point[]
+        for x, y in result.left_boundary:
+            msg.left_boundary.append(Point(x=float(x), y=float(y), z=0.0))
+        for x, y in result.right_boundary:
+            msg.right_boundary.append(Point(x=float(x), y=float(y), z=0.0))
+        # Convert lane results
+        for lane_result in result.lanes:
+            lane_msg = Lane()
+            lane_msg.lane_index = lane_result.lane_index
+            lane_msg.width_avg = lane_result.width_avg
+            lane_msg.is_valid = lane_result.is_valid
+            lane_msg.is_partial = lane_result.is_partial
+
+            for x, y in lane_result.left_boundary:
+                lane_msg.left_boundary.append(Point(x=float(x), y=float(y), z=0.0))
+            for x, y in lane_result.right_boundary:
+                lane_msg.right_boundary.append(Point(x=float(x), y=float(y), z=0.0))
+            for x, y in lane_result.centerline:
+                lane_msg.centerline.append(Point(x=float(x), y=float(y), z=0.0))
+            msg.lanes.append(lane_msg)
+        self.get_logger().info(f'Publishing DrivableArea with {len(msg.lanes)} lanes', throttle_duration_sec=5.0)
+        self.drivable_area_pub.publish(msg)
 
     def _publish_boundary_path(
         self,
