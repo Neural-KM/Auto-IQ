@@ -295,10 +295,19 @@ class CarlaBridgeNode(Node):
                     bp.set_attribute(attr, str(config[attr]))
                     
         elif sensor_type in ('sensor.lidar.ray_cast', 'sensor.lidar.ray_cast_semantic'):
-            for attr in ['channels', 'range', 'points_per_second', 'rotation_frequency', 
-                         'upper_fov', 'lower_fov', 'sensor_tick']:
+            for attr in ['channels', 'range', 'points_per_second', 'rotation_frequency',
+                         'upper_fov', 'lower_fov', 'horizontal_fov', 'sensor_tick',
+                         'atmosphere_attenuation_rate', 'dropoff_general_rate',
+                         'dropoff_intensity_limit', 'dropoff_zero_intensity',
+                         'noise_stddev']:
                 if attr in config:
-                    bp.set_attribute(attr, str(config[attr]))
+                    if bp.has_attribute(attr):
+                        bp.set_attribute(attr, str(config[attr]))
+                    else:
+                        self.get_logger().warning(
+                            f"LiDAR attribute '{attr}' is not supported in this CARLA version. "
+                            f"Skipping configuration for sensor '{sensor_id}'."
+                        )
         
         # Create transform
         transform = carla.Transform(
