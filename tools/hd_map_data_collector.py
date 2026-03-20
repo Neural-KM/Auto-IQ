@@ -32,6 +32,8 @@ import signal
 import sys
 import time
 import atexit
+import subprocess
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 # Add project root to path
@@ -42,24 +44,46 @@ import carla
 # Global cleanup tracking
 _spawned_actors: List[int] = []
 _world: Optional[carla.World] = None
+_collector_instance = None
+_cleanup_done = False
 
 
 def cleanup():
     """Clean up spawned actors on exit."""
-    global _spawned_actors, _world
+    global _spawned_actors, _world, _collector_instance, _cleanup_done
+
+    if _cleanup_done:
+        return
+    _cleanup_done = True
+
+    if _collector_instance and hasattr(_collector_instance, 'stop_vehicle'):
+        try:
+            _collector_instance.stop_vehicle()
+        except Exception:
+            pass
 
     if _world is None:
         return
 
-    for actor_id in _spawned_actors:
+    # Delete sensors first, then vehicle, avoiding stop() since CARLA C++ handles it inside destroy()
+    for actor_id in reversed(_spawned_actors):
         try:
             actor = _world.get_actor(actor_id)
-            if actor:
-                if hasattr(actor, 'stop'):
-                    actor.stop()
+            if actor and actor.is_alive:
                 actor.destroy()
         except Exception:
             pass
+            
+    # Extra fallback: Ensure the main vehicle itself is destroyed even if we are using the bridge
+    # or if it was somehow skipped.
+    if _collector_instance and _collector_instance.vehicle:
+        try:
+            if _collector_instance.vehicle.is_alive:
+                _collector_instance.vehicle.destroy()
+        except Exception:
+            pass
+        _collector_instance.vehicle = None
+
     _spawned_actors.clear()
 
 
@@ -85,7 +109,8 @@ class HDMapDataCollector:
 
     def __init__(self, host='127.0.0.1', port=2000, timeout=10.0):
         """Connect to CARLA server."""
-        global _world
+        global _world, _collector_instance
+        _collector_instance = self
 
         print(f"Connecting to CARLA at {host}:{port}...")
         self.client = carla.Client(host, port)
@@ -106,6 +131,7 @@ class HDMapDataCollector:
         self.start_location = None
         self.end_location = None
         self.route_complete = False
+        self.rosbag_process = None
 
         print(f"Connected to CARLA, map: {self.map.name}")
 
@@ -168,8 +194,8 @@ class HDMapDataCollector:
 
         raise ValueError("No ego_vehicle found in config file")
 
-    def spawn_vehicle(self, spawn_point_index: int) -> carla.Actor:
-        """Spawn vehicle at specified spawn point using config."""
+    def spawn_vehicle(self, spawn_point_index: int, use_existing=False) -> carla.Actor:
+        """Spawn vehicle at specified spawn point using config, or use existing ego_vehicle."""
         spawn_points = self.map.get_spawn_points()
 
         if spawn_point_index >= len(spawn_points):
@@ -177,6 +203,16 @@ class HDMapDataCollector:
 
         spawn_point = spawn_points[spawn_point_index]
         self.start_location = spawn_point.location
+
+        if use_existing:
+            print("Looking for existing ego_vehicle in the world instead of spawning a new one...")
+            for actor in self.world.get_actors():
+                if actor.attributes.get('role_name') == 'hero' or actor.attributes.get('role_name') == 'ego_vehicle':
+                    self.vehicle = actor
+                    self.start_location = self.vehicle.get_location()
+                    print(f"Found existing vehicle: {self.vehicle.type_id}")
+                    return self.vehicle
+            raise RuntimeError("Could not find an existing ego_vehicle (role_name 'hero' or 'ego_vehicle') in the world.")
 
         # Get vehicle type from config
         ego_config = self.load_config()
@@ -269,14 +305,42 @@ class HDMapDataCollector:
 
         print(f"Autopilot enabled at {target_speed_kmh} km/h")
 
-    def check_destination_reached(self, threshold=15.0) -> bool:
-        """Check if vehicle has reached the destination."""
+    def check_destination_reached(self) -> bool:
+        """Check if vehicle has reached the destination, or passing it."""
         if self.vehicle is None or self.end_location is None:
             return False
-        return self.vehicle.get_location().distance(self.end_location) < threshold
+            
+        current_distance = self.vehicle.get_location().distance(self.end_location)
+        
+        # Check against a reasonably loose threshold (35 meters)
+        if current_distance < 35.0:
+            return True
+            
+        # Optional: track if we were getting closer but now are moving away
+        if not hasattr(self, '_min_distance'):
+            self._min_distance = current_distance
+        else:
+            if current_distance < self._min_distance:
+                self._min_distance = current_distance
+            elif current_distance > self._min_distance + 15.0 and self._min_distance < 50.0:
+                # We were within 50 meters, and now we are 15 meters further away tracking from min distance (overshot)
+                print(f"\nOvershot destination (min distance was {self._min_distance:.1f}m)")
+                return True
+                
+        return False
 
     def stop_vehicle(self):
         """Stop the vehicle by disabling autopilot and applying brake."""
+        if self.rosbag_process:
+            print("\nStopping ros2 bag record cleanly...")
+            self.rosbag_process.send_signal(signal.SIGINT)
+            try:
+                self.rosbag_process.wait(timeout=10.0)
+            except subprocess.TimeoutExpired:
+                print("rosbag process did not stop in time, killing it...")
+                self.rosbag_process.kill()
+            self.rosbag_process = None
+
         if self.vehicle is None:
             return
         self.vehicle.set_autopilot(False)
@@ -285,10 +349,18 @@ class HDMapDataCollector:
         control.throttle = 0.0
         self.vehicle.apply_control(control)
 
-    def run(self, duration_limit=600.0):
+    def run(self, duration_limit=600.0, record_rosbag=False, bag_dir="Rosbags"):
         """Run until destination reached or duration limit."""
         if self.vehicle is None:
             raise RuntimeError("Vehicle must be spawned first")
+
+        if record_rosbag:
+            timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
+            bag_name = os.path.join(bag_dir, f"hdmap_{timestamp}")
+            os.makedirs(bag_dir, exist_ok=True)
+            print(f"Starting ROS 2 bag record at {bag_name}...")
+            # Run rosbag in the background
+            self.rosbag_process = subprocess.Popen(['ros2', 'bag', 'record', '-a', '-o', bag_name])
 
         print(f"\n{'='*60}")
         print(" Running... (Ctrl+C to stop)")
@@ -350,6 +422,11 @@ Examples:
     parser.add_argument('--respect-lights', action='store_true', help='Respect traffic lights')
     parser.add_argument('--list-spawns', action='store_true', help='List spawn points and exit')
     parser.add_argument('--show-spawns', action='store_true', help='Visualize spawn points in CARLA')
+    parser.add_argument('--record', action='store_true', help='Record a ROS 2 bag of all topics during the run')
+    # Default bag dir relative to project root
+    default_bag_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Rosbags')
+    parser.add_argument('--bag-dir', type=str, default=default_bag_dir, help='Directory to store the recorded rosbag')
+    parser.add_argument('--use-bridge', action='store_true', help='Do not spawn vehicle/sensors. Attach to existing vehicle spawned by autoiq_bridge')
 
     args = parser.parse_args()
 
@@ -370,8 +447,9 @@ Examples:
             return 0
 
         # Spawn vehicle and sensors
-        collector.spawn_vehicle(args.start)
-        collector.spawn_sensors()
+        collector.spawn_vehicle(args.start, use_existing=args.use_bridge)
+        if not args.use_bridge:
+            collector.spawn_sensors()
 
         if args.end is not None:
             collector.set_destination(args.end)
@@ -383,7 +461,7 @@ Examples:
             ignore_lights=not args.respect_lights
         )
 
-        collector.run(duration_limit=args.duration)
+        collector.run(duration_limit=args.duration, record_rosbag=args.record, bag_dir=args.bag_dir)
         return 0
 
     except Exception as e:
