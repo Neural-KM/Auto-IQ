@@ -62,9 +62,9 @@ Visualization Manager:
           Value: true
         ego_vehicle/sensor/imu/imu:
           Value: true
-        ego_vehicle/sensor/lidar/top:
-          Value: true
         ego_vehicle/sensor/lidar/at128_front:
+          Value: true
+        ego_vehicle/sensor/lidar/top:
           Value: true
         map:
           Value: true
@@ -94,9 +94,9 @@ Visualization Manager:
               {}
             ego_vehicle/sensor/imu/imu:
               {}
-            ego_vehicle/sensor/lidar/top:
-              {}
             ego_vehicle/sensor/lidar/at128_front:
+              {}
+            ego_vehicle/sensor/lidar/top:
               {}
       Update Interval: 0
       Value: true
@@ -127,34 +127,6 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /planning/global_route
-      Value: true
-    - Alpha: 1
-      Buffer Length: 1
-      Class: rviz_default_plugins/Path
-      Color: 255; 0; 255
-      Enabled: true
-      Head Diameter: 0.30000001192092896
-      Head Length: 0.20000000298023224
-      Length: 0.30000001192092896
-      Line Style: Lines
-      Line Width: 0.05000000074505806
-      Name: Corridor Reference
-      Offset:
-        X: 0
-        Y: 0
-        Z: 0.15000000596046448
-      Pose Color: 255; 85; 255
-      Pose Style: None
-      Radius: 0.029999999329447746
-      Shaft Diameter: 0.10000000149011612
-      Shaft Length: 0.10000000149011612
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /planning/corridor_reference
       Value: true
     - Alpha: 1
       Buffer Length: 1
@@ -240,7 +212,7 @@ Visualization Manager:
       Enabled: true
       Name: Lanes
       Namespaces:
-        {}
+        lanes: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -582,7 +554,7 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Scale: 9.776226997375488
+      Scale: 8.2367525100708
       Target Frame: ego_vehicle
       Value: TopDownOrtho (rviz_default_plugins)
       X: 0
