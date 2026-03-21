@@ -3,26 +3,36 @@
 HD Map Data Collection Script (Standalone)
 ==========================================
 
-Standalone script that spawns a vehicle with sensors, drives between two spawn
-points using CARLA autopilot, and records a rosbag for HD map generation.
+Spawns a vehicle with sensors in CARLA, drives between spawn points using
+autopilot, and records a rosbag with all data needed for HD map generation.
 
-NO need for carla_bridge_node - this script handles everything independently.
-
-Features:
-- Spawns vehicle at configurable start spawn point
-- Loads sensors from existing config (src/autoiq_bridge/config/objects.json)
-- Drives to end spawn point using Traffic Manager autopilot
-- Records rosbag with all required topics for HD map generation
+Recorded Topics:
+    - /carla/ego_vehicle/ground_truth/odometry                    : Vehicle pose
+    - /carla/ego_vehicle/sensor/gnss/gnss/fix                     : GPS coordinates
+    - /carla/ego_vehicle/sensor/imu/imu/data                      : IMU data
+    - /carla/ego_vehicle/sensor/lidar/*/point_cloud               : LiDAR point clouds
+    - /carla/ego_vehicle/sensor/camera/rgb/front/image            : RGB camera
+    - /carla/ego_vehicle/ground_truth/camera/semantic/front/image : Semantic segmentation (mono8)
+    - /tf, /tf_static                                             : Transforms
 
 Usage:
-    # Drive from spawn 10 to spawn 50 and record
+    # Record data while driving from spawn 10 to spawn 50
     python tools/hd_map_data_collector.py --start 10 --end 50 --record
 
     # List all spawn points
     python tools/hd_map_data_collector.py --list-spawns
 
-    # Visualize spawn points in CARLA
+    # Visualize spawn points in CARLA window
     python tools/hd_map_data_collector.py --show-spawns
+
+    # Use with existing bridge (attach to running vehicle)
+    python tools/hd_map_data_collector.py --use-bridge --record
+
+Output:
+    Rosbags saved to: Rosbags/hdmap_YYYY_MM_DD-HH_MM_SS/
+
+Process recorded bags with:
+    python tools/hd_map_processor.py --bag Rosbags/hdmap_<timestamp> --visualize
 """
 
 import argparse
@@ -368,7 +378,7 @@ class HDMapDataCollector:
                 '/carla/ego_vehicle/sensor/imu/imu/data',
                 '/carla/ego_vehicle/ground_truth/odometry',
                 '/carla/ego_vehicle/sensor/camera/rgb/front/image',
-                '/carla/ego_vehicle/sensor/camera/semantic/front/image',  # Ground truth segmentation
+                '/carla/ego_vehicle/ground_truth/camera/semantic/front/image',  # Ground truth segmentation (mono8)
                 '/tf',
                 '/tf_static',
             ]

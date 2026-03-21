@@ -5,16 +5,29 @@ HD Map Processor - Offline Rosbag Processing
 
 Processes recorded rosbags to generate HD maps.
 
-Rosbags/hdmap_2026_03_21-05_52_15Pipeline Steps:
-    A. Extract trajectory from odometry
-    B. Extract semantic masks (road/lanes) from ground truth camera
+Pipeline Steps:
+    A. Extract trajectory from odometry (IMPLEMENTED)
+    B. Extract semantic masks (road/lanes) from ground truth camera (IMPLEMENTED)
     C. Project 2D lane pixels to 3D using LiDAR
     D. Transform to global frame using trajectory
     E. Cluster and fit splines
 
 Usage:
-    python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-04_29_03
-    python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-04_29_03 --visualize
+    # Basic processing (Steps A & B)
+    python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-05_52_15
+
+    # With visualizations
+    python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-05_52_15 --visualize
+
+    # Process every 5th frame (faster)
+    python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-05_52_15 --visualize --sample-rate 5
+
+Output:
+    Creates <bag_name>_hdmap/ directory with:
+    - trajectory.json       : Vehicle poses over time
+    - trajectory.png        : Trajectory visualization (if --visualize)
+    - semantic_summary.png  : Lane/road statistics (if --visualize)
+    - semantic_frame_*.png  : Sample frame visualizations (if --visualize)
 """
 
 import argparse
@@ -49,7 +62,7 @@ class Pose:
     def timestamp_sec(self) -> float:
         return self.timestamp_ns / 1e9
 
-    @property
+    @property 
     def position(self) -> np.ndarray:
         return np.array([self.x, self.y, self.z])
 
@@ -128,6 +141,29 @@ class Trajectory:
         ]
 
 
+@dataclass
+class SemanticFrame:
+    """Semantic segmentation data for a single frame."""
+    timestamp_ns: int
+    road_mask: np.ndarray          # Binary mask of road pixels (H x W)
+    lane_pixels: np.ndarray        # Nx2 array of (row, col) lane marking pixel coordinates
+
+    @property
+    def timestamp_sec(self) -> float:
+        return self.timestamp_ns / 1e9
+
+    @property
+    def num_lane_pixels(self) -> int:
+        return len(self.lane_pixels) if self.lane_pixels is not None else 0
+
+    @property
+    def road_coverage(self) -> float:
+        """Percentage of image that is road."""
+        if self.road_mask is None:
+            return 0.0
+        return np.sum(self.road_mask) / self.road_mask.size * 100
+
+
 # =============================================================================
 # Utility Functions
 # =============================================================================
@@ -166,7 +202,7 @@ class HDMapProcessor:
 
     ODOMETRY_TOPIC = '/carla/ego_vehicle/ground_truth/odometry'
     GNSS_TOPIC = '/carla/ego_vehicle/sensor/gnss/gnss/fix'
-    SEMANTIC_TOPIC = '/carla/ego_vehicle/sensor/camera/semantic/front/image'
+    SEMANTIC_TOPIC = '/carla/ego_vehicle/ground_truth/camera/semantic/front/image'  # mono8 encoding
     LIDAR_TOPIC = '/carla/ego_vehicle/sensor/lidar/at128_front/point_cloud'
 
     CLASS_ROAD = 1
@@ -178,6 +214,7 @@ class HDMapProcessor:
             raise FileNotFoundError(f"Bag not found: {bag_path}")
         self.trajectory = Trajectory()
         self.gnss_data: List[dict] = []
+        self.semantic_frames: List[SemanticFrame] = []  # Step B data
         self._msg_type_cache: Dict[str, type] = {}
 
     def _get_message_type(self, type_name: str):
@@ -292,6 +329,245 @@ class HDMapProcessor:
 
         return self.gnss_data
 
+    def extract_semantic_data(self, sample_rate: int = 1) -> List[SemanticFrame]:
+        """
+        Step B: Extract semantic masks from ground truth camera.
+
+        Reads semantic segmentation images and extracts:
+        - Road mask (class ID = 1)
+        - Lane marking pixel coordinates (class ID = 24)
+
+        Args:
+            sample_rate: Process every Nth frame (1 = all frames, 5 = every 5th frame)
+
+        Returns:
+            List of SemanticFrame objects
+        """
+        import rosbag2_py
+        from rclpy.serialization import deserialize_message
+
+        print(f"\n{'='*60}")
+        print(" Step B: Extracting Semantic Data (Road & Lane Markings)")
+        print(f"{'='*60}")
+
+        reader = self._create_bag_reader()
+        topic_types = {t.name: t.type for t in reader.get_all_topics_and_types()}
+
+        if self.SEMANTIC_TOPIC not in topic_types:
+            print(f"  WARNING: Semantic topic not found: {self.SEMANTIC_TOPIC}")
+            print("  Make sure to record with semantic camera enabled.")
+            return []
+
+        img_type = self._get_message_type(topic_types[self.SEMANTIC_TOPIC])
+
+        storage_filter = rosbag2_py.StorageFilter(topics=[self.SEMANTIC_TOPIC])
+        reader.set_filter(storage_filter)
+
+        frame_count = 0
+        processed_count = 0
+        total_lane_pixels = 0
+        total_road_coverage = 0.0
+
+        while reader.has_next():
+            topic, data, timestamp_ns = reader.read_next()
+
+            if topic == self.SEMANTIC_TOPIC:
+                frame_count += 1
+
+                # Sample rate - skip frames if needed
+                if (frame_count - 1) % sample_rate != 0:
+                    continue
+
+                msg = deserialize_message(data, img_type)
+
+                # Convert ROS Image to numpy array
+                # Bridge sends mono8 (single channel, each pixel = class ID)
+                height = msg.height
+                width = msg.width
+
+                # Handle different encodings
+                if msg.encoding == 'mono8':
+                    # Expected format from bridge - single channel class IDs
+                    class_ids = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width)
+                elif msg.encoding == 'bgra8':
+                    # Raw CARLA format - class ID is in R channel (index 2)
+                    img_data = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width, 4)
+                    class_ids = img_data[:, :, 2]
+                elif msg.encoding == 'rgb8':
+                    img_data = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width, 3)
+                    class_ids = img_data[:, :, 0]
+                else:
+                    # Try to parse as single channel
+                    try:
+                        class_ids = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width)
+                    except ValueError:
+                        print(f"  Warning: Unknown encoding {msg.encoding}, skipping frame")
+                        continue
+
+                # Extract road mask (class ID = 1)
+                road_mask = (class_ids == self.CLASS_ROAD).astype(np.uint8)
+
+                # Extract lane marking pixels (class ID = 24)
+                lane_mask = (class_ids == self.CLASS_LANE_MARKING)
+                lane_pixel_coords = np.argwhere(lane_mask)  # Nx2 array of (row, col)
+
+                # Create semantic frame
+                semantic_frame = SemanticFrame(
+                    timestamp_ns=timestamp_ns,
+                    road_mask=road_mask,
+                    lane_pixels=lane_pixel_coords
+                )
+                self.semantic_frames.append(semantic_frame)
+
+                processed_count += 1
+                total_lane_pixels += semantic_frame.num_lane_pixels
+                total_road_coverage += semantic_frame.road_coverage
+
+                # Progress update every 100 frames
+                if processed_count % 100 == 0:
+                    print(f"  Processed {processed_count} frames...")
+
+        # Summary
+        print(f"\n  Total frames in bag: {frame_count}")
+        print(f"  Processed frames: {processed_count} (sample_rate={sample_rate})")
+
+        if processed_count > 0:
+            avg_lane_pixels = total_lane_pixels / processed_count
+            avg_road_coverage = total_road_coverage / processed_count
+            print(f"  Avg lane pixels per frame: {avg_lane_pixels:.0f}")
+            print(f"  Avg road coverage: {avg_road_coverage:.1f}%")
+
+            # Show first and last frame stats
+            first_frame = self.semantic_frames[0]
+            last_frame = self.semantic_frames[-1]
+            print(f"\n  First frame: {first_frame.num_lane_pixels} lane pixels, {first_frame.road_coverage:.1f}% road")
+            print(f"  Last frame:  {last_frame.num_lane_pixels} lane pixels, {last_frame.road_coverage:.1f}% road")
+
+        return self.semantic_frames
+
+    def visualize_semantic_frame(self, frame_idx: int = 0, output_path: Optional[str] = None):
+        """Visualize a single semantic frame."""
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("matplotlib not available, skipping visualization")
+            return
+
+        if not self.semantic_frames:
+            print("No semantic data to visualize")
+            return
+
+        if frame_idx >= len(self.semantic_frames):
+            frame_idx = len(self.semantic_frames) - 1
+
+        frame = self.semantic_frames[frame_idx]
+
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        fig.suptitle(f'Semantic Frame {frame_idx} - t={frame.timestamp_sec:.2f}s', fontsize=14)
+
+        # Road mask
+        ax1 = axes[0]
+        ax1.imshow(frame.road_mask, cmap='Greens')
+        ax1.set_title(f'Road Mask ({frame.road_coverage:.1f}% coverage)')
+        ax1.axis('off')
+
+        # Lane markings
+        ax2 = axes[1]
+        lane_img = np.zeros_like(frame.road_mask)
+        if frame.num_lane_pixels > 0:
+            lane_img[frame.lane_pixels[:, 0], frame.lane_pixels[:, 1]] = 1
+        ax2.imshow(lane_img, cmap='Blues')
+        ax2.set_title(f'Lane Markings ({frame.num_lane_pixels} pixels)')
+        ax2.axis('off')
+
+        # Combined view
+        ax3 = axes[2]
+        combined = np.zeros((*frame.road_mask.shape, 3), dtype=np.uint8)
+        combined[:, :, 1] = frame.road_mask * 100  # Green for road
+        if frame.num_lane_pixels > 0:
+            combined[frame.lane_pixels[:, 0], frame.lane_pixels[:, 1], 0] = 255  # Red for lanes
+            combined[frame.lane_pixels[:, 0], frame.lane_pixels[:, 1], 1] = 255  # Yellow lanes
+        ax3.imshow(combined)
+        ax3.set_title('Combined (Green=Road, Yellow=Lane)')
+        ax3.axis('off')
+
+        plt.tight_layout()
+
+        if output_path:
+            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+            print(f"  Saved semantic visualization to: {output_path}")
+        else:
+            plt.show()
+        plt.close()
+
+    def visualize_semantic_summary(self, output_path: Optional[str] = None):
+        """Visualize summary statistics of semantic extraction."""
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("matplotlib not available, skipping visualization")
+            return
+
+        if not self.semantic_frames:
+            print("No semantic data to visualize")
+            return
+
+        # Collect statistics
+        timestamps = np.array([f.timestamp_ns for f in self.semantic_frames]) / 1e9
+        timestamps = timestamps - timestamps[0]  # Relative time
+        lane_counts = np.array([f.num_lane_pixels for f in self.semantic_frames])
+        road_coverages = np.array([f.road_coverage for f in self.semantic_frames])
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle(f'Semantic Extraction Summary - {self.bag_path.name}', fontsize=14)
+
+        # Lane pixel count over time
+        ax1 = axes[0, 0]
+        ax1.plot(timestamps, lane_counts, 'b-', linewidth=0.5)
+        ax1.set_xlabel('Time (s)')
+        ax1.set_ylabel('Lane Pixels')
+        ax1.set_title(f'Lane Marking Pixels Over Time (avg: {np.mean(lane_counts):.0f})')
+        ax1.grid(True, alpha=0.3)
+
+        # Road coverage over time
+        ax2 = axes[0, 1]
+        ax2.plot(timestamps, road_coverages, 'g-', linewidth=0.5)
+        ax2.set_xlabel('Time (s)')
+        ax2.set_ylabel('Road Coverage (%)')
+        ax2.set_title(f'Road Coverage Over Time (avg: {np.mean(road_coverages):.1f}%)')
+        ax2.grid(True, alpha=0.3)
+
+        # Lane pixel histogram
+        ax3 = axes[1, 0]
+        ax3.hist(lane_counts, bins=50, color='blue', alpha=0.7)
+        ax3.set_xlabel('Lane Pixels per Frame')
+        ax3.set_ylabel('Frequency')
+        ax3.set_title('Distribution of Lane Pixel Counts')
+        ax3.grid(True, alpha=0.3)
+
+        # Sample frames - first, middle, last
+        ax4 = axes[1, 1]
+        sample_indices = [0, len(self.semantic_frames) // 2, len(self.semantic_frames) - 1]
+        combined_lanes = np.zeros((*self.semantic_frames[0].road_mask.shape,), dtype=np.float32)
+
+        for idx in sample_indices:
+            frame = self.semantic_frames[idx]
+            if frame.num_lane_pixels > 0:
+                combined_lanes[frame.lane_pixels[:, 0], frame.lane_pixels[:, 1]] += 1
+
+        ax4.imshow(combined_lanes, cmap='hot')
+        ax4.set_title('Lane Pixels Overlay (3 sample frames)')
+        ax4.axis('off')
+
+        plt.tight_layout()
+
+        if output_path:
+            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+            print(f"  Saved semantic summary to: {output_path}")
+        else:
+            plt.show()
+        plt.close()
+
     def visualize_trajectory(self, output_path: Optional[str] = None):
         """Visualize the extracted trajectory."""
         try:
@@ -377,7 +653,7 @@ class HDMapProcessor:
 # Main Entry Point
 # =============================================================================
 
-def process_bag(bag_path: str, output_dir: Optional[str] = None, visualize: bool = False):
+def process_bag(bag_path: str, output_dir: Optional[str] = None, visualize: bool = False, sample_rate: int = 1):
     """Process a rosbag to generate HD map."""
     bag_path = Path(bag_path)
 
@@ -403,16 +679,32 @@ def process_bag(bag_path: str, output_dir: Optional[str] = None, visualize: bool
     traj_path = out_dir / "trajectory.json"
     processor.save_trajectory(str(traj_path))
 
-    # Visualize if requested
+    # Visualize trajectory if requested
     if visualize:
         plot_path = out_dir / "trajectory.png"
         processor.visualize_trajectory(str(plot_path))
 
+    # Step B: Extract semantic data
+    processor.extract_semantic_data(sample_rate=sample_rate)
+
+    # Visualize semantic data if requested
+    if visualize and processor.semantic_frames:
+        # Save summary visualization
+        semantic_summary_path = out_dir / "semantic_summary.png"
+        processor.visualize_semantic_summary(str(semantic_summary_path))
+
+        # Save sample frame visualizations
+        for idx in [0, len(processor.semantic_frames) // 2, len(processor.semantic_frames) - 1]:
+            if idx < len(processor.semantic_frames):
+                frame_path = out_dir / f"semantic_frame_{idx}.png"
+                processor.visualize_semantic_frame(idx, str(frame_path))
+
     print(f"\n{'='*60}")
-    print(" Step A Complete!")
+    print(" Steps A & B Complete!")
     print(f"{'='*60}")
+    print(f"\n  Trajectory: {len(processor.trajectory)} poses")
+    print(f"  Semantic frames: {len(processor.semantic_frames)}")
     print("\n  Next steps to implement:")
-    print("    B. Semantic Extraction (lane/road from ground truth)")
     print("    C. 2D-to-3D Projection (camera pixels -> LiDAR depth)")
     print("    D. Global Registration (local -> global frame)")
     print("    E. Accumulation & Filtering (cluster + fit splines)")
@@ -429,18 +721,20 @@ def main():
 Examples:
   python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-04_29_03
   python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-04_29_03 --visualize
-  python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-04_29_03 --output /tmp/hdmap_output
+  python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-04_29_03 --sample-rate 5
         """
     )
 
     parser.add_argument('--bag', required=True, help='Path to rosbag directory')
     parser.add_argument('--output', type=str, default=None, help='Output directory for HD map data')
-    parser.add_argument('--visualize', action='store_true', help='Visualize trajectory')
+    parser.add_argument('--visualize', action='store_true', help='Generate visualizations')
+    parser.add_argument('--sample-rate', type=int, default=1,
+                        help='Process every Nth semantic frame (default: 1 = all frames)')
 
     args = parser.parse_args()
 
     try:
-        process_bag(args.bag, args.output, args.visualize)
+        process_bag(args.bag, args.output, args.visualize, args.sample_rate)
         return 0
     except Exception as e:
         print(f"\nError: {e}")
