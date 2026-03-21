@@ -16,6 +16,7 @@ Recorded Topics:
     - /tf, /tf_static                                             : Transforms
 
 Usage:
+    Run first autoiq_bridge and carla bridge launch to record
     # Record data while driving from spawn 10 to spawn 50
     python tools/hd_map_data_collector.py --start 10 --end 50 --record
 
