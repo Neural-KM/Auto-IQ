@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-HD Map Processor - Offline Rosbag Processing
-=============================================
+HD Map Processor (LiDAR) - Offline Rosbag Processing
+====================================================
 
-Processes recorded rosbags to generate HD maps.
+Processes recorded rosbags to generate HD maps using LiDAR-based 2D-to-3D projection.
 
 Pipeline Steps:
     A. Extract trajectory from odometry (IMPLEMENTED)
@@ -11,18 +11,18 @@ Pipeline Steps:
     C. Project 2D lane pixels to 3D using hybrid LiDAR + ground plane (IMPLEMENTED)
        - Primary: LiDAR depth lookup (projects LiDAR → camera, finds nearest depth)
        - Fallback: Local ground plane fit (fits plane to nearby LiDAR ground points)
-    D. Transform to global frame using trajectory
+    D. Transform to global frame using trajectory (IMPLEMENTED)
     E. Cluster and fit splines
 
 Usage:
-    # Basic processing (Steps A, B & C)
-    python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-05_52_15
+    # Basic processing (Steps A, B, C & D)
+    python tools/hd_map_process_LiDAR.py --bag Rosbags/hdmap_2026_03_21-05_52_15
 
     # With visualizations
-    python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-05_52_15 --visualize
+    python tools/hd_map_process_LiDAR.py --bag Rosbags/hdmap_2026_03_21-05_52_15 --visualize
 
     # Process every 5th frame (faster)
-    python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-05_52_15 --visualize --sample-rate 5
+    python tools/hd_map_process_LiDAR.py --bag Rosbags/hdmap_2026_03_21-05_52_15 --visualize --sample-rate 5
 
 Output:
     Creates <bag_name>_hdmap/ directory with:
@@ -30,7 +30,8 @@ Output:
     - trajectory.png        : Trajectory visualization (if --visualize)
     - semantic_summary.png  : Lane/road statistics (if --visualize)
     - semantic_frame_*.png  : Sample frame visualizations (if --visualize)
-    - lane_points_3d.png    : 3D lane points BEV visualization (if --visualize)
+    - lane_points_3d.png    : 3D lane points BEV in vehicle frame (if --visualize)
+    - global_lane_map.png   : Global lane map with trajectory (if --visualize)
 """
 
 import argparse
@@ -222,6 +223,33 @@ class LidarFrame:
         return self.points[:, :3] if self.points is not None else np.empty((0, 3))
 
 
+@dataclass
+class GlobalLaneMap:
+    """Accumulated lane marking points in global frame."""
+    points: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.float32))
+    # Nx3 array of (x, y, z) in global/map frame
+
+    def add_points(self, new_points: np.ndarray):
+        """Add new points to the global map."""
+        if new_points is not None and len(new_points) > 0:
+            self.points = np.vstack([self.points, new_points.astype(np.float32)])
+
+    @property
+    def num_points(self) -> int:
+        return len(self.points)
+
+    def get_bounds(self) -> dict:
+        """Get bounding box of all points."""
+        if self.num_points == 0:
+            return {'x_min': 0, 'x_max': 0, 'y_min': 0, 'y_max': 0}
+        return {
+            'x_min': float(np.min(self.points[:, 0])),
+            'x_max': float(np.max(self.points[:, 0])),
+            'y_min': float(np.min(self.points[:, 1])),
+            'y_max': float(np.max(self.points[:, 1])),
+        }
+
+
 # =============================================================================
 # Utility Functions
 # =============================================================================
@@ -288,6 +316,7 @@ class HDMapProcessor:
         self.semantic_frames: List[SemanticFrame] = []  # Step B data
         self.lidar_frames: List[LidarFrame] = []        # LiDAR data for Step C
         self.lane_points_3d: List[LanePoints3D] = []    # Step C data
+        self.global_lane_map: GlobalLaneMap = GlobalLaneMap()  # Step D data
         self._msg_type_cache: Dict[str, type] = {}
 
         # Initialize camera intrinsics
@@ -1119,6 +1148,141 @@ class HDMapProcessor:
             plt.show()
         plt.close()
 
+    def register_to_global_frame(self) -> GlobalLaneMap:
+        """
+        Step D: Transform local 3D lane points to global frame using trajectory.
+
+        For each frame's 3D points (in vehicle frame), finds the corresponding
+        vehicle pose and transforms the points to global/map frame.
+
+        Transform: P_global = R @ P_local + t
+        where R is rotation matrix from pose and t is pose position.
+
+        Returns:
+            GlobalLaneMap with all accumulated points in global frame
+        """
+        print(f"\n{'='*60}")
+        print(" Step D: Registering to Global Frame")
+        print(f"{'='*60}")
+
+        if not self.lane_points_3d:
+            print("  No 3D points to register. Run project_lane_pixels_to_3d first.")
+            return self.global_lane_map
+
+        if not self.trajectory.poses:
+            print("  No trajectory data. Run extract_trajectory first.")
+            return self.global_lane_map
+
+        total_registered = 0
+        frames_without_pose = 0
+        frames_with_points = 0
+
+        for lane_frame in self.lane_points_3d:
+            if lane_frame.num_points == 0:
+                continue
+
+            frames_with_points += 1
+
+            # Find corresponding pose by timestamp
+            pose = self.trajectory.get_pose_at_time(lane_frame.timestamp_ns)
+
+            if pose is None:
+                frames_without_pose += 1
+                continue
+
+            # Transform points from vehicle frame to global frame
+            # P_global = R @ P_local + t
+            local_points = lane_frame.points  # Nx3
+
+            # Get rotation matrix and position from pose
+            R = pose.rotation_matrix  # 3x3
+            t = pose.position         # (3,)
+
+            # Apply transformation: each row of local_points is transformed
+            # global_points[i] = R @ local_points[i] + t
+            global_points = (R @ local_points.T).T + t
+
+            # Add to global map
+            self.global_lane_map.add_points(global_points)
+            total_registered += len(global_points)
+
+        # Summary
+        print(f"\n  Frames with 3D points: {frames_with_points}")
+        print(f"  Frames without matching pose: {frames_without_pose}")
+        print(f"  Total registered points: {total_registered:,}")
+        print(f"  Global map bounds: {self.global_lane_map.get_bounds()}")
+
+        return self.global_lane_map
+
+    def visualize_global_map(self, output_path: Optional[str] = None,
+                              show_trajectory: bool = True,
+                              point_size: float = 0.5):
+        """
+        Visualize the global lane map (bird's eye view).
+
+        Args:
+            output_path: Save plot to file if provided
+            show_trajectory: Overlay vehicle trajectory
+            point_size: Size of lane points in plot
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("matplotlib not available, skipping visualization")
+            return
+
+        if self.global_lane_map.num_points == 0:
+            print("No global map data to visualize. Run register_to_global_frame first.")
+            return
+
+        fig, ax = plt.subplots(figsize=(12, 12))
+        fig.suptitle(f'Global Lane Map (LiDAR) - {self.bag_path.name}', fontsize=14)
+
+        # Plot lane points
+        points = self.global_lane_map.points
+        ax.scatter(points[:, 0], points[:, 1], c='blue', s=point_size,
+                   alpha=0.3, label=f'Lane points ({len(points):,})')
+
+        # Plot trajectory if requested
+        if show_trajectory and self.trajectory.poses:
+            traj = self.trajectory.to_numpy()
+            ax.plot(traj['x'], traj['y'], 'r-', linewidth=1, alpha=0.7, label='Vehicle path')
+            ax.plot(traj['x'][0], traj['y'][0], 'go', markersize=10, label='Start')
+            ax.plot(traj['x'][-1], traj['y'][-1], 'ro', markersize=10, label='End')
+
+            # Draw heading arrows at intervals
+            step = max(1, len(traj['x']) // 20)
+            for i in range(0, len(traj['x']), step):
+                yaw = traj['yaw'][i]
+                dx = np.cos(yaw) * 2
+                dy = np.sin(yaw) * 2
+                ax.arrow(traj['x'][i], traj['y'][i], dx, dy,
+                        head_width=0.5, head_length=0.3, fc='red', ec='red', alpha=0.5)
+
+        ax.set_xlabel('X (m) - Global Frame')
+        ax.set_ylabel('Y (m) - Global Frame')
+        ax.set_aspect('equal')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+
+        # Add bounds info
+        bounds = self.global_lane_map.get_bounds()
+        info_text = (f"X: [{bounds['x_min']:.1f}, {bounds['x_max']:.1f}] m\n"
+                     f"Y: [{bounds['y_min']:.1f}, {bounds['y_max']:.1f}] m\n"
+                     f"Points: {self.global_lane_map.num_points:,}")
+        ax.text(0.02, 0.98, info_text, transform=ax.transAxes, fontsize=9,
+                verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+        plt.tight_layout()
+
+        if output_path:
+            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+            print(f"  Saved global map visualization to: {output_path}")
+        else:
+            plt.show()
+        plt.close()
+
     def visualize_trajectory(self, output_path: Optional[str] = None):
         """Visualize the extracted trajectory."""
         try:
@@ -1262,17 +1426,30 @@ def process_bag(bag_path: str, output_dir: Optional[str] = None, visualize: bool
             lane_3d_path = out_dir / "lane_points_3d.png"
             processor.visualize_3d_lane_points(str(lane_3d_path))
 
+    # Step D: Register to global frame
+    if processor.lane_points_3d and processor.trajectory.poses:
+        processor.register_to_global_frame()
+
+        # Visualize global map if requested
+        if visualize and processor.global_lane_map.num_points > 0:
+            global_map_path = out_dir / "global_lane_map.png"
+            processor.visualize_global_map(str(global_map_path))
+
     print(f"\n{'='*60}")
-    print(" Steps A, B & C Complete!")
+    print(" Steps A, B, C & D Complete!")
     print(f"{'='*60}")
     print(f"\n  Trajectory: {len(processor.trajectory)} poses")
     print(f"  Semantic frames: {len(processor.semantic_frames)}")
     print(f"  LiDAR frames: {len(processor.lidar_frames)}")
     if processor.lane_points_3d:
         total_3d_pts = sum(f.num_points for f in processor.lane_points_3d)
-        print(f"  3D lane points: {total_3d_pts:,}")
-    print("\n  Next steps to implement:")
-    print("    D. Global Registration (local -> global frame)")
+        print(f"  3D lane points (local): {total_3d_pts:,}")
+    if processor.global_lane_map.num_points > 0:
+        print(f"  Global map points: {processor.global_lane_map.num_points:,}")
+        bounds = processor.global_lane_map.get_bounds()
+        print(f"  Map extent: X=[{bounds['x_min']:.1f}, {bounds['x_max']:.1f}]m, "
+              f"Y=[{bounds['y_min']:.1f}, {bounds['y_max']:.1f}]m")
+    print("\n  Next step to implement:")
     print("    E. Accumulation & Filtering (cluster + fit splines)")
     print()
 
