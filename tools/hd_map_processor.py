@@ -8,12 +8,12 @@ Processes recorded rosbags to generate HD maps.
 Pipeline Steps:
     A. Extract trajectory from odometry (IMPLEMENTED)
     B. Extract semantic masks (road/lanes) from ground truth camera (IMPLEMENTED)
-    C. Project 2D lane pixels to 3D using LiDAR
+    C. Project 2D lane pixels to 3D using IPM (IMPLEMENTED)
     D. Transform to global frame using trajectory
     E. Cluster and fit splines
 
 Usage:
-    # Basic processing (Steps A & B)
+    # Basic processing (Steps A, B & C)
     python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-05_52_15
 
     # With visualizations
@@ -28,6 +28,7 @@ Output:
     - trajectory.png        : Trajectory visualization (if --visualize)
     - semantic_summary.png  : Lane/road statistics (if --visualize)
     - semantic_frame_*.png  : Sample frame visualizations (if --visualize)
+    - lane_points_3d.png    : 3D lane points BEV visualization (if --visualize)
 """
 
 import argparse
@@ -164,6 +165,42 @@ class SemanticFrame:
         return np.sum(self.road_mask) / self.road_mask.size * 100
 
 
+@dataclass
+class LanePoints3D:
+    """3D lane marking points for a single frame (in camera/vehicle frame)."""
+    timestamp_ns: int
+    points: np.ndarray  # Nx3 array of (x, y, z) in vehicle frame (x=forward, y=left, z=up)
+
+    @property
+    def timestamp_sec(self) -> float:
+        return self.timestamp_ns / 1e9
+
+    @property
+    def num_points(self) -> int:
+        return len(self.points) if self.points is not None else 0
+
+
+@dataclass
+class CameraIntrinsics:
+    """Camera intrinsic parameters."""
+    fx: float  # Focal length x
+    fy: float  # Focal length y
+    cx: float  # Principal point x
+    cy: float  # Principal point y
+    width: int
+    height: int
+
+    @classmethod
+    def from_fov(cls, fov_deg: float, width: int, height: int) -> 'CameraIntrinsics':
+        """Create intrinsics from horizontal FOV."""
+        fov_rad = np.radians(fov_deg)
+        fx = width / (2.0 * np.tan(fov_rad / 2.0))
+        fy = fx  # Square pixels
+        cx = width / 2.0
+        cy = height / 2.0
+        return cls(fx=fx, fy=fy, cx=cx, cy=cy, width=width, height=height)
+
+
 # =============================================================================
 # Utility Functions
 # =============================================================================
@@ -195,7 +232,7 @@ class HDMapProcessor:
     Steps:
         A. Extract trajectory from odometry
         B. Extract semantic masks (road/lanes) from ground truth camera
-        C. Project 2D lane pixels to 3D using LiDAR
+        C. Project 2D lane pixels to 3D using IPM (ground plane assumption)
         D. Transform to global frame using trajectory
         E. Cluster and fit splines
     """
@@ -208,6 +245,14 @@ class HDMapProcessor:
     CLASS_ROAD = 1
     CLASS_LANE_MARKING = 24
 
+    # Camera parameters from objects.json (semantic camera at same position as RGB front)
+    CAMERA_X = 0.2   # Forward offset from vehicle origin (m)
+    CAMERA_Y = 0.0   # Lateral offset (m)
+    CAMERA_Z = 1.5   # Height above ground (m)
+    CAMERA_FOV = 90.0
+    CAMERA_WIDTH = 1280
+    CAMERA_HEIGHT = 720
+
     def __init__(self, bag_path: str):
         self.bag_path = Path(bag_path)
         if not self.bag_path.exists():
@@ -215,7 +260,13 @@ class HDMapProcessor:
         self.trajectory = Trajectory()
         self.gnss_data: List[dict] = []
         self.semantic_frames: List[SemanticFrame] = []  # Step B data
+        self.lane_points_3d: List[LanePoints3D] = []    # Step C data
         self._msg_type_cache: Dict[str, type] = {}
+
+        # Initialize camera intrinsics
+        self.camera_intrinsics = CameraIntrinsics.from_fov(
+            self.CAMERA_FOV, self.CAMERA_WIDTH, self.CAMERA_HEIGHT
+        )
 
     def _get_message_type(self, type_name: str):
         """Get message class from type name string."""
@@ -445,6 +496,122 @@ class HDMapProcessor:
 
         return self.semantic_frames
 
+    def project_lane_pixels_to_3d(self, max_distance: float = 50.0) -> List[LanePoints3D]:
+        """
+        Step C: Project 2D lane pixels to 3D using IPM (flat ground assumption).
+
+        Uses Inverse Perspective Mapping to project lane marking pixels from
+        image coordinates to 3D vehicle frame coordinates (x=forward, y=left, z=0).
+
+        This approach assumes lane markings are on a flat ground plane (z=0),
+        which is accurate for typical road surfaces.
+
+        Math (same as ipm_funcs.py):
+            1. Pixel to normalized ray: ray = [(u-cx)/fx, (v-cy)/fy, 1] (optical frame)
+            2. Convert optical to camera link: link = [1, -norm_x, -norm_y]
+            3. Project ray to ground plane (z=0): solve for intersection
+
+        Args:
+            max_distance: Filter out points beyond this distance (meters)
+
+        Returns:
+            List of LanePoints3D objects, one per semantic frame
+        """
+        print(f"\n{'='*60}")
+        print(" Step C: Projecting Lane Pixels to 3D (IPM)")
+        print(f"{'='*60}")
+
+        if not self.semantic_frames:
+            print("  No semantic frames to project. Run extract_semantic_data first.")
+            return []
+
+        ci = self.camera_intrinsics
+        cam_height = self.CAMERA_Z  # Camera height above ground
+
+        total_points = 0
+        total_filtered = 0
+
+        for frame in self.semantic_frames:
+            if frame.num_lane_pixels == 0:
+                # No lane pixels in this frame
+                self.lane_points_3d.append(LanePoints3D(
+                    timestamp_ns=frame.timestamp_ns,
+                    points=np.empty((0, 3), dtype=np.float32)
+                ))
+                continue
+
+            # lane_pixels is (row, col) = (v, u)
+            v = frame.lane_pixels[:, 0].astype(np.float32)
+            u = frame.lane_pixels[:, 1].astype(np.float32)
+
+            # 1. Unproject to normalized ray in optical frame
+            # Optical: X=right, Y=down, Z=forward
+            norm_x = (u - ci.cx) / ci.fx
+            norm_y = (v - ci.cy) / ci.fy
+
+            # 2. Convert from Optical to Camera Link Frame
+            # CARLA camera_link: X=forward, Y=left, Z=up
+            # link = [1, -norm_x, -norm_y] (unit ray direction)
+            ray_x = np.ones_like(norm_x)  # forward
+            ray_y = -norm_x                # left
+            ray_z = -norm_y                # up
+
+            # 3. Intersect ray with ground plane (Z = 0)
+            # Camera is at height cam_height above ground
+            # Ray origin: (CAMERA_X, CAMERA_Y, cam_height)
+            # Ray direction: (ray_x, ray_y, ray_z)
+            # Find s such that: cam_height + s * ray_z = 0
+            # s = -cam_height / ray_z
+
+            # Only valid for rays pointing down (ray_z < 0)
+            valid_mask = ray_z < -1e-6  # Looking down at road
+
+            # Calculate intersection parameter
+            s = np.zeros_like(ray_z)
+            s[valid_mask] = -cam_height / ray_z[valid_mask]
+
+            # Intersection must be in front (s > 0)
+            valid_mask &= (s > 0)
+
+            # Calculate 3D points in vehicle frame
+            # (adding camera offset to get vehicle frame coords)
+            x_3d = self.CAMERA_X + s * ray_x
+            y_3d = self.CAMERA_Y + s * ray_y
+            z_3d = np.zeros_like(x_3d)  # Ground plane
+
+            # Filter by distance
+            distance = np.sqrt(x_3d**2 + y_3d**2)
+            valid_mask &= (distance < max_distance)
+            valid_mask &= (x_3d > 0)  # Only forward points
+
+            # Extract valid points
+            points_3d = np.column_stack([
+                x_3d[valid_mask],
+                y_3d[valid_mask],
+                z_3d[valid_mask]
+            ]).astype(np.float32)
+
+            self.lane_points_3d.append(LanePoints3D(
+                timestamp_ns=frame.timestamp_ns,
+                points=points_3d
+            ))
+
+            total_points += len(points_3d)
+            total_filtered += frame.num_lane_pixels - len(points_3d)
+
+        # Summary
+        print(f"\n  Processed {len(self.semantic_frames)} frames")
+        print(f"  Total 3D points: {total_points:,}")
+        print(f"  Filtered out: {total_filtered:,} (behind camera or too far)")
+        if len(self.lane_points_3d) > 0:
+            valid_frames = [f for f in self.lane_points_3d if f.num_points > 0]
+            if valid_frames:
+                avg_points = total_points / len(valid_frames)
+                print(f"  Avg points per frame: {avg_points:.0f}")
+                print(f"  Frames with lane points: {len(valid_frames)}/{len(self.lane_points_3d)}")
+
+        return self.lane_points_3d
+
     def visualize_semantic_frame(self, frame_idx: int = 0, output_path: Optional[str] = None):
         """Visualize a single semantic frame."""
         try:
@@ -564,6 +731,87 @@ class HDMapProcessor:
         if output_path:
             plt.savefig(output_path, dpi=150, bbox_inches='tight')
             print(f"  Saved semantic summary to: {output_path}")
+        else:
+            plt.show()
+        plt.close()
+
+    def visualize_3d_lane_points(self, output_path: Optional[str] = None, sample_frames: int = 10):
+        """
+        Visualize 3D lane points from Step C.
+
+        Shows a bird's-eye view of projected lane marking points in vehicle frame.
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("matplotlib not available, skipping visualization")
+            return
+
+        if not self.lane_points_3d:
+            print("No 3D lane points to visualize. Run project_lane_pixels_to_3d first.")
+            return
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        fig.suptitle(f'3D Lane Points (IPM) - {self.bag_path.name}', fontsize=14)
+
+        # Collect all points from sampled frames
+        step = max(1, len(self.lane_points_3d) // sample_frames)
+        all_x, all_y = [], []
+        colors = []
+        cmap = plt.cm.viridis
+
+        for i, frame in enumerate(self.lane_points_3d[::step]):
+            if frame.num_points > 0:
+                all_x.extend(frame.points[:, 0])
+                all_y.extend(frame.points[:, 1])
+                color = cmap(i / max(1, len(self.lane_points_3d) // step - 1))
+                colors.extend([color] * frame.num_points)
+
+        if not all_x:
+            print("  No valid 3D points found")
+            return
+
+        all_x = np.array(all_x)
+        all_y = np.array(all_y)
+
+        # Left plot: Single frame BEV
+        ax1 = axes[0]
+        # Find a frame with good lane points
+        mid_idx = len(self.lane_points_3d) // 2
+        sample_frame = self.lane_points_3d[mid_idx]
+        if sample_frame.num_points > 0:
+            ax1.scatter(sample_frame.points[:, 1], sample_frame.points[:, 0],
+                       c='blue', s=1, alpha=0.5)
+            ax1.scatter(0, 0, c='red', s=100, marker='^', label='Vehicle')
+            ax1.set_xlabel('Y (m) - Left')
+            ax1.set_ylabel('X (m) - Forward')
+            ax1.set_title(f'Single Frame BEV (frame {mid_idx})\n{sample_frame.num_points} points')
+            ax1.legend()
+            ax1.set_aspect('equal')
+            ax1.grid(True, alpha=0.3)
+            ax1.set_xlim(-20, 20)
+            ax1.set_ylim(0, 50)
+        else:
+            ax1.text(0.5, 0.5, 'No points in sample frame', ha='center', va='center')
+
+        # Right plot: Multiple frames overlaid
+        ax2 = axes[1]
+        ax2.scatter(all_y, all_x, c=colors, s=1, alpha=0.3)
+        ax2.scatter(0, 0, c='red', s=100, marker='^', label='Vehicle')
+        ax2.set_xlabel('Y (m) - Left')
+        ax2.set_ylabel('X (m) - Forward')
+        ax2.set_title(f'Multiple Frames BEV ({len(self.lane_points_3d[::step])} frames)\n{len(all_x):,} points')
+        ax2.legend()
+        ax2.set_aspect('equal')
+        ax2.grid(True, alpha=0.3)
+        ax2.set_xlim(-20, 20)
+        ax2.set_ylim(0, 50)
+
+        plt.tight_layout()
+
+        if output_path:
+            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+            print(f"  Saved 3D lane points visualization to: {output_path}")
         else:
             plt.show()
         plt.close()
@@ -699,13 +947,24 @@ def process_bag(bag_path: str, output_dir: Optional[str] = None, visualize: bool
                 frame_path = out_dir / f"semantic_frame_{idx}.png"
                 processor.visualize_semantic_frame(idx, str(frame_path))
 
+    # Step C: Project 2D lane pixels to 3D using IPM
+    if processor.semantic_frames:
+        processor.project_lane_pixels_to_3d()
+
+        # Visualize 3D lane points if requested
+        if visualize and processor.lane_points_3d:
+            lane_3d_path = out_dir / "lane_points_3d.png"
+            processor.visualize_3d_lane_points(str(lane_3d_path))
+
     print(f"\n{'='*60}")
-    print(" Steps A & B Complete!")
+    print(" Steps A, B & C Complete!")
     print(f"{'='*60}")
     print(f"\n  Trajectory: {len(processor.trajectory)} poses")
     print(f"  Semantic frames: {len(processor.semantic_frames)}")
+    if processor.lane_points_3d:
+        total_3d_pts = sum(f.num_points for f in processor.lane_points_3d)
+        print(f"  3D lane points: {total_3d_pts:,}")
     print("\n  Next steps to implement:")
-    print("    C. 2D-to-3D Projection (camera pixels -> LiDAR depth)")
     print("    D. Global Registration (local -> global frame)")
     print("    E. Accumulation & Filtering (cluster + fit splines)")
     print()
