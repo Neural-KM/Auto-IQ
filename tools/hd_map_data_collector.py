@@ -4,7 +4,7 @@ HD Map Data Collection Script (Standalone)
 ==========================================
 
 Standalone script that spawns a vehicle with sensors, drives between two spawn
-points using CARLA autopilot.
+points using CARLA autopilot, and records a rosbag for HD map generation.
 
 NO need for carla_bridge_node - this script handles everything independently.
 
@@ -12,10 +12,11 @@ Features:
 - Spawns vehicle at configurable start spawn point
 - Loads sensors from existing config (src/autoiq_bridge/config/objects.json)
 - Drives to end spawn point using Traffic Manager autopilot
+- Records rosbag with all required topics for HD map generation
 
 Usage:
-    # Drive from spawn 10 to spawn 50
-    python tools/hd_map_data_collector.py --start 10 --end 50
+    # Drive from spawn 10 to spawn 50 and record
+    python tools/hd_map_data_collector.py --start 10 --end 50 --record
 
     # List all spawn points
     python tools/hd_map_data_collector.py --list-spawns
@@ -367,6 +368,7 @@ class HDMapDataCollector:
                 '/carla/ego_vehicle/sensor/imu/imu/data',
                 '/carla/ego_vehicle/ground_truth/odometry',
                 '/carla/ego_vehicle/sensor/camera/rgb/front/image',
+                '/carla/ego_vehicle/sensor/camera/semantic/front/image',  # Ground truth segmentation
                 '/tf',
                 '/tf_static',
             ]
@@ -419,7 +421,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python tools/hd_map_data_collector.py --start 10 --end 50
+  python tools/hd_map_data_collector.py --start 10 --end 50 --record
   python tools/hd_map_data_collector.py --list-spawns
   python tools/hd_map_data_collector.py --show-spawns
         """
