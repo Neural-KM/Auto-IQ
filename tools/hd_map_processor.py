@@ -10,10 +10,13 @@ Pipeline Steps:
     B. Extract semantic masks (road/lanes) from ground truth camera (IMPLEMENTED)
     C. Project 2D lane pixels to 3D using IPM (IMPLEMENTED)
     D. Transform to global frame using trajectory (IMPLEMENTED)
-    E. Cluster and fit splines
+    E. Cluster and fit splines (IMPLEMENTED)
+       - DBSCAN clustering to separate individual lane markings
+       - B-spline fitting for smooth lane geometry
+       - Exports lane centerlines as JSON
 
 Usage:
-    # Basic processing (Steps A, B, C & D)
+    # Full processing (Steps A-E)
     python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-05_52_15
 
     # With visualizations
@@ -25,11 +28,13 @@ Usage:
 Output:
     Creates <bag_name>_hdmap/ directory with:
     - trajectory.json       : Vehicle poses over time
+    - hd_map_lanes.json     : Fitted lane splines (Step E output)
     - trajectory.png        : Trajectory visualization (if --visualize)
     - semantic_summary.png  : Lane/road statistics (if --visualize)
     - semantic_frame_*.png  : Sample frame visualizations (if --visualize)
     - lane_points_3d.png    : 3D lane points BEV in vehicle frame (if --visualize)
     - global_lane_map.png   : Global lane map with trajectory (if --visualize)
+    - lane_splines.png      : Fitted lane splines visualization (if --visualize)
 """
 
 import argparse
@@ -209,6 +214,56 @@ class GlobalLaneMap:
 
 
 @dataclass
+class LaneSpline:
+    """Fitted spline representing a single lane marking."""
+    lane_id: int
+    points: np.ndarray           # Nx3 raw clustered points
+    spline_points: np.ndarray    # Mx3 interpolated spline points
+    length: float                # Total arc length of the spline (meters)
+    num_raw_points: int          # Number of raw points in cluster
+
+    def to_json(self) -> dict:
+        """Export lane spline to JSON-serializable dict."""
+        return {
+            'lane_id': self.lane_id,
+            'length_m': self.length,
+            'num_raw_points': self.num_raw_points,
+            'spline_points': self.spline_points.tolist()
+        }
+
+
+@dataclass
+class HDMapLanes:
+    """Collection of fitted lane splines representing the HD map."""
+    lanes: List[LaneSpline] = field(default_factory=list)
+
+    def __len__(self) -> int:
+        return len(self.lanes)
+
+    def add_lane(self, lane: LaneSpline):
+        self.lanes.append(lane)
+
+    def total_length(self) -> float:
+        """Total length of all lanes in meters."""
+        return sum(lane.length for lane in self.lanes)
+
+    def get_bounds(self) -> dict:
+        """Get bounding box of all lane splines."""
+        if not self.lanes:
+            return {'x_min': 0, 'x_max': 0, 'y_min': 0, 'y_max': 0}
+        all_pts = np.vstack([lane.spline_points for lane in self.lanes])
+        return {
+            'x_min': float(np.min(all_pts[:, 0])),
+            'x_max': float(np.max(all_pts[:, 0])),
+            'y_min': float(np.min(all_pts[:, 1])),
+            'y_max': float(np.max(all_pts[:, 1])),
+        }
+
+    def to_json(self) -> List[dict]:
+        return [lane.to_json() for lane in self.lanes]
+
+
+@dataclass
 class CameraIntrinsics:
     """Camera intrinsic parameters."""
     fx: float  # Focal length x
@@ -290,6 +345,7 @@ class HDMapProcessor:
         self.semantic_frames: List[SemanticFrame] = []  # Step B data
         self.lane_points_3d: List[LanePoints3D] = []    # Step C data
         self.global_lane_map: GlobalLaneMap = GlobalLaneMap()  # Step D data
+        self.hd_map_lanes: HDMapLanes = HDMapLanes()    # Step E data
         self._msg_type_cache: Dict[str, type] = {}
 
         # Initialize camera intrinsics
@@ -706,6 +762,376 @@ class HDMapProcessor:
         print(f"  Global map bounds: {self.global_lane_map.get_bounds()}")
 
         return self.global_lane_map
+
+    def cluster_and_fit_splines(self, eps: float = 1.0, min_samples: int = 10,
+                                  min_lane_points: int = 50,
+                                  spline_resolution: float = 0.5) -> HDMapLanes:
+        """
+        Step E: Cluster global lane points and fit splines to each lane marking.
+
+        Pipeline:
+            1. Downsample points using voxel grid (for efficiency)
+            2. Cluster using DBSCAN (handles arbitrary lane shapes)
+            3. Order points along each cluster's principal direction
+            4. Fit B-spline to ordered points
+            5. Resample spline at fixed resolution
+
+        Args:
+            eps: DBSCAN max distance between points in same cluster (meters)
+            min_samples: DBSCAN min points to form a cluster
+            min_lane_points: Minimum points for a cluster to be considered a lane
+            spline_resolution: Distance between sampled spline points (meters)
+
+        Returns:
+            HDMapLanes containing fitted lane splines
+        """
+        print(f"\n{'='*60}")
+        print(" Step E: Clustering and Fitting Splines")
+        print(f"{'='*60}")
+
+        if self.global_lane_map.num_points == 0:
+            print("  No global points. Run register_to_global_frame first.")
+            return self.hd_map_lanes
+
+        from sklearn.cluster import DBSCAN
+        from scipy.interpolate import splprep, splev
+
+        points = self.global_lane_map.points
+        print(f"  Input points: {len(points):,}")
+
+        # Step 1: Voxel-based downsampling for efficiency
+        voxel_size = eps / 2
+        print(f"  Downsampling with voxel size: {voxel_size:.2f}m")
+        downsampled = self._voxel_downsample(points, voxel_size)
+        print(f"  After downsampling: {len(downsampled):,} points")
+
+        # Step 2: DBSCAN clustering
+        print(f"  Clustering with DBSCAN (eps={eps}m, min_samples={min_samples})")
+        clustering = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1)
+        labels = clustering.fit_predict(downsampled[:, :2])  # Cluster on XY only
+
+        unique_labels = set(labels)
+        n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
+        n_noise = np.sum(labels == -1)
+        print(f"  Found {n_clusters} clusters, {n_noise:,} noise points")
+
+        # Step 3 & 4: Process each cluster
+        lane_id = 0
+        valid_lanes = 0
+        total_length = 0.0
+
+        for label in unique_labels:
+            if label == -1:  # Skip noise
+                continue
+
+            cluster_mask = labels == label
+            cluster_points = downsampled[cluster_mask]
+
+            if len(cluster_points) < min_lane_points:
+                continue  # Too few points
+
+            # Order points along principal direction
+            ordered_pts = self._order_points_along_curve(cluster_points)
+
+            if ordered_pts is None or len(ordered_pts) < 4:
+                continue
+
+            # Fit spline and resample
+            spline_pts, length = self._fit_and_resample_spline(
+                ordered_pts, spline_resolution
+            )
+
+            if spline_pts is None or length < 1.0:  # Skip very short lanes
+                continue
+
+            lane = LaneSpline(
+                lane_id=lane_id,
+                points=cluster_points,
+                spline_points=spline_pts,
+                length=length,
+                num_raw_points=len(cluster_points)
+            )
+            self.hd_map_lanes.add_lane(lane)
+            lane_id += 1
+            valid_lanes += 1
+            total_length += length
+
+        # Summary
+        print(f"\n  Valid lanes extracted: {valid_lanes}")
+        print(f"  Total lane length: {total_length:.1f}m")
+        if self.hd_map_lanes.lanes:
+            lengths = [l.length for l in self.hd_map_lanes.lanes]
+            print(f"  Lane lengths: min={min(lengths):.1f}m, max={max(lengths):.1f}m, "
+                  f"avg={np.mean(lengths):.1f}m")
+
+        return self.hd_map_lanes
+
+    def _voxel_downsample(self, points: np.ndarray, voxel_size: float) -> np.ndarray:
+        """Downsample points using voxel grid (keep one point per voxel)."""
+        if len(points) == 0:
+            return points
+
+        # Quantize to voxel grid
+        voxel_indices = np.floor(points / voxel_size).astype(np.int32)
+
+        # Use unique voxels to keep one point per voxel
+        _, unique_idx = np.unique(voxel_indices, axis=0, return_index=True)
+        return points[unique_idx]
+
+    def _order_points_along_curve(self, points: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Order 3D points along a curve using greedy nearest-neighbor traversal.
+
+        Uses PCA to find starting point (endpoint), then greedy trace.
+        """
+        if len(points) < 2:
+            return points
+
+        # Use PCA to find principal direction
+        xy = points[:, :2]
+        center = np.mean(xy, axis=0)
+        centered = xy - center
+
+        # Compute principal direction
+        cov = np.cov(centered.T)
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        principal_dir = eigenvectors[:, -1]  # Largest eigenvalue direction
+
+        # Project points onto principal direction to find endpoints
+        projections = centered @ principal_dir
+        start_idx = np.argmin(projections)
+
+        # Greedy nearest-neighbor ordering
+        n = len(points)
+        ordered_indices = [start_idx]
+        remaining = set(range(n)) - {start_idx}
+
+        from scipy.spatial import cKDTree
+        tree = cKDTree(xy)
+
+        current_idx = start_idx
+        while remaining:
+            # Find nearest unvisited neighbor
+            distances, indices = tree.query(xy[current_idx], k=min(20, n))
+
+            next_idx = None
+            for idx in indices:
+                if idx in remaining:
+                    next_idx = idx
+                    break
+
+            if next_idx is None:
+                # Find globally nearest
+                min_dist = float('inf')
+                for r in remaining:
+                    d = np.linalg.norm(xy[current_idx] - xy[r])
+                    if d < min_dist:
+                        min_dist = d
+                        next_idx = r
+
+            ordered_indices.append(next_idx)
+            remaining.remove(next_idx)
+            current_idx = next_idx
+
+        return points[ordered_indices]
+
+    def _fit_and_resample_spline(self, points: np.ndarray,
+                                   resolution: float) -> Tuple[Optional[np.ndarray], float]:
+        """
+        Fit B-spline to ordered points and resample at fixed resolution.
+
+        Returns:
+            (spline_points, arc_length) or (None, 0) if fitting fails
+        """
+        from scipy.interpolate import splprep, splev
+
+        if len(points) < 4:
+            return None, 0.0
+
+        try:
+            # Fit B-spline (use smoothing to handle noise)
+            x, y, z = points[:, 0], points[:, 1], points[:, 2]
+
+            # Adjust smoothing factor based on number of points
+            s = len(points) * 0.1  # Small smoothing
+
+            tck, u = splprep([x, y, z], s=s, k=min(3, len(points) - 1))
+
+            # Compute arc length by sampling densely
+            dense_u = np.linspace(0, 1, 1000)
+            dense_pts = np.array(splev(dense_u, tck)).T
+            arc_lengths = np.cumsum(np.sqrt(np.sum(np.diff(dense_pts, axis=0)**2, axis=1)))
+            total_length = arc_lengths[-1] if len(arc_lengths) > 0 else 0
+
+            if total_length < 1.0:
+                return None, 0.0
+
+            # Resample at fixed resolution
+            n_samples = max(2, int(total_length / resolution))
+            u_new = np.linspace(0, 1, n_samples)
+            spline_pts = np.array(splev(u_new, tck)).T
+
+            return spline_pts.astype(np.float32), total_length
+
+        except Exception:
+            # If spline fitting fails, return simplified polyline
+            return self._simplify_polyline(points, resolution)
+
+    def _simplify_polyline(self, points: np.ndarray,
+                            resolution: float) -> Tuple[np.ndarray, float]:
+        """Fallback: simplify polyline by resampling."""
+        if len(points) < 2:
+            return points, 0.0
+
+        # Compute cumulative arc length
+        diffs = np.diff(points, axis=0)
+        segment_lengths = np.sqrt(np.sum(diffs**2, axis=1))
+        arc_lengths = np.concatenate([[0], np.cumsum(segment_lengths)])
+        total_length = arc_lengths[-1]
+
+        if total_length < 1.0:
+            return points, total_length
+
+        # Resample at fixed intervals
+        n_samples = max(2, int(total_length / resolution))
+        target_lengths = np.linspace(0, total_length, n_samples)
+
+        resampled = []
+        for target in target_lengths:
+            idx = np.searchsorted(arc_lengths, target)
+            idx = min(idx, len(points) - 1)
+            if idx == 0:
+                resampled.append(points[0])
+            else:
+                # Linear interpolation
+                t = (target - arc_lengths[idx-1]) / max(segment_lengths[idx-1], 1e-6)
+                t = np.clip(t, 0, 1)
+                pt = points[idx-1] + t * (points[idx] - points[idx-1])
+                resampled.append(pt)
+
+        return np.array(resampled, dtype=np.float32), total_length
+
+    def visualize_lane_splines(self, output_path: Optional[str] = None,
+                                 show_trajectory: bool = True,
+                                 show_raw_points: bool = False):
+        """
+        Visualize fitted lane splines (Step E result).
+
+        Args:
+            output_path: Save plot to file if provided
+            show_trajectory: Overlay vehicle trajectory
+            show_raw_points: Show raw clustered points behind splines
+        """
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.collections import LineCollection
+        except ImportError:
+            print("matplotlib not available, skipping visualization")
+            return
+
+        if len(self.hd_map_lanes) == 0:
+            print("No lane splines to visualize. Run cluster_and_fit_splines first.")
+            return
+
+        fig, axes = plt.subplots(1, 2, figsize=(18, 9))
+        fig.suptitle(f'HD Map Lane Splines - {self.bag_path.name}', fontsize=14)
+
+        cmap = plt.cm.tab20
+        colors = [cmap(i % 20) for i in range(len(self.hd_map_lanes))]
+
+        # Left: Full map view
+        ax1 = axes[0]
+
+        if show_raw_points:
+            pts = self.global_lane_map.points
+            ax1.scatter(pts[:, 0], pts[:, 1], c='lightgray', s=0.5, alpha=0.3, label='Raw points')
+
+        for i, lane in enumerate(self.hd_map_lanes.lanes):
+            sp = lane.spline_points
+            ax1.plot(sp[:, 0], sp[:, 1], c=colors[i], linewidth=2, alpha=0.8)
+
+        if show_trajectory and self.trajectory.poses:
+            traj = self.trajectory.to_numpy()
+            ax1.plot(traj['x'], traj['y'], 'r-', linewidth=1, alpha=0.5, label='Vehicle path')
+            ax1.plot(traj['x'][0], traj['y'][0], 'go', markersize=8, label='Start')
+            ax1.plot(traj['x'][-1], traj['y'][-1], 'ro', markersize=8, label='End')
+
+        ax1.set_xlabel('X (m)')
+        ax1.set_ylabel('Y (m)')
+        ax1.set_title(f'Lane Splines ({len(self.hd_map_lanes)} lanes, {self.hd_map_lanes.total_length():.0f}m total)')
+        ax1.set_aspect('equal')
+        ax1.legend(loc='upper right')
+        ax1.grid(True, alpha=0.3)
+
+        # Right: Zoomed view on a section
+        ax2 = axes[1]
+
+        # Find center of trajectory for zoom
+        if self.trajectory.poses:
+            traj = self.trajectory.to_numpy()
+            mid_idx = len(traj['x']) // 2
+            zoom_center = (traj['x'][mid_idx], traj['y'][mid_idx])
+            zoom_size = 50  # meters
+        else:
+            bounds = self.hd_map_lanes.get_bounds()
+            zoom_center = ((bounds['x_min'] + bounds['x_max']) / 2,
+                           (bounds['y_min'] + bounds['y_max']) / 2)
+            zoom_size = 50
+
+        if show_raw_points:
+            pts = self.global_lane_map.points
+            ax2.scatter(pts[:, 0], pts[:, 1], c='lightgray', s=1, alpha=0.5)
+
+        for i, lane in enumerate(self.hd_map_lanes.lanes):
+            sp = lane.spline_points
+            # Draw with varying width for visibility
+            ax2.plot(sp[:, 0], sp[:, 1], c=colors[i], linewidth=3, alpha=0.8)
+            # Add lane ID label at midpoint
+            mid = len(sp) // 2
+            ax2.annotate(f'L{lane.lane_id}', (sp[mid, 0], sp[mid, 1]),
+                        fontsize=8, ha='center', va='center',
+                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
+
+        if show_trajectory and self.trajectory.poses:
+            ax2.plot(traj['x'], traj['y'], 'r-', linewidth=2, alpha=0.7)
+
+        ax2.set_xlim(zoom_center[0] - zoom_size, zoom_center[0] + zoom_size)
+        ax2.set_ylim(zoom_center[1] - zoom_size, zoom_center[1] + zoom_size)
+        ax2.set_xlabel('X (m)')
+        ax2.set_ylabel('Y (m)')
+        ax2.set_title('Zoomed View (50m window)')
+        ax2.set_aspect('equal')
+        ax2.grid(True, alpha=0.3)
+
+        # Add info box
+        info_text = (f"Lanes: {len(self.hd_map_lanes)}\n"
+                     f"Total length: {self.hd_map_lanes.total_length():.1f}m\n"
+                     f"Raw points: {self.global_lane_map.num_points:,}")
+        ax1.text(0.02, 0.98, info_text, transform=ax1.transAxes, fontsize=9,
+                 verticalalignment='top', fontfamily='monospace',
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+        plt.tight_layout()
+
+        if output_path:
+            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+            print(f"  Saved lane splines visualization to: {output_path}")
+        else:
+            plt.show()
+        plt.close()
+
+    def save_hd_map(self, output_path: str):
+        """Save HD map lanes to JSON."""
+        output = {
+            'bag_path': str(self.bag_path),
+            'num_lanes': len(self.hd_map_lanes),
+            'total_length_m': self.hd_map_lanes.total_length(),
+            'bounds': self.hd_map_lanes.get_bounds(),
+            'lanes': self.hd_map_lanes.to_json()
+        }
+        with open(output_path, 'w') as f:
+            json.dump(output, f, indent=2)
+        print(f"  Saved HD map to: {output_path}")
 
     def visualize_global_map(self, output_path: Optional[str] = None,
                               show_trajectory: bool = True,
@@ -1129,8 +1555,21 @@ def process_bag(bag_path: str, output_dir: Optional[str] = None, visualize: bool
             global_map_path = out_dir / "global_lane_map.png"
             processor.visualize_global_map(str(global_map_path))
 
+    # Step E: Cluster and fit splines
+    if processor.global_lane_map.num_points > 0:
+        processor.cluster_and_fit_splines()
+
+        # Save HD map
+        hd_map_path = out_dir / "hd_map_lanes.json"
+        processor.save_hd_map(str(hd_map_path))
+
+        # Visualize lane splines if requested
+        if visualize and len(processor.hd_map_lanes) > 0:
+            splines_path = out_dir / "lane_splines.png"
+            processor.visualize_lane_splines(str(splines_path), show_raw_points=True)
+
     print(f"\n{'='*60}")
-    print(" Steps A, B, C & D Complete!")
+    print(" HD Map Processing Complete (Steps A-E)")
     print(f"{'='*60}")
     print(f"\n  Trajectory: {len(processor.trajectory)} poses")
     print(f"  Semantic frames: {len(processor.semantic_frames)}")
@@ -1142,8 +1581,9 @@ def process_bag(bag_path: str, output_dir: Optional[str] = None, visualize: bool
         bounds = processor.global_lane_map.get_bounds()
         print(f"  Map extent: X=[{bounds['x_min']:.1f}, {bounds['x_max']:.1f}]m, "
               f"Y=[{bounds['y_min']:.1f}, {bounds['y_max']:.1f}]m")
-    print("\n  Next step to implement:")
-    print("    E. Accumulation & Filtering (cluster + fit splines)")
+    if len(processor.hd_map_lanes) > 0:
+        print(f"  Extracted lanes: {len(processor.hd_map_lanes)}")
+        print(f"  Total lane length: {processor.hd_map_lanes.total_length():.1f}m")
     print()
 
     return processor
