@@ -2,21 +2,25 @@
 Local Lane Estimator
 ====================
 
-Unified module that estimates local road structure from:
-1. BEV occupancy grid (for road boundary extraction)
-2. Semantic segmentation (for lane marking polynomial fits)
+Estimates local road structure from semantic segmentation images.
 
-Returns a single LocalRoadEstimate containing:
-- Road boundaries (left/right edges of local lane data)
-- Lane polynomial fits (from actual road_line markings in image)
-- Estimated lane structure (guessed from boundaries using a priori knowledge)
+Uses a single IPM (Inverse Perspective Mapping) transform to create a BEV
+(Bird's Eye View) representation, then extracts:
+1. Road boundaries (left/right edges from drivable area)
+2. Estimated lane structure (using a priori knowledge about lane count/width)
+
+Frame convention (base_link):
+  x = forward,  y = lateral  (+left, -right)
+  Left  boundary -> higher y  (divider / oncoming side)
+  Right boundary -> lower  y  (wall / kerb side)
+
+Right-hand drive lane numbering (lane_index):
+  0 = rightmost (closest to wall/kerb)
+  1, 2, ... = toward centre
 
 NOTE: The "local_lane_data" lanes are NOT detected - they are estimated/guessed
 by dividing the detected road width using configured lane_count and road_width
 parameters. This uses a priori knowledge about expected road structure.
-
-The "lane_fits" are actual polynomial fits to painted lane markings detected
-in the semantic segmentation image.
 """
 
 from __future__ import annotations
@@ -25,17 +29,12 @@ import numpy as np
 import cv2
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Dict, Any
+from scipy.ndimage import uniform_filter1d
 
 from mapping.core.boundary_extractor import (
     extract_boundaries,
+    draw_boundary_overlay,
     boundary_to_base_link,
-)
-from mapping.core.local_lane_data_generator import (
-    LocalLaneDataGenerator,
-    LocalLaneDataResult,
-    LaneResult,
-    STATUS_OK,
-    STATUS_NO_BOUNDARIES,
 )
 from mapping.utils.ipm_transform import convert_to_ipm
 from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME
@@ -44,27 +43,40 @@ from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME
 ROAD_ID = SEMANTIC_BY_NAME['road']
 ROAD_LINE_ID = SEMANTIC_BY_NAME['road_line']
 
+# Status codes for lane estimation
+STATUS_OK = 0
+STATUS_NO_BOUNDARIES = 1
+STATUS_INVALID_WIDTH = 2
+STATUS_INSUFFICIENT_POINTS = 3
+
+
 # ============================================================================
 # Result Dataclasses
 # ============================================================================
 
 
 @dataclass
-class LanePolyFit:
-    """Polynomial fit result for a single lane marking."""
-    coeffs: np.ndarray           # Polynomial coefficients [a, b, c] for x = ay^2 + by + c
-    confidence: float            # Detection confidence (0-1)
-    pixel_count: int             # Number of pixels used for fit
-    y_range: Tuple[float, float] # Valid y range in BEV pixels
+class LaneResult:
+    """Single lane within the local lane data."""
+    lane_index: int
+    left_boundary: np.ndarray    # (N, 2) x, y in base_link
+    right_boundary: np.ndarray   # (N, 2) x, y in base_link
+    centerline: np.ndarray       # (N, 2) x, y in base_link
+    width_avg: float
+    is_valid: bool
+    is_partial: bool = False     # True if computed from single boundary
 
 
 @dataclass
-class LaneMarkingFits:
-    """Polynomial fits for detected lane markings (from actual road_line pixels)."""
-    valid: bool = False
-    all_fits: List[LanePolyFit] = field(default_factory=list)
-    bev_params: Dict[str, Any] = field(default_factory=dict)
-    debug_image: Optional[np.ndarray] = None
+class LocalLaneDataResult:
+    """Complete local lane data with all lanes."""
+    valid: bool
+    status_code: int
+    left_boundary: np.ndarray    # (N, 2) raw left road edge
+    right_boundary: np.ndarray   # (N, 2) raw right road edge
+    lanes: List[LaneResult] = field(default_factory=list)
+    road_width_avg: float = 0.0
+    lane_count: int = 0
 
 
 @dataclass
@@ -72,22 +84,16 @@ class LocalRoadEstimate:
     """
     Complete local road structure estimate.
 
-    Contains two types of lane information:
-    1. lane_fits: Actual polynomial fits to painted lane markings (road_line pixels)
-    2. local_lane_data: Estimated/guessed lanes from road boundaries using a priori knowledge
-
-    The local_lane_data lanes are NOT detected - they are computed by dividing
-    the detected road width equally based on configured lane_count parameter.
+    Contains estimated lane structure from road boundaries using a priori knowledge.
+    The lanes are NOT detected - they are computed by dividing the detected road
+    width equally based on configured lane_count parameter.
     """
     # Validity
     valid: bool = False
 
-    # Road boundaries (from BEV local lane data extraction)
+    # Road boundaries in base_link coordinates
     left_boundary: Optional[np.ndarray] = None   # (N, 2) x, y in base_link
     right_boundary: Optional[np.ndarray] = None  # (N, 2) x, y in base_link
-
-    # Lane marking polynomial fits (from semantic road_line pixels - ACTUAL detection)
-    lane_fits: Optional[LaneMarkingFits] = None
 
     # Estimated lane structure (guessed from boundaries using a priori knowledge)
     local_lane_data: Optional[LocalLaneDataResult] = None
@@ -97,413 +103,406 @@ class LocalRoadEstimate:
 
 
 # ============================================================================
-# Lane Marking Polynomial Fitter
+# Local Lane Estimator
 # ============================================================================
 
-class LaneMarkingFitter:
-    """
-    Fits polynomial curves to lane markings using sliding window search.
-
-    Operates on BEV-transformed semantic images to find road_line pixels
-    and fit 2nd-order polynomials. This detects ACTUAL painted lane markings.
-    """
-
-    def __init__(
-        self,
-        bev_x_range: Tuple[float, float] = (5.0, 35.0),
-        bev_y_range: Tuple[float, float] = (-15.0, 15.0),
-        pixels_per_meter: float = 10.0,
-        n_windows: int = 9,
-        margin: int = 50,
-        min_pixels: int = 30,
-    ):
-        """
-        Initialize lane marking fitter.
-
-        Args:
-            bev_x_range: Forward range in meters (min, max)
-            bev_y_range: Lateral range in meters (left positive)
-            pixels_per_meter: BEV resolution
-            n_windows: Number of sliding windows
-            margin: Window half-width in pixels
-            min_pixels: Minimum pixels to recenter window
-        """
-        self.bev_x_range = bev_x_range
-        self.bev_y_range = bev_y_range
-        self.pixels_per_meter = pixels_per_meter
-        self.n_windows = n_windows
-        self.margin = margin
-        self.min_pixels = min_pixels
-        self.min_fit_pixels = 60
-        self.min_fit_span_px = 40
-        self.max_component_width_px = int(max(12, 3.0 * self.pixels_per_meter))
-        self.max_rmse_px = 10.0
-        self.max_abs_quadratic = 0.0012
-
-        # Derived BEV dimensions
-        x_span = bev_x_range[1] - bev_x_range[0]
-        y_span = bev_y_range[1] - bev_y_range[0]
-        self.bev_height = int(x_span * pixels_per_meter)
-        self.bev_width = int(y_span * pixels_per_meter)
-
-    def fit(
-        self,
-        semantic_img: np.ndarray,
-        fov: float,
-        pitch: float,
-        camera_height: float,
-    ) -> LaneMarkingFits:
-        """
-        Extract and fit lane markings from semantic segmentation.
-
-        Args:
-            semantic_img: Mono8 semantic segmentation image
-            fov: Camera horizontal FOV in degrees
-            pitch: Camera pitch in degrees
-            camera_height: Camera height in meters
-
-        Returns:
-            LaneMarkingFits with polynomial coefficients
-        """
-        # 1) Project full drivable area (road + markings) to BEV.
-        drivable_mask = ((semantic_img == ROAD_ID) | (semantic_img == ROAD_LINE_ID)).astype(np.uint8) * 255
-        bev_drivable, _, _ = convert_to_ipm(
-            image=drivable_mask,
-            fov=fov,
-            pitch=pitch,
-            camera_height=camera_height,
-            bev_x_range=self.bev_x_range,
-            bev_y_range=self.bev_y_range,
-            pixels_per_meter=self.pixels_per_meter,
-            interpolation=cv2.INTER_NEAREST,
-        )
-
-        # 2) Project lane-marking pixels to BEV and keep only those inside drivable ROI.
-        lane_mask = (semantic_img == ROAD_LINE_ID).astype(np.uint8) * 255
-        bev_lane_raw, _, _ = convert_to_ipm(
-            image=lane_mask,
-            fov=fov,
-            pitch=pitch,
-            camera_height=camera_height,
-            bev_x_range=self.bev_x_range,
-            bev_y_range=self.bev_y_range,
-            pixels_per_meter=self.pixels_per_meter,
-            interpolation=cv2.INTER_NEAREST,
-        )
-
-        drivable_roi = bev_drivable > 127
-        lane_candidates = (bev_lane_raw > 127) & drivable_roi
-
-        # Slight dilation keeps thin projected lane pixels connected for sliding windows.
-        lane_candidates = cv2.dilate(
-            lane_candidates.astype(np.uint8),
-            np.ones((3, 3), dtype=np.uint8),
-            iterations=1,
-        )
-        bev_lane = (lane_candidates * 255).astype(np.uint8)
-
-        # Update actual dimensions from transform
-        bev_height, bev_width = bev_lane.shape[:2]
-
-        # Multi-lane extraction from connected components + robust polynomial fitting.
-        tracks, debug_img = self._fit_from_connected_components(bev_lane, bev_width, bev_height)
-
-        # Compute results
-        result = LaneMarkingFits(
-            valid=(len(tracks) > 0),
-            bev_params={
-                'width': bev_width,
-                'height': bev_height,
-                'x_range': self.bev_x_range,
-                'y_range': self.bev_y_range,
-                'pixels_per_meter': self.pixels_per_meter,
-            },
-            debug_image=debug_img,
-        )
-
-        for track in tracks:
-            result.all_fits.append(
-                LanePolyFit(
-                    coeffs=track['coeffs'],
-                    confidence=float(min(1.0, track['pixel_count'] / 300.0)),
-                    pixel_count=int(track['pixel_count']),
-                    y_range=track['y_range'],
-                )
-            )
-
-        return result
-
-    def _fit_from_connected_components(
-        self,
-        bev_mask: np.ndarray,
-        bev_width: int,
-        bev_height: int,
-    ) -> Tuple[List[Dict[str, Any]], np.ndarray]:
-        """
-        Perform sliding window search and polynomial fitting.
-
-        Returns:
-            (lane_tracks, visualization_image)
-        """
-        # Visualization
-        vis = np.zeros((bev_height, bev_width, 3), dtype=np.uint8)
-        vis[bev_mask > 127] = [255, 255, 0]  # Yellow lane pixels
-
-        lane_bin = (bev_mask > 127).astype(np.uint8)
-
-        # Keep component extraction direction-agnostic.
-        # A fixed vertical close can incorrectly merge curved dashed markings.
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(lane_bin, connectivity=8)
-
-        tracks: List[Dict[str, Any]] = []
-
-        for label in range(1, num_labels):
-            x = int(stats[label, cv2.CC_STAT_LEFT])
-            y = int(stats[label, cv2.CC_STAT_TOP])
-            w = int(stats[label, cv2.CC_STAT_WIDTH])
-            h = int(stats[label, cv2.CC_STAT_HEIGHT])
-            area = int(stats[label, cv2.CC_STAT_AREA])
-
-            if area < self.min_fit_pixels:
-                continue
-            if h < self.min_fit_span_px:
-                continue
-            if w > self.max_component_width_px:
-                continue
-
-            component_mask = (labels == label)
-
-            # Fit on original lane pixels inside the connected component.
-            ys, xs = np.where(component_mask & (lane_bin > 0))
-            if len(xs) < self.min_fit_pixels:
-                continue
-
-            coeffs = np.polyfit(ys, xs, 2)
-            pred = np.polyval(coeffs, ys)
-            residual = xs - pred
-            rmse = float(np.sqrt(np.mean(residual ** 2)))
-
-            # Reject unrealistic fits.
-            if rmse > self.max_rmse_px:
-                continue
-            if abs(float(coeffs[0])) > self.max_abs_quadratic:
-                continue
-
-            # One robust refit after trimming outliers.
-            inliers = np.abs(residual) <= max(4.0, 2.0 * rmse)
-            if np.count_nonzero(inliers) >= self.min_fit_pixels:
-                ys_in = ys[inliers]
-                xs_in = xs[inliers]
-                coeffs = np.polyfit(ys_in, xs_in, 2)
-                ys_fit = ys_in
-                pixel_count = int(len(xs_in))
-            else:
-                ys_fit = ys
-                pixel_count = int(len(xs))
-
-            tracks.append({
-                'coeffs': coeffs,
-                'pixel_count': pixel_count,
-                'y_range': (float(np.min(ys_fit)), float(np.max(ys_fit))),
-                'x_ref': float(np.polyval(coeffs, bev_height - 10)),
-            })
-
-            cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 180, 0), 1)
-
-        # Sort lanes from left to right at near-ego y for stable ordering.
-        tracks.sort(key=lambda t: t['x_ref'])
-
-        # Draw fitted curves
-        lane_colors = [
-            (255, 80, 80),
-            (80, 255, 80),
-            (80, 80, 255),
-            (255, 200, 80),
-            (255, 80, 255),
-            (80, 255, 255),
-        ]
-        plot_y = np.linspace(0, bev_height - 1, bev_height)
-
-        for idx, track in enumerate(tracks):
-            plot_x = np.polyval(track['coeffs'], plot_y)
-            pts = np.column_stack((plot_x, plot_y)).astype(np.int32)
-            cv2.polylines(vis, [pts], False, lane_colors[idx % len(lane_colors)], 3)
-
-        # Vehicle center line
-        cv2.line(vis, (bev_width // 2, 0), (bev_width // 2, bev_height), (255, 255, 255), 1)
-
-        return tracks, vis
-
-# ============================================================================
-# Unified Local Lane Estimator
-# ============================================================================
 
 class LocalLaneEstimator:
     """
-    Unified estimator for local road structure.
+    Estimates lane structure from semantic segmentation images.
 
-    Produces two types of lane information:
-    1. lane_fits: Actual polynomial fits to painted lane markings (detected)
-    2. local_lane_data: Estimated lanes from boundaries (guessed using a priori knowledge)
+    Uses IPM to create a BEV road mask, extracts boundaries, and estimates
+    lane positions using configured lane_count and total_road_width parameters.
 
-    The local_lane_data uses configured lane_count and total_road_width to
-    ESTIMATE/GUESS lane positions by dividing the detected road boundaries.
-    This is NOT actual lane detection - it's geometric estimation.
+    This is NOT actual lane detection - it's geometric estimation using
+    a priori knowledge about expected road structure.
 
     Usage:
-        estimator = LocalLaneEstimator(...)
-        result = estimator.estimate(grid, semantic_img, ...)
+        estimator = LocalLaneEstimator(lane_count=4, total_road_width=14.0)
+        result = estimator.estimate_from_semantic(semantic_img, fov, pitch, height)
     """
 
     def __init__(
         self,
-        # Grid parameters
-        grid_cells: int,
-        origin_x: float,
-        origin_y: float,
-        resolution: float,
         # Lane structure parameters (a priori knowledge for estimation)
         lane_count: int = 4,
         total_road_width: float = 14.0,
         clearance_from_wall: float = 0.3,
         clearance_from_divider: float = 0.3,
         min_road_width: float = 10.0,
-        max_road_width: float = 30.0,
-        # Lane fitting BEV parameters
-        lane_fit_bev_x_range: Tuple[float, float] = (5.0, 35.0),
-        lane_fit_bev_y_range: Tuple[float, float] = (-15.0, 15.0),
-        lane_fit_pixels_per_meter: float = 10.0,
+        max_road_width: float = 20.0,
+        # BEV transform parameters
+        bev_x_range: Tuple[float, float] = (5.0, 35.0),
+        bev_y_range: Tuple[float, float] = (-15.0, 15.0),
+        pixels_per_meter: float = 10.0,
+        # Lane generation parameters
+        resample_spacing: float = 0.5,
+        min_forward_range: float = 3.0,
+        near_field_skip: float = 1.0,
+        smoothing_window: int = 7,
     ):
         """
         Initialize the local lane estimator.
 
         Args:
-            grid_cells: Number of cells in occupancy grid (square)
-            origin_x: Grid origin X in base_link (meters)
-            origin_y: Grid origin Y in base_link (meters)
-            resolution: Grid cell size (meters)
             lane_count: Expected number of lanes (a priori knowledge)
             total_road_width: Expected total road width in meters (a priori)
             clearance_from_wall: Safety margin from right edge (meters)
             clearance_from_divider: Safety margin from left edge (meters)
             min_road_width: Minimum valid road width (meters)
             max_road_width: Maximum valid road width (meters)
-            lane_fit_bev_x_range: Forward range for lane fitting BEV
-            lane_fit_bev_y_range: Lateral range for lane fitting BEV
-            lane_fit_pixels_per_meter: Resolution for lane fitting BEV
+            bev_x_range: Forward range for BEV transform (meters)
+            bev_y_range: Lateral range for BEV transform (meters)
+            pixels_per_meter: BEV resolution
+            resample_spacing: Distance between resampled points (meters)
+            min_forward_range: Minimum forward span required (meters)
+            near_field_skip: Skip points closer than this (meters)
+            smoothing_window: Moving average window size (samples)
         """
-        self.grid_cells = grid_cells
-        self.origin_x = origin_x
-        self.origin_y = origin_y
-        self.resolution = resolution
+        # BEV parameters
+        self.bev_x_range = bev_x_range
+        self.bev_y_range = bev_y_range
+        self.pixels_per_meter = pixels_per_meter
 
-        # Drivable area generator (uses a priori knowledge to estimate lanes)
-        self.local_lane_data_generator = LocalLaneDataGenerator(
-            lane_count=lane_count,
-            total_road_width=total_road_width,
-            clearance_from_wall=clearance_from_wall,
-            clearance_from_divider=clearance_from_divider,
-            min_road_width=min_road_width,
-            max_road_width=max_road_width,
-        )
+        # Compute BEV dimensions
+        x_span = bev_x_range[1] - bev_x_range[0]
+        y_span = bev_y_range[1] - bev_y_range[0]
+        self.bev_height = int(x_span * pixels_per_meter)
+        self.bev_width = int(y_span * pixels_per_meter)
 
-        # Lane marking fitter (detects actual painted lane markings)
-        self.lane_fitter = LaneMarkingFitter(
-            bev_x_range=lane_fit_bev_x_range,
-            bev_y_range=lane_fit_bev_y_range,
-            pixels_per_meter=lane_fit_pixels_per_meter,
-        )
+        # Lane structure parameters
+        self.lane_count = lane_count
+        self.total_road_width = total_road_width
+        self.clearance_from_wall = clearance_from_wall
+        self.clearance_from_divider = clearance_from_divider
+        self.min_road_width = min_road_width
+        self.max_road_width = max_road_width
 
-        # Constants
-        self.FREE = 0
-        self.UNKNOWN = -1
+        # Lane generation parameters
+        self.resample_spacing = resample_spacing
+        self.min_forward_range = min_forward_range
+        self.near_field_skip = near_field_skip
+        self.smoothing_window = smoothing_window
+
+        # Validation thresholds
         self.min_path_points = 8
         self.min_forward_span_m = 3.0
 
-    def estimate(
+    def estimate_from_semantic(
         self,
-        grid: np.ndarray,
-        semantic_img: Optional[np.ndarray] = None,
-        camera_fov: Optional[float] = None,
-        camera_pitch: Optional[float] = None,
-        camera_height: Optional[float] = None,
+        semantic_img: np.ndarray,
+        camera_fov: float,
+        camera_pitch: float,
+        camera_height: float,
     ) -> LocalRoadEstimate:
         """
-        Estimate local road structure from occupancy grid and semantic image.
+        Estimate local road structure from semantic segmentation image.
+
+        Creates an IPM (Bird's Eye View) from the semantic image, extracts
+        road boundaries, and estimates lane structure using a priori knowledge.
 
         Args:
-            grid: Occupancy grid (grid_cells x grid_cells) with FREE=0, UNKNOWN=-1, OCCUPIED=100
-            semantic_img: Optional mono8 semantic segmentation for lane marking fitting
-            camera_fov: Camera horizontal FOV (required if semantic_img provided)
-            camera_pitch: Camera pitch angle (required if semantic_img provided)
-            camera_height: Camera height (required if semantic_img provided)
+            semantic_img: Mono8 semantic segmentation image
+            camera_fov: Camera horizontal FOV in degrees
+            camera_pitch: Camera pitch angle in degrees
+            camera_height: Camera height above ground in meters
 
         Returns:
-            LocalRoadEstimate with boundaries, lane fits, and estimated local lane data
+            LocalRoadEstimate with boundaries and estimated lane data
         """
         result = LocalRoadEstimate()
 
-        # 1. Extract road boundaries from occupancy grid
-        binary_mask = np.uint8(grid == self.FREE)
-        observed_mask = np.uint8(grid != self.UNKNOWN)
+        # 1. Create IPM from semantic image (drivable area = road + road_line)
+        drivable_mask = ((semantic_img == ROAD_ID) | (semantic_img == ROAD_LINE_ID)).astype(np.uint8) * 255
+
+        bev_drivable, _, _ = convert_to_ipm(
+            image=drivable_mask,
+            fov=camera_fov,
+            pitch=camera_pitch,
+            camera_height=camera_height,
+            bev_x_range=self.bev_x_range,
+            bev_y_range=self.bev_y_range,
+            pixels_per_meter=self.pixels_per_meter,
+            interpolation=cv2.INTER_NEAREST,
+        )
+
+        # 2. Transform BEV to match boundary_extractor convention
+        # convert_to_ipm output: rows=X (far at top), cols=Y (left at col 0)
+        # boundary_extractor expects: rows=Y (right at top), cols=X (behind at col 0)
+        # Transform: transpose, flip both axes
+        bev_for_extractor = bev_drivable.T[::-1, ::-1]
+
+        # Grid dimensions after transform
+        grid_height, grid_width = bev_for_extractor.shape[:2]
+
+        # Grid origin for boundary_to_base_link (in extractor convention)
+        # After transform: row 0 = Y_min (right), col 0 = X_min (behind)
+        grid_origin_x = self.bev_x_range[0]  # X at col 0
+        grid_origin_y = self.bev_y_range[0]  # Y at row 0
+
+        # 3. Extract road boundaries from transformed BEV mask
+        binary_mask = (bev_for_extractor > 127).astype(np.uint8)
+        observed_mask = np.ones_like(binary_mask, dtype=np.uint8)
 
         left, right, edge_img, l_diag, r_diag = extract_boundaries(binary_mask, observed_mask)
 
-        # Convert pixel boundaries to base_link coordinates
-        left_pts = self._boundary_to_coords(left)
-        right_pts = self._boundary_to_coords(right)
+        # 4. Convert pixel boundaries to base_link using boundary_extractor's function
+        left_pts = boundary_to_base_link(
+            left,
+            grid_cells=max(grid_height, grid_width),
+            origin_x=grid_origin_x,
+            origin_y=grid_origin_y,
+            resolution=1.0 / self.pixels_per_meter,
+            sample_step=3,
+        )
+        right_pts = boundary_to_base_link(
+            right,
+            grid_cells=max(grid_height, grid_width),
+            origin_x=grid_origin_x,
+            origin_y=grid_origin_y,
+            resolution=1.0 / self.pixels_per_meter,
+            sample_step=3,
+        )
 
         result.left_boundary = left_pts
         result.right_boundary = right_pts
 
         # Store boundary debug image
-        bev_vis = (binary_mask * 255).astype(np.uint8)
-        from mapping.core.boundary_extractor import draw_boundary_overlay
         result.debug_images['boundary_overlay'] = draw_boundary_overlay(
-            bev_vis, left, right, l_diag, r_diag, edge_img
+            bev_for_extractor, left, right, l_diag, r_diag, edge_img
         )
 
-        # 2. Estimate lane structure from boundaries (using a priori knowledge)
-        drivable_result = self.local_lane_data_generator.generate(left_pts, right_pts)
-        result.local_lane_data = drivable_result
+        # 5. Estimate lane structure from boundaries (using a priori knowledge)
+        local_lane_result = self._generate_lanes(left_pts, right_pts)
+        result.local_lane_data = local_lane_result
 
-        # 3. Fit lane marking polynomials (actual detection from road_line pixels)
-        if semantic_img is not None and camera_fov is not None:
-            lane_fits = self.lane_fitter.fit(
-                semantic_img=semantic_img,
-                fov=camera_fov,
-                pitch=camera_pitch or 0.0,
-                camera_height=camera_height or 1.5,
-            )
-            result.lane_fits = lane_fits
-
-            if lane_fits.debug_image is not None:
-                result.debug_images['lane_fit'] = lane_fits.debug_image
-
-        # Set validity based on having useful data
-        result.valid = (
-            drivable_result.valid or
-            (result.lane_fits is not None and result.lane_fits.valid)
-        )
+        # Set validity
+        result.valid = local_lane_result.valid
 
         return result
 
-    def _boundary_to_coords(self, boundary_result) -> Optional[np.ndarray]:
-        """Convert pixel boundary to base_link coordinates."""
-        pts = boundary_to_base_link(
-            boundary_result,
-            grid_cells=self.grid_cells,
-            origin_x=self.origin_x,
-            origin_y=self.origin_y,
-            resolution=self.resolution,
-            sample_step=3,
+    # ========================================================================
+    # Lane Generation (from boundaries)
+    # ========================================================================
+
+    def _generate_lanes(
+        self,
+        left_boundary: Optional[np.ndarray],
+        right_boundary: Optional[np.ndarray],
+    ) -> LocalLaneDataResult:
+        """
+        Generate structured local lane data from road boundaries.
+
+        Args:
+            left_boundary: (N, 2) array of left boundary points (x, y) in base_link
+            right_boundary: (N, 2) array of right boundary points (x, y) in base_link
+
+        Returns:
+            LocalLaneDataResult with lane structure and status
+        """
+        # Convert to numpy arrays
+        if left_boundary is not None:
+            left_boundary = np.asarray(left_boundary)
+        if right_boundary is not None:
+            right_boundary = np.asarray(right_boundary)
+
+        # No boundaries at all
+        if left_boundary is None and right_boundary is None:
+            return LocalLaneDataResult(
+                valid=False,
+                status_code=STATUS_NO_BOUNDARIES,
+                left_boundary=np.empty((0, 2)),
+                right_boundary=np.empty((0, 2)),
+            )
+
+        # Try to compute from both boundaries first
+        if left_boundary is not None and right_boundary is not None:
+            result = self._lanes_from_both_boundaries(left_boundary, right_boundary)
+            if result is not None:
+                return result
+            # Fall through to single-boundary fallback
+
+        # Single boundary fallback
+        if right_boundary is not None:
+            result = self._lanes_from_single_boundary(right_boundary, is_right=True)
+        else:
+            result = self._lanes_from_single_boundary(left_boundary, is_right=False)
+
+        if result is None:
+            return LocalLaneDataResult(
+                valid=False,
+                status_code=STATUS_INSUFFICIENT_POINTS,
+                left_boundary=left_boundary if left_boundary is not None else np.empty((0, 2)),
+                right_boundary=right_boundary if right_boundary is not None else np.empty((0, 2)),
+            )
+
+        return result
+
+    def _lanes_from_both_boundaries(
+        self,
+        left_pts: np.ndarray,
+        right_pts: np.ndarray,
+    ) -> Optional[LocalLaneDataResult]:
+        """
+        Compute lane structure when both boundaries are available.
+
+        Resamples boundaries onto common grid, validates width,
+        and computes centerline for each lane.
+        """
+        # Sort by x (forward distance)
+        left_s = left_pts[np.argsort(left_pts[:, 0])]
+        right_s = right_pts[np.argsort(right_pts[:, 0])]
+
+        # Find common x range
+        x_lo = max(left_s[0, 0], right_s[0, 0], self.near_field_skip)
+        x_hi = min(left_s[-1, 0], right_s[-1, 0])
+
+        if x_hi - x_lo < self.min_forward_range:
+            return None
+
+        # Resample onto common grid
+        n = max(10, int((x_hi - x_lo) / self.resample_spacing))
+        x_grid = np.linspace(x_lo, x_hi, n)
+
+        left_y = np.interp(x_grid, left_s[:, 0], left_s[:, 1])
+        right_y = np.interp(x_grid, right_s[:, 0], right_s[:, 1])
+
+        # Validate road width
+        width = left_y - right_y
+        ok = (width >= self.min_road_width) & (width <= self.max_road_width)
+        if np.sum(ok) < 5:
+            return None
+
+        # Filter to valid points
+        x_grid = x_grid[ok]
+        left_y = left_y[ok]
+        right_y = right_y[ok]
+        width = width[ok]
+
+        # Smooth boundaries
+        if len(x_grid) > self.smoothing_window:
+            left_y = uniform_filter1d(left_y, size=self.smoothing_window, mode='nearest')
+            right_y = uniform_filter1d(right_y, size=self.smoothing_window, mode='nearest')
+
+        # Inset edges by clearances to get usable lane area
+        inner_right = right_y + self.clearance_from_wall
+        inner_left = left_y - self.clearance_from_divider
+
+        # Compute actual usable width from detected boundaries (after clearances)
+        usable_width = inner_left - inner_right
+
+        # Compute lane width from actual detected road width
+        lane_width = usable_width / self.lane_count
+
+        lanes = []
+        for idx in range(self.lane_count):
+            # Lane boundaries positioned from the inner right edge (wall side)
+            lane_right_y = inner_right + lane_width * idx
+            lane_left_y = inner_right + lane_width * (idx + 1)
+
+            # Lane centerline
+            centerline_y = inner_right + lane_width * (idx + 0.5)
+
+            lane_result = LaneResult(
+                lane_index=idx,
+                left_boundary=np.column_stack([x_grid, lane_left_y]),
+                right_boundary=np.column_stack([x_grid, lane_right_y]),
+                centerline=np.column_stack([x_grid, centerline_y]),
+                width_avg=float(np.mean(lane_width)),
+                is_valid=True,
+                is_partial=False,
+            )
+            lanes.append(lane_result)
+
+        return LocalLaneDataResult(
+            valid=True,
+            status_code=STATUS_OK,
+            left_boundary=np.column_stack([x_grid, left_y]),
+            right_boundary=np.column_stack([x_grid, right_y]),
+            lanes=lanes,
+            road_width_avg=float(np.mean(width)),
+            lane_count=self.lane_count,
         )
 
-        if pts is None or len(pts) < self.min_path_points:
+    def _lanes_from_single_boundary(
+        self,
+        pts: np.ndarray,
+        is_right: bool,
+    ) -> Optional[LocalLaneDataResult]:
+        """
+        Compute lane structure from a single boundary using nominal lane width.
+
+        Args:
+            pts: Boundary points (N, 2) in base_link
+            is_right: True if this is the right boundary (wall/kerb side)
+        """
+        # Sort by x
+        s = pts[np.argsort(pts[:, 0])]
+        x_lo = max(s[0, 0], self.near_field_skip)
+        x_hi = s[-1, 0]
+
+        if x_hi - x_lo < self.min_forward_range:
             return None
 
-        forward_span = float(np.max(pts[:, 0]) - np.min(pts[:, 0]))
-        if forward_span < self.min_forward_span_m:
-            return None
+        # Resample
+        n = max(10, int((x_hi - x_lo) / self.resample_spacing))
+        x_grid = np.linspace(x_lo, x_hi, n)
+        b_y = np.interp(x_grid, s[:, 0], s[:, 1])
 
-        return pts
+        # Smooth
+        if len(x_grid) > self.smoothing_window:
+            b_y = uniform_filter1d(b_y, size=self.smoothing_window, mode='nearest')
+
+        # Nominal lane width
+        nominal_lane_w = self.total_road_width / self.lane_count
+
+        lanes = []
+        for idx in range(self.lane_count):
+            if is_right:
+                # Right boundary visible: lanes extend inward (higher y)
+                offset_right = self.clearance_from_wall + nominal_lane_w * idx
+                offset_left = self.clearance_from_wall + nominal_lane_w * (idx + 1)
+                offset_center = self.clearance_from_wall + nominal_lane_w * (idx + 0.5)
+
+                lane_right_y = b_y + offset_right
+                lane_left_y = b_y + offset_left
+                centerline_y = b_y + offset_center
+
+                # Estimated boundaries
+                right_boundary = np.column_stack([x_grid, b_y])
+                left_boundary = np.column_stack([x_grid, b_y + self.total_road_width])
+            else:
+                # Left boundary visible: lanes extend inward (lower y)
+                lanes_from_left = self.lane_count - idx - 1
+                offset_right = self.clearance_from_divider + nominal_lane_w * (lanes_from_left + 1)
+                offset_left = self.clearance_from_divider + nominal_lane_w * lanes_from_left
+                offset_center = self.clearance_from_divider + nominal_lane_w * (lanes_from_left + 0.5)
+
+                lane_right_y = b_y - offset_right
+                lane_left_y = b_y - offset_left
+                centerline_y = b_y - offset_center
+
+                # Estimated boundaries
+                left_boundary = np.column_stack([x_grid, b_y])
+                right_boundary = np.column_stack([x_grid, b_y - self.total_road_width])
+
+            lane_result = LaneResult(
+                lane_index=idx,
+                left_boundary=np.column_stack([x_grid, lane_left_y]),
+                right_boundary=np.column_stack([x_grid, lane_right_y]),
+                centerline=np.column_stack([x_grid, centerline_y]),
+                width_avg=nominal_lane_w,
+                is_valid=True,
+                is_partial=True,
+            )
+            lanes.append(lane_result)
+
+        return LocalLaneDataResult(
+            valid=True,
+            status_code=STATUS_OK,
+            left_boundary=left_boundary,
+            right_boundary=right_boundary,
+            lanes=lanes,
+            road_width_avg=self.total_road_width,
+            lane_count=self.lane_count,
+        )

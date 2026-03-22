@@ -5,25 +5,21 @@ Lane Fitting Node
 
 ROS2 node that performs:
 1. Multi-lane polynomial fitting on semantic segmentation maps
-2. Local lane data estimation from occupancy grid boundaries
+2. Local lane estimation from road boundaries in the IPM image
 
-Subscribes to semantic maps from the perception package and occupancy grid
-from IPM node, publishes lane detection results and local lane data.
+Uses a single IPM (Inverse Perspective Mapping) transform from the semantic
+image for both polynomial lane fitting and boundary-based lane estimation.
 
 Parameters:
 - semantic_source: 'road_lane_extraction' (perception) or 'ground_truth' (CARLA GT)
 - camera_info_topic: Camera info for intrinsics
 - camera_frame: TF frame name for the camera sensor
 - enable_debug_viz: Publish debug BEV images
-- grid_size: Size of occupancy grid in meters
-- resolution: Occupancy grid resolution in meters/cell
-- lane_count: Expected number of lanes for boundary-based estimation
-- total_road_width: Expected road width for boundary estimation
+- lane_config_file: Path to YAML file with lane structure parameters
 
 Subscribes:
 - Semantic segmentation (mono8) - topic depends on semantic_source parameter
 - /carla/ego_vehicle/sensor/camera/rgb/front/camera_info (CameraInfo)
-- /mapping/ipm_costmap (OccupancyGrid) - for boundary-based lane estimation
 
 Publishes:
 - /mapping/lane_detection (LaneDetection) - polynomial fits + metrics
@@ -36,15 +32,18 @@ Publishes:
 """
 
 import numpy as np
+from pathlib import Path as FilePath
 from typing import Optional, Dict, Any
+import yaml
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 import tf2_ros
+from ament_index_python.packages import get_package_share_directory
 
 from sensor_msgs.msg import Image, CameraInfo
-from nav_msgs.msg import OccupancyGrid, Path
+from nav_msgs.msg import Path
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
 from geometry_msgs.msg import Point, PoseStamped
@@ -60,7 +59,7 @@ from cv_bridge import CvBridge
 
 
 class LaneFittingNode(Node):
-    """ROS2 Node for lane polynomial fitting and local lane estimation."""
+    """ROS2 Node for lane polynomial fitting and lane estimation from boundaries."""
 
     def __init__(self):
         super().__init__('lane_fitting_node')
@@ -76,15 +75,8 @@ class LaneFittingNode(Node):
         self.declare_parameter('enable_debug_viz', False)
         self.declare_parameter('base_frame', 'ego_vehicle')
 
-        # Local lane estimation parameters (from occupancy grid)
-        self.declare_parameter('grid_size', 40.0)    # meters (must match IPM node)
-        self.declare_parameter('resolution', 0.4)    # meters per cell
-        self.declare_parameter('lane_count', 4)
-        self.declare_parameter('total_road_width', 22.0)
-        self.declare_parameter('clearance_from_wall', 0.3)
-        self.declare_parameter('clearance_from_divider', 0.3)
-        self.declare_parameter('min_road_width', 10.0)
-        self.declare_parameter('max_road_width', 30.0)
+        # Lane config file path (relative to mapping package share directory)
+        self.declare_parameter('lane_config_file', 'config/local_lane_data.yaml')
 
         # Resolve semantic source → only the image topic changes
         semantic_source = self.get_parameter('semantic_source').value
@@ -98,13 +90,10 @@ class LaneFittingNode(Node):
         self.enable_debug_viz = self.get_parameter('enable_debug_viz').value
         self.base_frame = self.get_parameter('base_frame').value
 
-        # Grid parameters for local lane estimation
-        grid_size = self.get_parameter('grid_size').value
-        resolution = self.get_parameter('resolution').value
-        self.grid_cells = int(grid_size / resolution)
-        self.origin_x = -grid_size / 2.0
-        self.origin_y = -grid_size / 2.0
-        self.resolution = resolution
+        # ==================== Load Lane Config from YAML ====================
+        lane_config = self._load_lane_config()
+        self.get_logger().info(f'Loaded lane config: lane_count={lane_config["lane_count"]}, '
+                               f'total_road_width={lane_config["total_road_width"]}m')
 
         self.get_logger().info(f'Semantic source: {semantic_source}')
         self.get_logger().info(f'Subscribing to semantic map: {semantic_topic}')
@@ -140,21 +129,16 @@ class LaneFittingNode(Node):
         self.lane_detector: Optional[LaneDetector] = None
         self._lane_detector_initialized = False
 
-        # ==================== Local Lane Estimator ====================
+        # ==================== Lane Estimator (from boundaries) ====================
+        # Uses config from YAML file - estimates lanes from road boundaries
         self.lane_estimator = LocalLaneEstimator(
-            grid_cells=self.grid_cells,
-            origin_x=self.origin_x,
-            origin_y=self.origin_y,
-            resolution=self.resolution,
-            lane_count=self.get_parameter('lane_count').value,
-            total_road_width=self.get_parameter('total_road_width').value,
-            clearance_from_wall=self.get_parameter('clearance_from_wall').value,
-            clearance_from_divider=self.get_parameter('clearance_from_divider').value,
-            min_road_width=self.get_parameter('min_road_width').value,
-            max_road_width=self.get_parameter('max_road_width').value,
+            lane_count=lane_config['lane_count'],
+            total_road_width=lane_config['total_road_width'],
+            clearance_from_wall=lane_config.get('clearance_from_wall', 0.3),
+            clearance_from_divider=lane_config.get('clearance_from_divider', 0.3),
+            min_road_width=lane_config.get('min_road_width', 10.0),
+            max_road_width=lane_config.get('max_road_width', 20.0),
         )
-        self._latest_semantic_img: Optional[np.ndarray] = None
-        self._latest_semantic_stamp = None
 
         # ==================== Subscribers ====================
         self.semantic_sub = self.create_subscription(
@@ -164,12 +148,6 @@ class LaneFittingNode(Node):
             CameraInfo, camera_info_topic,
             self._camera_info_callback, sensor_qos)
         self.get_logger().info(f'Subscribed to CameraInfo: {camera_info_topic}')
-
-        # Subscribe to occupancy grid for boundary-based lane estimation
-        self.costmap_sub = self.create_subscription(
-            OccupancyGrid, '/mapping/ipm_costmap',
-            self._costmap_callback, sensor_qos)
-        self.get_logger().info('Subscribed to occupancy grid: /mapping/ipm_costmap')
 
         # ==================== Publishers ====================
         # Lane fitting publishers
@@ -181,7 +159,7 @@ class LaneFittingNode(Node):
             self.debug_bev_pub = self.create_publisher(
                 Image, '/mapping/debug/lane_bev', 10)
 
-        # Local lane data publishers (boundary-based estimation)
+        # Lane estimation publishers (boundary-based estimation)
         self.local_lane_data_pub = self.create_publisher(
             LocalLaneData, '/mapping/local_lane_data', 10)
         self.left_boundary_pub = self.create_publisher(
@@ -195,6 +173,47 @@ class LaneFittingNode(Node):
         self._init_timer = self.create_timer(0.5, self._try_init_lane_detector)
 
         self.get_logger().info('Lane Fitting Node initialized!')
+
+    # ------------------------------------------------------------------ #
+    #  YAML Config Loading                                                #
+    # ------------------------------------------------------------------ #
+
+    def _load_lane_config(self) -> Dict[str, Any]:
+        """Load lane structure configuration from YAML file."""
+        config_file = self.get_parameter('lane_config_file').value
+
+        # Try to find config file relative to package share directory
+        try:
+            pkg_share = get_package_share_directory('mapping')
+            config_path = FilePath(pkg_share) / config_file
+        except Exception:
+            # Fallback to relative path from source
+            config_path = FilePath(__file__).resolve().parents[2] / config_file
+
+        # Default config if file not found
+        default_config = {
+            'lane_count': 4,
+            'total_road_width': 14.0,
+            'clearance_from_wall': 0.3,
+            'clearance_from_divider': 0.3,
+            'min_road_width': 10.0,
+            'max_road_width': 20.0,
+        }
+
+        if not config_path.exists():
+            self.get_logger().warn(
+                f'Lane config file not found: {config_path}. Using defaults.')
+            return default_config
+
+        try:
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            self.get_logger().info(f'Loaded lane config from: {config_path}')
+            # Merge with defaults for any missing keys
+            return {**default_config, **config}
+        except Exception as e:
+            self.get_logger().error(f'Failed to load lane config: {e}. Using defaults.')
+            return default_config
 
     # ------------------------------------------------------------------ #
     #  Lane Detector Initialization                                       #
@@ -297,32 +316,31 @@ class LaneFittingNode(Node):
     # ------------------------------------------------------------------ #
 
     def _semantic_callback(self, msg: Image):
-        """Process semantic map and run lane fitting."""
+        """Process semantic map and run both lane fitting and lane estimation."""
         try:
             semantic_img = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
         except Exception as e:
             self.get_logger().warn(f'cv_bridge conversion failed: {e}')
             return
 
-        # Store for use in costmap callback (local lane estimation needs semantic for lane fits)
-        self._latest_semantic_img = semantic_img
-        self._latest_semantic_stamp = msg.header.stamp
+        # Wait for camera params before processing
+        if not self._camera_info_received or not self._camera_tf_received:
+            return
 
-        # Only run lane fitting if detector is initialized
+        cam = self._camera_params
+
+        # Run lane fitting (polynomial detection from road_line markings)
         if self._lane_detector_initialized:
             self._run_lane_fitting(semantic_img, msg.header)
 
-    # ------------------------------------------------------------------ #
-    #  Costmap Callback (Local Lane Estimation)                           #
-    # ------------------------------------------------------------------ #
-
-    def _costmap_callback(self, msg: OccupancyGrid):
-        """Process occupancy grid for boundary-based lane estimation."""
-        # Parse occupancy grid
-        grid = np.array(msg.data, dtype=np.int8).reshape(msg.info.height, msg.info.width)
-
-        # Run local lane estimation (separate from lane fitting)
-        self._run_local_lane_estimation(grid, msg.header.stamp)
+        # Run lane estimation from boundaries (uses shared IPM)
+        self._estimate_lanes_from_boundaries(
+            semantic_img=semantic_img,
+            stamp=msg.header.stamp,
+            camera_fov=cam['fov_deg'],
+            camera_pitch=cam['pitch_deg'],
+            camera_height=cam['height_m'],
+        )
 
     # ------------------------------------------------------------------ #
     #  Lane Detection (polynomial fitting)                                #
@@ -480,25 +498,25 @@ class LaneFittingNode(Node):
         self.debug_bev_pub.publish(out)
 
     # ------------------------------------------------------------------ #
-    #  Local Lane Estimation (from occupancy grid boundaries)            #
+    #  Lane Estimation from Boundaries                                    #
     # ------------------------------------------------------------------ #
 
-    def _run_local_lane_estimation(self, grid: np.ndarray, stamp):
-        """Run boundary-based lane estimation and publish results.
+    def _estimate_lanes_from_boundaries(
+        self,
+        semantic_img: np.ndarray,
+        stamp,
+        camera_fov: float,
+        camera_pitch: float,
+        camera_height: float,
+    ):
+        """Estimate lanes from road boundaries in the IPM image.
 
-        This is separate from lane fitting - it estimates lanes from
-        road boundaries using a priori knowledge about lane structure.
+        Uses the semantic image to create an IPM, extracts road boundaries,
+        and estimates lane positions using a priori knowledge about lane structure.
         """
-        # Get camera params for lane marking fitting (if available)
-        cam = self._camera_params
-        camera_fov = cam['fov_deg']
-        camera_pitch = cam['pitch_deg']
-        camera_height = cam['height_m']
-
-        # Run unified estimator
-        road_estimate = self.lane_estimator.estimate(
-            grid=grid,
-            semantic_img=self._latest_semantic_img,
+        # Run unified estimator (creates IPM internally from semantic image)
+        road_estimate = self.lane_estimator.estimate_from_semantic(
+            semantic_img=semantic_img,
             camera_fov=camera_fov,
             camera_pitch=camera_pitch,
             camera_height=camera_height,
