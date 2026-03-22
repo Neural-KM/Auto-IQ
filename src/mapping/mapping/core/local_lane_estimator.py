@@ -62,10 +62,7 @@ class LanePolyFit:
 class LaneMarkingFits:
     """Polynomial fits for detected lane markings (from actual road_line pixels)."""
     valid: bool = False
-    left_fit: Optional[LanePolyFit] = None
-    right_fit: Optional[LanePolyFit] = None
-    center_fit: Optional[np.ndarray] = None  # Averaged center polynomial
-    lane_width_m: Optional[float] = None     # Measured lane width in meters
+    all_fits: List[LanePolyFit] = field(default_factory=list)
     bev_params: Dict[str, Any] = field(default_factory=dict)
     debug_image: Optional[np.ndarray] = None
 
@@ -137,6 +134,11 @@ class LaneMarkingFitter:
         self.n_windows = n_windows
         self.margin = margin
         self.min_pixels = min_pixels
+        self.min_fit_pixels = 60
+        self.min_fit_span_px = 40
+        self.max_component_width_px = int(max(12, 3.0 * self.pixels_per_meter))
+        self.max_rmse_px = 10.0
+        self.max_abs_quadratic = 0.0012
 
         # Derived BEV dimensions
         x_span = bev_x_range[1] - bev_x_range[0]
@@ -203,12 +205,12 @@ class LaneMarkingFitter:
         # Update actual dimensions from transform
         bev_height, bev_width = bev_lane.shape[:2]
 
-        # Sliding window search
-        left_fit, right_fit, debug_img = self._sliding_window_fit(bev_lane, bev_width, bev_height)
+        # Multi-lane extraction from connected components + robust polynomial fitting.
+        tracks, debug_img = self._fit_from_connected_components(bev_lane, bev_width, bev_height)
 
         # Compute results
         result = LaneMarkingFits(
-            valid=(left_fit is not None or right_fit is not None),
+            valid=(len(tracks) > 0),
             bev_params={
                 'width': bev_width,
                 'height': bev_height,
@@ -219,139 +221,118 @@ class LaneMarkingFitter:
             debug_image=debug_img,
         )
 
-        if left_fit is not None:
-            result.left_fit = LanePolyFit(
-                coeffs=left_fit,
-                confidence=0.8,
-                pixel_count=100,
-                y_range=(0, bev_height),
+        for track in tracks:
+            result.all_fits.append(
+                LanePolyFit(
+                    coeffs=track['coeffs'],
+                    confidence=float(min(1.0, track['pixel_count'] / 300.0)),
+                    pixel_count=int(track['pixel_count']),
+                    y_range=track['y_range'],
+                )
             )
-
-        if right_fit is not None:
-            result.right_fit = LanePolyFit(
-                coeffs=right_fit,
-                confidence=0.8,
-                pixel_count=100,
-                y_range=(0, bev_height),
-            )
-
-        # Compute center and lane width
-        if left_fit is not None and right_fit is not None:
-            result.center_fit = (left_fit + right_fit) / 2.0
-
-            # Lane width at bottom of BEV (closest to vehicle)
-            y_eval = bev_height - 10
-            left_x = np.polyval(left_fit, y_eval)
-            right_x = np.polyval(right_fit, y_eval)
-            width_px = right_x - left_x
-            result.lane_width_m = abs(width_px) / self.pixels_per_meter
 
         return result
 
-    def _sliding_window_fit(
+    def _fit_from_connected_components(
         self,
         bev_mask: np.ndarray,
         bev_width: int,
         bev_height: int,
-    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], np.ndarray]:
+    ) -> Tuple[List[Dict[str, Any]], np.ndarray]:
         """
         Perform sliding window search and polynomial fitting.
 
         Returns:
-            (left_fit, right_fit, visualization_image)
+            (lane_tracks, visualization_image)
         """
         # Visualization
         vis = np.zeros((bev_height, bev_width, 3), dtype=np.uint8)
         vis[bev_mask > 127] = [255, 255, 0]  # Yellow lane pixels
 
-        # Histogram of bottom half
-        histogram = np.sum(bev_mask[bev_height // 2:, :], axis=0)
-        midpoint = bev_width // 2
+        lane_bin = (bev_mask > 127).astype(np.uint8)
 
-        left_base = np.argmax(histogram[:midpoint]) if np.max(histogram[:midpoint]) > 100 else None
-        right_base = np.argmax(histogram[midpoint:]) + midpoint if np.max(histogram[midpoint:]) > 100 else None
+        # Keep component extraction direction-agnostic.
+        # A fixed vertical close can incorrectly merge curved dashed markings.
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(lane_bin, connectivity=8)
 
-        window_height = bev_height // self.n_windows
-        nonzero = bev_mask.nonzero()
-        nonzero_y = np.array(nonzero[0])
-        nonzero_x = np.array(nonzero[1])
+        tracks: List[Dict[str, Any]] = []
 
-        left_current = left_base
-        right_current = right_base
-        left_inds = []
-        right_inds = []
+        for label in range(1, num_labels):
+            x = int(stats[label, cv2.CC_STAT_LEFT])
+            y = int(stats[label, cv2.CC_STAT_TOP])
+            w = int(stats[label, cv2.CC_STAT_WIDTH])
+            h = int(stats[label, cv2.CC_STAT_HEIGHT])
+            area = int(stats[label, cv2.CC_STAT_AREA])
 
-        for window in range(self.n_windows):
-            win_y_low = bev_height - (window + 1) * window_height
-            win_y_high = bev_height - window * window_height
+            if area < self.min_fit_pixels:
+                continue
+            if h < self.min_fit_span_px:
+                continue
+            if w > self.max_component_width_px:
+                continue
 
-            # Left window
-            if left_current is not None:
-                win_x_low = max(0, left_current - self.margin)
-                win_x_high = min(bev_width, left_current + self.margin)
-                cv2.rectangle(vis, (win_x_low, win_y_low), (win_x_high, win_y_high), (0, 255, 0), 2)
+            component_mask = (labels == label)
 
-                good = ((nonzero_y >= win_y_low) & (nonzero_y < win_y_high) &
-                        (nonzero_x >= win_x_low) & (nonzero_x < win_x_high)).nonzero()[0]
-                left_inds.append(good)
+            # Fit on original lane pixels inside the connected component.
+            ys, xs = np.where(component_mask & (lane_bin > 0))
+            if len(xs) < self.min_fit_pixels:
+                continue
 
-                if len(good) > self.min_pixels:
-                    left_current = int(np.mean(nonzero_x[good]))
+            coeffs = np.polyfit(ys, xs, 2)
+            pred = np.polyval(coeffs, ys)
+            residual = xs - pred
+            rmse = float(np.sqrt(np.mean(residual ** 2)))
 
-            # Right window
-            if right_current is not None:
-                win_x_low = max(0, right_current - self.margin)
-                win_x_high = min(bev_width, right_current + self.margin)
-                cv2.rectangle(vis, (win_x_low, win_y_low), (win_x_high, win_y_high), (0, 255, 0), 2)
+            # Reject unrealistic fits.
+            if rmse > self.max_rmse_px:
+                continue
+            if abs(float(coeffs[0])) > self.max_abs_quadratic:
+                continue
 
-                good = ((nonzero_y >= win_y_low) & (nonzero_y < win_y_high) &
-                        (nonzero_x >= win_x_low) & (nonzero_x < win_x_high)).nonzero()[0]
-                right_inds.append(good)
+            # One robust refit after trimming outliers.
+            inliers = np.abs(residual) <= max(4.0, 2.0 * rmse)
+            if np.count_nonzero(inliers) >= self.min_fit_pixels:
+                ys_in = ys[inliers]
+                xs_in = xs[inliers]
+                coeffs = np.polyfit(ys_in, xs_in, 2)
+                ys_fit = ys_in
+                pixel_count = int(len(xs_in))
+            else:
+                ys_fit = ys
+                pixel_count = int(len(xs))
 
-                if len(good) > self.min_pixels:
-                    right_current = int(np.mean(nonzero_x[good]))
+            tracks.append({
+                'coeffs': coeffs,
+                'pixel_count': pixel_count,
+                'y_range': (float(np.min(ys_fit)), float(np.max(ys_fit))),
+                'x_ref': float(np.polyval(coeffs, bev_height - 10)),
+            })
 
-        # Fit polynomials
-        left_fit = None
-        right_fit = None
+            cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 180, 0), 1)
 
-        if left_inds:
-            left_inds = np.concatenate(left_inds)
-            if len(left_inds) > 50:
-                left_x = nonzero_x[left_inds]
-                left_y = nonzero_y[left_inds]
-                left_fit = np.polyfit(left_y, left_x, 2)
-
-        if right_inds:
-            right_inds = np.concatenate(right_inds)
-            if len(right_inds) > 50:
-                right_x = nonzero_x[right_inds]
-                right_y = nonzero_y[right_inds]
-                right_fit = np.polyfit(right_y, right_x, 2)
+        # Sort lanes from left to right at near-ego y for stable ordering.
+        tracks.sort(key=lambda t: t['x_ref'])
 
         # Draw fitted curves
+        lane_colors = [
+            (255, 80, 80),
+            (80, 255, 80),
+            (80, 80, 255),
+            (255, 200, 80),
+            (255, 80, 255),
+            (80, 255, 255),
+        ]
         plot_y = np.linspace(0, bev_height - 1, bev_height)
 
-        if left_fit is not None:
-            plot_x = np.polyval(left_fit, plot_y)
+        for idx, track in enumerate(tracks):
+            plot_x = np.polyval(track['coeffs'], plot_y)
             pts = np.column_stack((plot_x, plot_y)).astype(np.int32)
-            cv2.polylines(vis, [pts], False, (255, 0, 0), 3)
-
-        if right_fit is not None:
-            plot_x = np.polyval(right_fit, plot_y)
-            pts = np.column_stack((plot_x, plot_y)).astype(np.int32)
-            cv2.polylines(vis, [pts], False, (0, 0, 255), 3)
-
-        if left_fit is not None and right_fit is not None:
-            center_x = (np.polyval(left_fit, plot_y) + np.polyval(right_fit, plot_y)) / 2
-            pts = np.column_stack((center_x, plot_y)).astype(np.int32)
-            cv2.polylines(vis, [pts], False, (0, 255, 255), 2)
+            cv2.polylines(vis, [pts], False, lane_colors[idx % len(lane_colors)], 3)
 
         # Vehicle center line
         cv2.line(vis, (bev_width // 2, 0), (bev_width // 2, bev_height), (255, 255, 255), 1)
 
-        return left_fit, right_fit, vis
-
+        return tracks, vis
 
 # ============================================================================
 # Unified Local Lane Estimator

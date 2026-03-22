@@ -11,13 +11,13 @@ This node is responsible for fitting polynomial curves to lane markings,
 while the perception package handles pixel-level semantic labeling.
 
 Parameters:
-- semantic_topic: Input semantic map topic (default: /perception/semantic_map/road_lane_extraction)
+- semantic_source: 'road_lane_extraction' (perception) or 'ground_truth' (CARLA GT)
 - camera_info_topic: Camera info for intrinsics
 - camera_frame: TF frame name for the camera sensor
 - enable_debug_viz: Publish debug BEV images
 
 Subscribes:
-- /perception/semantic_map/road_lane_extraction (mono8) - semantic segmentation with lane markings
+- Semantic segmentation (mono8) - topic depends on semantic_source parameter
 - /carla/ego_vehicle/sensor/camera/rgb/front/camera_info (CameraInfo) - camera intrinsics
 
 Publishes:
@@ -54,9 +54,7 @@ class LaneFittingNode(Node):
         super().__init__('lane_fitting_node')
 
         # ==================== Parameters ====================
-        self.declare_parameter(
-            'semantic_topic',
-            '/perception/semantic_map/road_lane_extraction')
+        self.declare_parameter('semantic_source', 'road_lane_extraction')  # 'road_lane_extraction' or 'ground_truth'
         self.declare_parameter(
             'camera_info_topic',
             '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info')
@@ -65,11 +63,18 @@ class LaneFittingNode(Node):
             'ego_vehicle/sensor/camera/rgb/front')
         self.declare_parameter('enable_debug_viz', False)
 
-        semantic_topic = self.get_parameter('semantic_topic').value
+        # Resolve semantic source → only the image topic changes
+        semantic_source = self.get_parameter('semantic_source').value
+        if semantic_source == 'ground_truth':
+            semantic_topic = '/carla/ego_vehicle/ground_truth/camera/semantic/front/image'
+        else:
+            semantic_topic = '/perception/semantic_map/road_lane_extraction'
+
         camera_info_topic = self.get_parameter('camera_info_topic').value
         self.camera_frame = self.get_parameter('camera_frame').value
         self.enable_debug_viz = self.get_parameter('enable_debug_viz').value
 
+        self.get_logger().info(f'Semantic source: {semantic_source}')
         self.get_logger().info(f'Subscribing to semantic map: {semantic_topic}')
 
         # ==================== QoS ====================
@@ -252,15 +257,30 @@ class LaneFittingNode(Node):
         det_msg.valid = result.valid
         det_msg.confidence = float(result.confidence)
 
-        if result.left_fit is not None:
-            det_msg.left_poly_coeffs = result.left_fit.tolist()
-        if result.right_fit is not None:
-            det_msg.right_poly_coeffs = result.right_fit.tolist()
+        # Use all_fits from multi-lane detection
+        lane_fits = []
+        if result.all_fits:
+            lane_fits = [np.asarray(f, dtype=np.float64) for f in result.all_fits]
+        elif result.left_fit is not None or result.right_fit is not None:
+            # Fallback for backwards compatibility
+            if result.left_fit is not None:
+                lane_fits.append(np.asarray(result.left_fit, dtype=np.float64))
+            if result.right_fit is not None:
+                lane_fits.append(np.asarray(result.right_fit, dtype=np.float64))
 
-        det_msg.lane_center = result.lane_center
-        det_msg.left_lane_x = result.left_lane if result.left_lane is not None else -1
-        det_msg.right_lane_x = result.right_lane if result.right_lane is not None else -1
-        det_msg.lane_width_px = result.lane_width if result.lane_width is not None else -1
+        # Sort by near-ego lateral position for deterministic ordering
+        if lane_fits and result.bev_params:
+            y_eval = result.bev_params['height'] - 10
+            lane_fits.sort(key=lambda coeffs: float(np.polyval(coeffs, y_eval)))
+
+        det_msg.lane_count = len(lane_fits)
+        det_msg.poly_coeffs_flat = []
+        det_msg.lane_confidences = []
+        det_msg.lane_pixel_counts = []
+        for coeffs in lane_fits:
+            det_msg.poly_coeffs_flat.extend(coeffs.tolist())
+            det_msg.lane_confidences.append(float(result.confidence))
+            det_msg.lane_pixel_counts.append(0)
 
         bev = result.bev_params
         det_msg.bev_width = bev['width']
@@ -271,12 +291,6 @@ class LaneFittingNode(Node):
         det_msg.bev_x_max = float(lateral_range[1])
         det_msg.bev_y_min = float(forward_range[0])
         det_msg.bev_y_max = float(forward_range[1])
-
-        if result.lane_width_bev is not None:
-            meters_per_px = (lateral_range[1] - lateral_range[0]) / bev['width']
-            det_msg.lane_width_m = float(result.lane_width_bev * meters_per_px)
-        else:
-            det_msg.lane_width_m = -1.0
 
         self.lane_detection_pub.publish(det_msg)
 
@@ -300,27 +314,38 @@ class LaneFittingNode(Node):
 
         bev = result.bev_params
 
-        if result.left_fit is not None:
-            marker_array.markers.append(
-                self._make_lane_marker(
-                    result.left_fit, bev, marker_id=1,
-                    color=ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.8),
-                    stamp=timestamp))
+        # Use all_fits from multi-lane detection
+        lane_fits = []
+        if result.all_fits:
+            lane_fits = [np.asarray(f, dtype=np.float64) for f in result.all_fits]
+        elif result.left_fit is not None or result.right_fit is not None:
+            # Fallback for backwards compatibility
+            if result.left_fit is not None:
+                lane_fits.append(np.asarray(result.left_fit, dtype=np.float64))
+            if result.right_fit is not None:
+                lane_fits.append(np.asarray(result.right_fit, dtype=np.float64))
 
-        if result.right_fit is not None:
-            marker_array.markers.append(
-                self._make_lane_marker(
-                    result.right_fit, bev, marker_id=2,
-                    color=ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.8),
-                    stamp=timestamp))
+        # Sort by near-ego lateral position
+        if lane_fits:
+            y_eval = bev['height'] - 10
+            lane_fits.sort(key=lambda coeffs: float(np.polyval(coeffs, y_eval)))
 
-        # Center line
-        if result.left_fit is not None and result.right_fit is not None:
-            center_fit = (result.left_fit + result.right_fit) / 2.0
+        palette = [
+            ColorRGBA(r=1.0, g=0.2, b=0.2, a=0.8),
+            ColorRGBA(r=0.2, g=1.0, b=0.2, a=0.8),
+            ColorRGBA(r=0.2, g=0.4, b=1.0, a=0.8),
+            ColorRGBA(r=1.0, g=0.8, b=0.2, a=0.8),
+            ColorRGBA(r=0.8, g=0.2, b=0.8, a=0.8),
+            ColorRGBA(r=0.2, g=0.8, b=0.8, a=0.8),
+        ]
+
+        for idx, coeffs in enumerate(lane_fits):
             marker_array.markers.append(
                 self._make_lane_marker(
-                    center_fit, bev, marker_id=3,
-                    color=ColorRGBA(r=0.0, g=1.0, b=1.0, a=0.6),
+                    coeffs,
+                    bev,
+                    marker_id=1 + idx,
+                    color=palette[idx % len(palette)],
                     stamp=timestamp))
 
         self.lane_markers_pub.publish(marker_array)

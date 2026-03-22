@@ -329,7 +329,7 @@ Visualization Manager:
       Max Value: 1
       Median window: 5
       Min Value: 0
-      Name: Image
+      Name: Semantic Pointcloud Debug
       Normalize Range: true
       Topic:
         Depth: 5
@@ -345,7 +345,7 @@ Visualization Manager:
       Color Scheme: map
       Draw Behind: true
       Enabled: true
-      Name: Map
+      Name: IPM Costmap
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -366,7 +366,7 @@ Visualization Manager:
       Max Value: 1
       Median window: 5
       Min Value: 0
-      Name: Image
+      Name: IPM Debug
       Normalize Range: true
       Topic:
         Depth: 5
@@ -382,7 +382,7 @@ Visualization Manager:
       Color Scheme: costmap
       Draw Behind: false
       Enabled: true
-      Name: Map
+      Name: C-Space Costmap
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -403,7 +403,7 @@ Visualization Manager:
       Max Value: 1
       Median window: 5
       Min Value: 0
-      Name: Image
+      Name: Road Lane Extraction
       Normalize Range: true
       Topic:
         Depth: 5
@@ -417,7 +417,7 @@ Visualization Manager:
       Max Value: 1
       Median window: 5
       Min Value: 0
-      Name: Image
+      Name: Full Semantic Map
       Normalize Range: true
       Topic:
         Depth: 5
@@ -431,7 +431,7 @@ Visualization Manager:
       Max Value: 1
       Median window: 5
       Min Value: 0
-      Name: Image
+      Name: RGB Camera Front
       Normalize Range: true
       Topic:
         Depth: 5
@@ -450,7 +450,7 @@ Visualization Manager:
       Length: 0.30000001192092896
       Line Style: Lines
       Line Width: 0.029999999329447746
-      Name: Path
+      Name: Left Boundary
       Offset:
         X: 0
         Y: 0
@@ -478,7 +478,7 @@ Visualization Manager:
       Length: 0.30000001192092896
       Line Style: Lines
       Line Width: 0.029999999329447746
-      Name: Path
+      Name: Right Boundary
       Offset:
         X: 0
         Y: 0
@@ -501,7 +501,7 @@ Visualization Manager:
       Max Value: 1
       Median window: 5
       Min Value: 0
-      Name: Image
+      Name: Boundary Debug
       Normalize Range: true
       Topic:
         Depth: 5
@@ -526,7 +526,7 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
-      Name: MarkerArray
+      Name: Local Lane Data
       Namespaces:
         lane_0_boundary: true
         lane_0_centerline: true
@@ -537,6 +537,7 @@ Visualization Manager:
         lane_3_boundary: true
         lane_3_centerline: true
         lane_labels: true
+        local_lane_data: true
         road_boundary: true
         status: true
       Topic:
@@ -544,7 +545,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /visualization/drivable_area
+        Value: /visualization/local_lane_data
       Value: true
   Enabled: true
   Global Options:

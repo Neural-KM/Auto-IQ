@@ -1,34 +1,29 @@
-# Lane detection result from polynomial fitting on semantic segmentation
+# Lane detection result from polynomial fitting on semantic segmentation.
 #
-# Polynomial fits are 2nd-order: x = a*y^2 + b*y + c
-# Coefficients are in BEV (bird's eye view) pixel space.
+# Fits are in BEV (bird's eye view) pixel coordinates with model:
+#   x = a*y^2 + b*y + c
 
 std_msgs/Header header
 
 # Detection validity
 bool valid
-float32 confidence            # 0.0 - 1.0
+float32 confidence
 
-# Left lane polynomial coefficients [a, b, c]  (empty if not detected)
-float64[] left_poly_coeffs
-# Right lane polynomial coefficients [a, b, c] (empty if not detected)
-float64[] right_poly_coeffs
+# Number of fitted lanes and flattened polynomial coefficients.
+# lane_count = N
+# poly_coeffs_flat = [a0,b0,c0, a1,b1,c1, ... aN-1,bN-1,cN-1]
+int32 lane_count
+float64[] poly_coeffs_flat
 
-# Lane geometry in image pixels (original image space)
-int32 lane_center             # Lane center x-pixel
-int32 left_lane_x             # Left lane boundary x-pixel  (-1 if unknown)
-int32 right_lane_x            # Right lane boundary x-pixel (-1 if unknown)
-int32 lane_width_px           # Lane width in pixels        (-1 if unknown)
+# Optional per-lane quality metadata; each array length should equal lane_count.
+float32[] lane_confidences
+int32[] lane_pixel_counts
 
-
-# BEV (Bird's Eye View) parameters for interpreting polynomial coefficients.
+# BEV parameters for interpreting polynomial coefficients.
 # In BEV image coordinates: image X is lateral (vehicle Y), image Y is forward (vehicle X).
-int32 bev_width               # BEV image width in pixels
-int32 bev_height              # BEV image height in pixels
-float64 bev_x_min             # Lateral range min (meters) along image X
-float64 bev_x_max             # Lateral range max (meters) along image X
-float64 bev_y_min             # Forward range min (meters) along image Y
-float64 bev_y_max             # Forward range max (meters) along image Y 
-
-# Real-world lane width (meters), derived from polynomial fits in BEV
-float64 lane_width_m          # -1.0 if unknown
+int32 bev_width
+int32 bev_height
+float64 bev_x_min
+float64 bev_x_max
+float64 bev_y_min
+float64 bev_y_max

@@ -42,8 +42,6 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 from sensor_msgs.msg import Image, CameraInfo
 from nav_msgs.msg import OccupancyGrid, Path
 from geometry_msgs.msg import PoseStamped, Point
-from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import ColorRGBA
 import tf2_ros
 from tf2_ros import TransformException
 from scipy import ndimage
@@ -58,7 +56,7 @@ from mapping.utils.ipm_funcs import (
     apply_column_drop_skirt)
 from mapping.utils.geometry import mark_ego_footprint, mark_circular_clear_zone
 from mapping.core.local_lane_estimator import LocalLaneEstimator, LocalRoadEstimate
-from autoiq_msgs.msg import LocalLaneData, Lane, LaneDetection
+from autoiq_msgs.msg import LocalLaneData, Lane
 
 # ================= CONFIGURATION =================
 ROAD_LABEL_ID = SEMANTIC_BY_NAME['road']           # 1 in CARLA
@@ -193,11 +191,6 @@ class InversePerspectiveMapperNode2(Node):
 
         # Drivable area publisher
         self.local_lane_data_pub = self.create_publisher(LocalLaneData, '/mapping/local_lane_data', 1)
-
-        # Lane detection publisher (polynomial fits)
-        self.lane_detection_pub = self.create_publisher(LaneDetection, '/mapping/lane_detection', 1)
-        self.lane_markers_pub = self.create_publisher(MarkerArray, '/mapping/lanes', 1)
-        self.lane_fit_debug_pub = self.create_publisher(Image, '/mapping/debug/lane_bev', 1)
 
         # ==================== Local Lane Estimator ====================
         self.lane_estimator = LocalLaneEstimator(
@@ -426,17 +419,6 @@ class InversePerspectiveMapperNode2(Node):
         if estimate.local_lane_data is not None:
             self._publish_local_lane_data(estimate.local_lane_data, stamp)
 
-        # Publish lane detection (polynomial fits)
-        if estimate.lane_fits is not None:
-            self._publish_lane_detection(estimate.lane_fits, stamp)
-            self._publish_lane_markers(estimate.lane_fits, stamp)
-
-            if estimate.lane_fits.debug_image is not None:
-                debug_msg = self.cv_bridge.cv2_to_imgmsg(estimate.lane_fits.debug_image, encoding='bgr8')
-                debug_msg.header.stamp = stamp
-                debug_msg.header.frame_id = self.base_frame
-                self.lane_fit_debug_pub.publish(debug_msg)
-
     def _publish_local_lane_data(self, result, stamp):
         """Publish LocalLaneData message with structured lane data."""
         msg = LocalLaneData()
@@ -471,106 +453,6 @@ class InversePerspectiveMapperNode2(Node):
 
         self.get_logger().info(f'Publishing LocalLaneData with {len(msg.lanes)} lanes', throttle_duration_sec=5.0)
         self.local_lane_data_pub.publish(msg)
-
-    def _publish_lane_detection(self, lane_fits, stamp):
-        """Publish LaneDetection message with polynomial coefficients."""
-        msg = LaneDetection()
-        msg.header.stamp = stamp
-        msg.header.frame_id = self.base_frame
-        msg.valid = lane_fits.valid
-        msg.confidence = 0.8 if lane_fits.valid else 0.0
-
-        if lane_fits.left_fit is not None:
-            msg.left_poly_coeffs = lane_fits.left_fit.coeffs.tolist()
-        if lane_fits.right_fit is not None:
-            msg.right_poly_coeffs = lane_fits.right_fit.coeffs.tolist()
-
-        bev = lane_fits.bev_params
-        msg.bev_width = bev.get('width', 0)
-        msg.bev_height = bev.get('height', 0)
-        msg.bev_x_min = float(bev.get('y_range', (0, 0))[0])  # Note: x/y swap for BEV convention
-        msg.bev_x_max = float(bev.get('y_range', (0, 0))[1])
-        msg.bev_y_min = float(bev.get('x_range', (0, 0))[0])
-        msg.bev_y_max = float(bev.get('x_range', (0, 0))[1])
-
-        if lane_fits.lane_width_m is not None:
-            msg.lane_width_m = lane_fits.lane_width_m
-        else:
-            msg.lane_width_m = -1.0
-
-        self.lane_detection_pub.publish(msg)
-
-    def _publish_lane_markers(self, lane_fits, stamp):
-        """Publish lane polynomial fits as RViz MarkerArray."""
-        marker_array = MarkerArray()
-
-        # Clear previous markers
-        clear = Marker()
-        clear.header.frame_id = self.base_frame
-        clear.header.stamp = stamp
-        clear.ns = 'lane_fits'
-        clear.id = 0
-        clear.action = Marker.DELETEALL
-        marker_array.markers.append(clear)
-
-        if not lane_fits.valid:
-            self.lane_markers_pub.publish(marker_array)
-            return
-
-        bev = lane_fits.bev_params
-        bev_height = bev.get('height', 300)
-        bev_width = bev.get('width', 100)
-        x_range = bev.get('x_range', (5.0, 35.0))
-        y_range = bev.get('y_range', (-5.0, 5.0))
-
-        if lane_fits.left_fit is not None:
-            marker_array.markers.append(
-                self._make_lane_marker(
-                    lane_fits.left_fit.coeffs, bev_height, bev_width, x_range, y_range,
-                    marker_id=1,
-                    color=ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.8),
-                    stamp=stamp))
-
-        if lane_fits.right_fit is not None:
-            marker_array.markers.append(
-                self._make_lane_marker(
-                    lane_fits.right_fit.coeffs, bev_height, bev_width, x_range, y_range,
-                    marker_id=2,
-                    color=ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.8),
-                    stamp=stamp))
-
-        # Center line
-        if lane_fits.center_fit is not None:
-            marker_array.markers.append(
-                self._make_lane_marker(
-                    lane_fits.center_fit, bev_height, bev_width, x_range, y_range,
-                    marker_id=3,
-                    color=ColorRGBA(r=0.0, g=1.0, b=1.0, a=0.6),
-                    stamp=stamp))
-
-        self.lane_markers_pub.publish(marker_array)
-
-    def _make_lane_marker(self, fit, bev_height, bev_width, x_range, y_range, marker_id, color, stamp):
-        """Create a LINE_STRIP marker from polynomial coefficients in BEV space."""
-        marker = Marker()
-        marker.header.frame_id = self.base_frame
-        marker.header.stamp = stamp
-        marker.ns = 'lane_fits'
-        marker.id = marker_id
-        marker.type = Marker.LINE_STRIP
-        marker.action = Marker.ADD
-        marker.scale.x = 0.15
-        marker.color = color
-
-        for y_bev in np.linspace(0, bev_height - 1, 30):
-            x_bev = np.polyval(fit, y_bev)
-            # Convert BEV pixel to world coordinates
-            x_world = x_range[1] - (y_bev / bev_height) * (x_range[1] - x_range[0])
-            y_world = y_range[0] + (x_bev / bev_width) * (y_range[1] - y_range[0])
-            pt = Point(x=float(x_world), y=float(-y_world), z=0.0)
-            marker.points.append(pt)
-
-        return marker
 
     def _publish_boundary_path(self, points: np.ndarray, stamp, publisher):
         """Publish an Nx2 array of (x, y) base_link points as a Path."""

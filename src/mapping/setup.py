@@ -30,6 +30,7 @@ setup(
         'console_scripts': [
             'local_costmap_node = mapping.nodes.local_costmap_node:main',
             'inverse_perspective_mapper_node_v2 = mapping.nodes.inverse_perspective_mapper_v2:main',
+            'lane_fitting_node = mapping.nodes.lane_fitting_node:main',
         ],
     },
 )

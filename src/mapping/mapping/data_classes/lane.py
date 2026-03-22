@@ -1,7 +1,7 @@
 """Lane detection data types."""
 
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 @dataclass
 class LaneDetection:
@@ -18,6 +18,9 @@ class LaneDetection:
     # Polynomial fits (coefficients)
     left_fit: Optional[Any] = None  # numpy array or list
     right_fit: Optional[Any] = None # numpy array or list
+
+    # All detected lane fits (for multi-lane support)
+    all_fits: List[Any] = field(default_factory=list)
 
     # BEV (Bird's Eye View) metrics (meters)
     lane_width_bev: Optional[float] = None
