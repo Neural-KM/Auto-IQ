@@ -1,8 +1,8 @@
 """
-Drivable Area Generator
+Local Lane Data Generator
 =======================
 
-Generates structured drivable area with lane information from detected
+Generates structured local lane data with lane information from detected
 road boundaries. This module was migrated from planning.core.lane_midline_generator
 to centralize lane computation in the mapping package.
 
@@ -43,7 +43,7 @@ STATUS_INSUFFICIENT_POINTS = 3
 
 @dataclass
 class LaneResult:
-    """Single lane within the drivable area."""
+    """Single lane within the local lane data."""
     lane_index: int
     left_boundary: np.ndarray    # (N, 2) x, y in base_link
     right_boundary: np.ndarray   # (N, 2) x, y in base_link
@@ -54,8 +54,8 @@ class LaneResult:
 
 
 @dataclass
-class DrivableAreaResult:
-    """Complete drivable area with all lanes."""
+class LocalLaneDataResult:
+    """Complete local lane data with all lanes."""
     valid: bool
     status_code: int
     left_boundary: np.ndarray    # (N, 2) raw left road edge
@@ -65,9 +65,9 @@ class DrivableAreaResult:
     lane_count: int = 0
 
 
-class DrivableAreaGenerator:
+class LocalLaneDataGenerator:
     """
-    Generates structured drivable area from road boundaries.
+    Generates structured local lane data from road boundaries.
 
     Computes lane structure including centerlines for all lanes,
     allowing downstream consumers to select which lane to follow.
@@ -87,7 +87,7 @@ class DrivableAreaGenerator:
         smoothing_window: int = 7,
     ):
         """
-        Initialize the drivable area generator.
+        Initialize the local lane data generator.
 
         Args:
             lane_count: Number of lanes to divide road into
@@ -116,16 +116,16 @@ class DrivableAreaGenerator:
         self,
         left_boundary: Optional[np.ndarray],
         right_boundary: Optional[np.ndarray],
-    ) -> DrivableAreaResult:
+    ) -> LocalLaneDataResult:
         """
-        Generate structured drivable area from road boundaries.
+        Generate structured local lane data from road boundaries.
 
         Args:
             left_boundary: (N, 2) array of left boundary points (x, y) in base_link
             right_boundary: (N, 2) array of right boundary points (x, y) in base_link
 
         Returns:
-            DrivableAreaResult with lane structure and status
+            LocalLaneDataResult with lane structure and status
         """
         # Convert to numpy arrays
         if left_boundary is not None:
@@ -135,7 +135,7 @@ class DrivableAreaGenerator:
 
         # No boundaries at all
         if left_boundary is None and right_boundary is None:
-            return DrivableAreaResult(
+            return LocalLaneDataResult(
                 valid=False,
                 status_code=STATUS_NO_BOUNDARIES,
                 left_boundary=np.empty((0, 2)),
@@ -156,7 +156,7 @@ class DrivableAreaGenerator:
             result = self._from_single(left_boundary, is_right=False)
 
         if result is None:
-            return DrivableAreaResult(
+            return LocalLaneDataResult(
                 valid=False,
                 status_code=STATUS_INSUFFICIENT_POINTS,
                 left_boundary=left_boundary if left_boundary is not None else np.empty((0, 2)),
@@ -169,7 +169,7 @@ class DrivableAreaGenerator:
         self,
         left_pts: np.ndarray,
         right_pts: np.ndarray,
-    ) -> Optional[DrivableAreaResult]:
+    ) -> Optional[LocalLaneDataResult]:
         """
         Compute lane structure when both boundaries are available.
 
@@ -241,7 +241,7 @@ class DrivableAreaGenerator:
             )
             lanes.append(lane_result)
 
-        return DrivableAreaResult(
+        return LocalLaneDataResult(
             valid=True,
             status_code=STATUS_OK,
             left_boundary=np.column_stack([x_grid, left_y]),
@@ -255,7 +255,7 @@ class DrivableAreaGenerator:
         self,
         pts: np.ndarray,
         is_right: bool,
-    ) -> Optional[DrivableAreaResult]:
+    ) -> Optional[LocalLaneDataResult]:
         """
         Compute lane structure from a single boundary using nominal lane width.
 
@@ -324,7 +324,7 @@ class DrivableAreaGenerator:
             )
             lanes.append(lane_result)
 
-        return DrivableAreaResult(
+        return LocalLaneDataResult(
             valid=True,
             status_code=STATUS_OK,
             left_boundary=left_boundary,

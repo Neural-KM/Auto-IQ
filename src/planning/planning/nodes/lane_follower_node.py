@@ -7,11 +7,11 @@ A lightweight ROS 2 node that follows detected lane boundaries
 without any global planning or CARLA dependency.
 
 Pipeline:
-  mapping publishes DrivableArea → this node subscribes
+  mapping publishes LocalLaneData → this node subscribes
   → selects preferred lane → trajectory published to control
 
 Topics subscribed:
-  /mapping/drivable_area  (autoiq_msgs/DrivableArea, base_link)
+  /mapping/local_lane_data  (autoiq_msgs/LocalLaneData, base_link)
   /carla/ego_vehicle/ground_truth/odometry  (nav_msgs/Odometry)
 
 Topics published:
@@ -28,7 +28,7 @@ from typing import List, Optional
 
 from nav_msgs.msg import Path, Odometry
 from geometry_msgs.msg import PoseStamped
-from autoiq_msgs.msg import Trajectory, TrajectoryPoint, DrivableArea
+from autoiq_msgs.msg import Trajectory, TrajectoryPoint, LocalLaneData
 
 from autoiq_common.types import VehicleState
 from autoiq_common.types import TrajectoryPoint as TrajectoryPointDC
@@ -47,9 +47,9 @@ class LaneFollowerNode(Node):
 
         # --- State ---
         self.vehicle_state = VehicleState()
-        self._drivable_area: Optional[DrivableArea] = None
-        self._drivable_area_stamp = None
-        self._drivable_area_timeout: float = 1.0  # seconds
+        self._local_lane_data: Optional[LocalLaneData] = None
+        self._local_lane_data_stamp = None
+        self._local_lane_data_timeout: float = 1.0  # seconds
 
         # Temporal fallback for robustness
         self._last_midline_bl: Optional[np.ndarray] = None
@@ -65,8 +65,8 @@ class LaneFollowerNode(Node):
             durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST, depth=1)
         self.create_subscription(
-            DrivableArea, '/mapping/drivable_area',
-            self._drivable_area_cb, drivable_qos)
+            LocalLaneData, '/mapping/local_lane_data',
+            self._local_lane_data_cb, drivable_qos)
 
         # --- Publishers ---
         self.traj_pub = self.create_publisher(Trajectory, '/planning/trajectory', 1)
@@ -74,25 +74,25 @@ class LaneFollowerNode(Node):
 
         # --- Timer (10 Hz) ---
         self.create_timer(0.1, self._loop)
-        self.get_logger().info('Lane Follower Node ready (using DrivableArea message)')
+        self.get_logger().info('Lane Follower Node ready (using LocalLaneData message)')
 
     # ==================== Callbacks ============================
 
     def _odom_cb(self, msg: Odometry):
         self.vehicle_state = vehicle_state_from_odometry(msg)
 
-    def _drivable_area_cb(self, msg: DrivableArea):
+    def _local_lane_data_cb(self, msg: LocalLaneData):
         self.get_logger().info(
-            f'DrivableArea received: valid={msg.valid}, lanes={len(msg.lanes)}',
+            f'LocalLaneData received: valid={msg.valid}, lanes={len(msg.lanes)}',
             throttle_duration_sec=2.0)
-        self._drivable_area = msg
-        self._drivable_area_stamp = self.get_clock().now()
+        self._local_lane_data = msg
+        self._local_lane_data_stamp = self.get_clock().now()
 
     # ==================== Main Loop ============================
 
     def _loop(self):
-        if not self._drivable_area_valid():
-            self.get_logger().warn('No valid drivable area', throttle_duration_sec=2.0)
+        if not self._local_lane_data_valid():
+            self.get_logger().warn('No valid local lane data', throttle_duration_sec=2.0)
             return
 
         # Get midline from selected lane
@@ -124,35 +124,35 @@ class LaneFollowerNode(Node):
         if trajectory:
             self._publish_trajectory(trajectory)
 
-    def _drivable_area_valid(self) -> bool:
-        if self._drivable_area is None or self._drivable_area_stamp is None:
+    def _local_lane_data_valid(self) -> bool:
+        if self._local_lane_data is None or self._local_lane_data_stamp is None:
             return False
-        age = (self.get_clock().now() - self._drivable_area_stamp).nanoseconds * 1e-9
-        if age > self._drivable_area_timeout:
+        age = (self.get_clock().now() - self._local_lane_data_stamp).nanoseconds * 1e-9
+        if age > self._local_lane_data_timeout:
             return False
-        return self._drivable_area.valid
+        return self._local_lane_data.valid
 
     def _select_lane_midline(self) -> Optional[np.ndarray]:
         """
-        Select the preferred lane's centerline from the drivable area.
+        Select the preferred lane's centerline from the local lane data.
 
         Returns (N, 2) numpy array of (x, y) in base_link frame, or None.
         """
-        if not self._drivable_area.lanes:
+        if not self._local_lane_data.lanes:
             return None
 
         # Get preferred lane index from road knowledge
         preferred_idx = self.road_knowledge.preferred_lane
 
         # Clamp to available lanes
-        if preferred_idx >= len(self._drivable_area.lanes):
-            preferred_idx = len(self._drivable_area.lanes) - 1
+        if preferred_idx >= len(self._local_lane_data.lanes):
+            preferred_idx = len(self._local_lane_data.lanes) - 1
 
-        lane = self._drivable_area.lanes[preferred_idx]
+        lane = self._local_lane_data.lanes[preferred_idx]
 
         # If preferred lane invalid, find first valid lane
         if not lane.is_valid:
-            for l in self._drivable_area.lanes:
+            for l in self._local_lane_data.lanes:
                 if l.is_valid:
                     lane = l
                     self.get_logger().warn(

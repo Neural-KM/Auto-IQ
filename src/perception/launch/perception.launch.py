@@ -2,11 +2,12 @@
 Perception Launch File
 =======================
 
-Launches the full perception stack:
+Launches the perception stack for pixel-level labeling:
   1. YOLO-based object detection + ground truth obstacles (perception_node)
   2. Semantic Segmentation (SegFormer or CARLA Ground Truth)
-  3. Lane Detection (polynomial fits on semantic segmentation)
-  4. Semantic PointCloud projection
+  3. Semantic PointCloud projection
+
+Note: Lane polynomial fitting is handled by the mapping package's lane_fitting_node.
 
 Usage:
     ros2 launch perception perception.launch.py segmentation_source:=segformer
@@ -88,8 +89,6 @@ def generate_launch_description():
                 'segmentation_source': LaunchConfiguration('segmentation_source'),
                 'model_name': LaunchConfiguration('model_name'),
                 'device': LaunchConfiguration('device'),
-                'camera_info_topic': '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info',
-                'enable_debug_viz': False,
             }],
         ),
 

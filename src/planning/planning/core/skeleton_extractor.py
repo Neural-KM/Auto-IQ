@@ -2,7 +2,7 @@
 Skeleton Extractor
 ==================
 
-Extracts the medial-axis skeleton of the drivable area from an 
+Extracts the medial-axis skeleton of the local lane data from an 
 occupancy grid (IPM costmap).
 
 The skeleton represents the topological centerline(s) of free space,
@@ -19,7 +19,7 @@ from skimage.morphology import skeletonize, remove_small_objects
 
 class SkeletonExtractor:
     """
-    Extracts a 1-pixel-wide skeleton from the drivable area of an
+    Extracts a 1-pixel-wide skeleton from the local lane data of an
     occupancy grid.
 
     Pipeline:
@@ -46,7 +46,7 @@ class SkeletonExtractor:
 
     def extract(self, grid: np.ndarray) -> np.ndarray:
         """
-        Compute the skeleton of the drivable area.
+        Compute the skeleton of the local lane data.
 
         Args:
             grid: 2-D int8/uint8 occupancy grid (H × W).

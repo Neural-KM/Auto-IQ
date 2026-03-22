@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Drivable Area Visualizer Node
+Local Lane Data Visualizer Node
 =============================
 
-ROS2 node for visualizing DrivableArea messages in RViz.
+ROS2 node for visualizing LocalLaneData messages in RViz.
 
 Subscribes to:
-- /mapping/drivable_area (autoiq_msgs/DrivableArea)
+- /mapping/local_lane_data (autoiq_msgs/LocalLaneData)
 
 Publishes:
-- /visualization/drivable_area (visualization_msgs/MarkerArray)
+- /visualization/local_lane_data (visualization_msgs/MarkerArray)
 
 Visualizes:
 - Road boundaries (red)
@@ -25,7 +25,7 @@ from visualization_msgs.msg import MarkerArray, Marker
 from std_msgs.msg import ColorRGBA
 from geometry_msgs.msg import Point
 
-from autoiq_msgs.msg import DrivableArea
+from autoiq_msgs.msg import LocalLaneData
 
 
 # Colors (RGBA)
@@ -34,13 +34,13 @@ LANE_CENTERLINE_COLOR = (0.0, 1.0, 0.0, 1.0)  # Green
 LANE_BOUNDARY_COLOR = (0.0, 0.0, 0.0, 0.8)    # Black
 
 
-class DrivableAreaVisualizerNode(Node):
+class LocalLaneDataVisualizerNode(Node):
     """
-    ROS2 Node for visualizing DrivableArea in RViz.
+    ROS2 Node for visualizing LocalLaneData in RViz.
     """
 
     def __init__(self):
-        super().__init__('drivable_area_visualizer_node')
+        super().__init__('local_lane_data_visualizer_node')
 
         # Parameters
         self.declare_parameter('marker_lifetime', 0.2)  # seconds
@@ -53,7 +53,7 @@ class DrivableAreaVisualizerNode(Node):
         self.boundary_width = self.get_parameter('boundary_width').value
         self.road_boundary_width = self.get_parameter('road_boundary_width').value
 
-        # QoS for drivable area subscription
+        # QoS for local lane data subscription
         drivable_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
@@ -62,24 +62,24 @@ class DrivableAreaVisualizerNode(Node):
         )
 
         # Subscriber
-        self.drivable_area_sub = self.create_subscription(
-            DrivableArea,
-            '/mapping/drivable_area',
-            self._drivable_area_cb,
+        self.local_lane_data_sub = self.create_subscription(
+            LocalLaneData,
+            '/mapping/local_lane_data',
+            self._local_lane_data_cb,
             drivable_qos
         )
 
         # Publisher
         self.marker_pub = self.create_publisher(
             MarkerArray,
-            '/visualization/drivable_area',
+            '/visualization/local_lane_data',
             10
         )
 
-        self.get_logger().info('Drivable Area Visualizer Node started')
+        self.get_logger().info('Local Lane Data Visualizer Node started')
 
-    def _drivable_area_cb(self, msg: DrivableArea):
-        """Handle incoming DrivableArea message and publish markers."""
+    def _local_lane_data_cb(self, msg: LocalLaneData):
+        """Handle incoming LocalLaneData message and publish markers."""
         marker_array = MarkerArray()
         stamp = msg.header.stamp
         frame_id = msg.header.frame_id  # Should be base_link or ego_vehicle
@@ -88,7 +88,7 @@ class DrivableAreaVisualizerNode(Node):
         clear_marker = Marker()
         clear_marker.header.frame_id = frame_id
         clear_marker.header.stamp = stamp
-        clear_marker.ns = 'drivable_area'
+        clear_marker.ns = 'local_lane_data'
         clear_marker.id = 0
         clear_marker.action = Marker.DELETEALL
         marker_array.markers.append(clear_marker)
@@ -273,7 +273,7 @@ class DrivableAreaVisualizerNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = DrivableAreaVisualizerNode()
+    node = LocalLaneDataVisualizerNode()
 
     try:
         rclpy.spin(node)

@@ -30,7 +30,7 @@ setup(
             'live_2d_viz_node = visualization.live_2d_viz_node:main',
             'carla_viz_node = visualization.carla_viz_node:main',
             'lidar_camera_overlay_node = visualization.lidar_camera_overlay_node:main',
-            'drivable_area_viz_node = visualization.drivable_area_viz_node:main',
+            'local_lane_data_viz_node = visualization.local_lane_data_viz_node:main',
         ],
     },
 )

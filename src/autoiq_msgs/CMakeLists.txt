@@ -20,7 +20,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Trajectory.msg"
   "msg/LaneDetection.msg"
   "msg/Lane.msg"
-  "msg/DrivableArea.msg"
+  "msg/LocalLaneData.msg"
   DEPENDENCIES std_msgs geometry_msgs
 )
 

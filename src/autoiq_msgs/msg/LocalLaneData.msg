@@ -1,4 +1,4 @@
-# Structured drivable area with lane information
+# Structured local lane data with lane information
 # Published by mapping, consumed by planning
 # Replaces raw boundary paths with pre-computed lane structure
 

@@ -1,7 +1,7 @@
-# Drivable Area Generator Configuration
+# Local Lane Data Generator Configuration
 # =====================================
 # These parameters define lane structure for the mapping package.
-# Used by DrivableAreaGenerator to compute lane centerlines.
+# Used by LocalLaneDataGenerator to compute lane centerlines.
 
 # Road geometry
 lane_count: 4                   # Number of lanes to divide road into

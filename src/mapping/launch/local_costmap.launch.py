@@ -2,7 +2,13 @@
 Local Costmap Launch File
 =========================
 
-Launches the Rolling Window Binary Bayes Filter costmap node with configurable parameters.
+Launches the inverse_perspective_mapper_v2 node which provides:
+  - 2D occupancy grid from semantic segmentation (reverse projection IPM)
+  - Road boundary extraction from local lane data mask
+  - Lane marking polynomial fits from road_line pixels
+  - Structured local lane data with lane centerlines
+
+All local road estimation is integrated into the single IPM node.
 """
 
 from launch import LaunchDescription
@@ -32,7 +38,13 @@ def generate_launch_description():
             description='Local costmap node executable to launch'
         ),
 
-        # ==================== Node ====================
+        # ==================== IPM Node (with integrated lane estimation) ====================
+        # Publishes:
+        #   /mapping/ipm_costmap (OccupancyGrid)
+        #   /mapping/boundary/left, /mapping/boundary/right (Path)
+        #   /mapping/local_lane_data (LocalLaneData with lane structure)
+        #   /mapping/lane_detection (LaneDetection with polynomial fits)
+        #   /mapping/lanes (MarkerArray for RViz)
         Node(
             package='mapping',
             executable=LaunchConfiguration('mapper_executable'),

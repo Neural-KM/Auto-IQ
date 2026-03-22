@@ -10,12 +10,18 @@ Forward projection (pixel-to-grid) creates holes and aliasing at distance.
 Reverse projection (grid-to-pixel) guarantees dense, hole-free maps by
 iterating over every grid cell and sampling the camera image.
 
+Also performs local road structure estimation:
+- Road boundary extraction from BEV local lane data
+- Lane marking polynomial fitting from road_line pixels
+- Structured local lane data with lane centerlines
+
 Algorithm:
 1. For each grid cell (r, c), compute world coordinates (x, y, z=0)
 2. Transform world point to camera frame using base_link->camera TF
 3. Project 3D camera point to 2D pixel using intrinsics
 4. Sample semantic image at that pixel
 5. Mark grid cell based on semantic label
+6. Extract road boundaries and fit lane polynomials
 
 Subscribes:
 - Semantic segmentation image (sensor_msgs/Image)
@@ -23,6 +29,9 @@ Subscribes:
 
 Publishes:
 - Occupancy grid (nav_msgs/OccupancyGrid)
+- Road boundaries (nav_msgs/Path)
+- Drivable area with lanes (autoiq_msgs/LocalLaneData)
+- Lane detection with polynomial fits (autoiq_msgs/LaneDetection)
 """
 
 import numpy as np
@@ -32,7 +41,9 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image, CameraInfo
 from nav_msgs.msg import OccupancyGrid, Path
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Point
+from visualization_msgs.msg import Marker, MarkerArray
+from std_msgs.msg import ColorRGBA
 import tf2_ros
 from tf2_ros import TransformException
 from scipy import ndimage
@@ -43,24 +54,12 @@ from cv_bridge import CvBridge
 # Import semantic labels from perception module (CARLA convention)
 from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME, colorize_mask
 from mapping.utils.ipm_funcs import (
-    reverse_project_grid, 
+    reverse_project_grid,
     apply_column_drop_skirt)
 from mapping.utils.geometry import mark_ego_footprint, mark_circular_clear_zone
-from mapping.core.boundary_extractor import (
-    extract_boundaries,
-    draw_boundary_overlay,
-    boundary_to_base_link,
-)
-from mapping.core.drivable_area_generator import (
-    DrivableAreaGenerator,
-    DrivableAreaResult,
-    STATUS_OK,
-    STATUS_NO_BOUNDARIES,
-    STATUS_INVALID_WIDTH,
-    STATUS_INSUFFICIENT_POINTS,
-)
-from autoiq_msgs.msg import DrivableArea, Lane
-from geometry_msgs.msg import Point
+from mapping.core.local_lane_estimator import LocalLaneEstimator, LocalRoadEstimate
+from autoiq_msgs.msg import LocalLaneData, Lane, LaneDetection
+
 # ================= CONFIGURATION =================
 ROAD_LABEL_ID = SEMANTIC_BY_NAME['road']           # 1 in CARLA
 ROAD_LINE_LABEL_ID = SEMANTIC_BY_NAME['road_line'] # 24 in CARLA
@@ -74,36 +73,36 @@ UNKNOWN = -1
 FREE = 0
 OCCUPIED = 100
 
+
 class InversePerspectiveMapperNode2(Node):
     """
     ROS2 Node for generating occupancy grid using Reverse Projection IPM.
-    
+
     Unlike forward projection (pixel-to-grid), reverse projection (grid-to-pixel)
     iterates over every grid cell and samples the camera image, guaranteeing
     a dense, hole-free occupancy map.
-    Problems: 
-    1) The road below a car is seen as drivable because 
-        semantics and reverse IPM are doing "too well".
-        Handling this by vertically diluting the obstacle before IPM
-    2) Marking the space blocked by hood as free which should be actually be handled by a another camera in the front
 
+    Also estimates local road structure including:
+    - Road boundaries from local lane data mask
+    - Lane marking polynomial fits
+    - Structured lane centerlines for planning
     """
-    
+
     def __init__(self):
         super().__init__('inverse_perspective_mapper_node_v2')
-        
+
         # ==================== Parameters ====================
         self.declare_parameter('semantic_source', 'road_lane_extraction')  # 'road_lane_extraction' or 'ground_truth'
         self.declare_parameter('costmap_topic', '/mapping/ipm_costmap')
         self.declare_parameter('base_frame', 'ego_vehicle')
-        
+
         # Grid parameters
         self.declare_parameter('grid_size', 40.0)    # meters (square grid)
         self.declare_parameter('resolution', 0.4)   # meters per cell
-        
+
         # Morphology parameters (in cells)
         self.declare_parameter('morphology_iterations', 2)  # Dilation then equal erosion (closing)
-        
+
         # Ego vehicle footprint parameters (meters)
         self.declare_parameter('vehicle_length', 3)
         self.declare_parameter('vehicle_width', 1.5)
@@ -117,21 +116,21 @@ class InversePerspectiveMapperNode2(Node):
         self.declare_parameter('clearance_from_divider', 0.3)
         self.declare_parameter('min_road_width', 10.0)
         self.declare_parameter('max_road_width', 30.0)  # Increased to accommodate wider roads
-        
+
         # Resolve semantic source → only the image topic changes
         # Camera intrinsics and frame are shared (same physical camera)
         semantic_source = self.get_parameter('semantic_source').value
         camera_info_topic = '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info'
         self.camera_frame = 'ego_vehicle/sensor/camera/rgb/front'
-        
+
         if semantic_source == 'ground_truth':
             semantic_topic = '/carla/ego_vehicle/ground_truth/camera/semantic/front/image'
         else:
             semantic_topic = '/perception/semantic_map/road_lane_extraction'
-        
+
         costmap_topic = self.get_parameter('costmap_topic').value
         self.base_frame = self.get_parameter('base_frame').value
-        
+
         self.grid_size = self.get_parameter('grid_size').value
         self.resolution = self.get_parameter('resolution').value
         self.morphology_iterations = self.get_parameter('morphology_iterations').value
@@ -139,30 +138,33 @@ class InversePerspectiveMapperNode2(Node):
         self.vehicle_width = self.get_parameter('vehicle_width').value
         self.rear_to_base_link = self.get_parameter('rear_to_base_link').value
         self.clear_zone_radius = self.get_parameter('clear_zone_radius').value
-        
+
         # Derive grid cells from size and resolution
         self.grid_cells = int(self.grid_size / self.resolution)
-        
+
         # Grid origin in base_link frame (centered on vehicle)
         self.origin_x = -self.grid_size / 2.0
         self.origin_y = -self.grid_size / 2.0
-        
+
         # ==================== TF2 ====================
         self.tf_buffer = tf2_ros.Buffer(cache_time=rclpy.duration.Duration(seconds=1.0))
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-        
+
         # ==================== State ====================
         self.K = None  # Camera intrinsics matrix [3x3]
         self.img_height = None
         self.img_width = None
-        
+        self.camera_fov = None  # Computed from intrinsics
+        self.camera_pitch = None  # From TF
+        self.camera_height = None  # From TF
+
         # Debug counters
         self._tf_log_count = 0
         self._img_log_count = 0
-        
+
         # ==================== CV Bridge ====================
         self.cv_bridge = CvBridge()
-        
+
         # ==================== QoS ====================
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -170,35 +172,39 @@ class InversePerspectiveMapperNode2(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
-        
+
         # ==================== Subscribers ====================
         self.camera_info_sub = self.create_subscription(
             CameraInfo, camera_info_topic,
             self.camera_info_callback, sensor_qos)
-        
+
         self.semantic_sub = self.create_subscription(
             Image, semantic_topic,
             self.semantic_callback, sensor_qos)
-        
-        # ==================== Publisher ====================
+
+        # ==================== Publishers ====================
         self.costmap_pub = self.create_publisher(OccupancyGrid, costmap_topic, 1)
         self.debug_image_pub = self.create_publisher(Image, '/mapping/ipm_debug_image', 1)
 
-        # ---- Road boundary publishers (nav_msgs/Path) ----
-        self.left_boundary_pub = self.create_publisher(
-            Path, '/mapping/boundary/left', 1)
-        self.right_boundary_pub = self.create_publisher(
-            Path, '/mapping/boundary/right', 1)
-        self.boundary_debug_pub = self.create_publisher(
-            Image, '/mapping/boundary_debug_image', 1)
+        # Road boundary publishers
+        self.left_boundary_pub = self.create_publisher(Path, '/mapping/boundary/left', 1)
+        self.right_boundary_pub = self.create_publisher(Path, '/mapping/boundary/right', 1)
+        self.boundary_debug_pub = self.create_publisher(Image, '/mapping/boundary_debug_image', 1)
 
-        self.get_logger().info('Inverse Perspective Mapper V2 (Reverse Projection) initialized with parameters:')        
-        # ---- Drivable area publisher (structured lane data) ----
-        self.drivable_area_pub = self.create_publisher(
-            DrivableArea, '/mapping/drivable_area', 1)
+        # Drivable area publisher
+        self.local_lane_data_pub = self.create_publisher(LocalLaneData, '/mapping/local_lane_data', 1)
 
-        # ---- Drivable area generator ----
-        self.drivable_area_generator = DrivableAreaGenerator(
+        # Lane detection publisher (polynomial fits)
+        self.lane_detection_pub = self.create_publisher(LaneDetection, '/mapping/lane_detection', 1)
+        self.lane_markers_pub = self.create_publisher(MarkerArray, '/mapping/lanes', 1)
+        self.lane_fit_debug_pub = self.create_publisher(Image, '/mapping/debug/lane_bev', 1)
+
+        # ==================== Local Lane Estimator ====================
+        self.lane_estimator = LocalLaneEstimator(
+            grid_cells=self.grid_cells,
+            origin_x=self.origin_x,
+            origin_y=self.origin_y,
+            resolution=self.resolution,
             lane_count=self.get_parameter('lane_count').value,
             total_road_width=self.get_parameter('total_road_width').value,
             clearance_from_wall=self.get_parameter('clearance_from_wall').value,
@@ -223,20 +229,23 @@ class InversePerspectiveMapperNode2(Node):
             self.K = np.array(msg.k).reshape(3, 3)
             self.img_height = msg.height
             self.img_width = msg.width
+
+            # Compute FOV from focal length
+            fx = self.K[0, 0]
+            self.camera_fov = np.degrees(2 * np.arctan(self.img_width / (2 * fx)))
+
             self.get_logger().info(f'CameraInfo received. Image: {self.img_width}x{self.img_height}')
-            self.get_logger().info(f'  Intrinsics: fx={self.K[0,0]:.1f}, fy={self.K[1,1]:.1f}, '
+            self.get_logger().info(f'  Intrinsics: fx={fx:.1f}, fy={self.K[1,1]:.1f}, '
                                    f'cx={self.K[0,2]:.1f}, cy={self.K[1,2]:.1f}')
+            self.get_logger().info(f'  Computed FOV: {self.camera_fov:.1f} deg')
             # Unsubscribe after getting info once
             self.destroy_subscription(self.camera_info_sub)
 
     def _get_base_to_camera_transform(self, stamp):
         """
         Get transform from base_link to camera_link frame.
-        
-        For reverse projection, we need base->camera (inverse of usual camera->base).
-        
-        Returns:
-            Tuple of (R, t) or (None, None) if lookup fails
+
+        Also extracts camera height and pitch for lane fitting.
         """
         try:
             # Lookup: base_link -> camera (we want to transform points FROM base TO camera)
@@ -245,34 +254,46 @@ class InversePerspectiveMapperNode2(Node):
                 self.base_frame,    # Source frame
                 stamp
             )
-            
+
             # Extract Translation
             t = np.array([
                 transform.transform.translation.x,
                 transform.transform.translation.y,
                 transform.transform.translation.z
             ], dtype=np.float64)
-            
+
             # Extract Rotation (Quaternion -> Matrix)
             q = transform.transform.rotation
             x, y, z, w = q.x, q.y, q.z, q.w
-            
+
             R = np.array([
                 [1 - 2*y*y - 2*z*z, 2*x*y - 2*z*w,     2*x*z + 2*y*w],
                 [2*x*y + 2*z*w,     1 - 2*x*x - 2*z*z, 2*y*z - 2*x*w],
                 [2*x*z - 2*y*w,     2*y*z + 2*x*w,     1 - 2*x*x - 2*y*y]
             ], dtype=np.float64)
-            
+
+            # Extract camera height and pitch for lane fitting
+            # For this we need base->camera (inverse direction)
+            try:
+                tf_base_cam = self.tf_buffer.lookup_transform(
+                    'ego_vehicle', self.camera_frame, stamp)
+                self.camera_height = tf_base_cam.transform.translation.z
+
+                # Extract pitch from quaternion
+                q2 = tf_base_cam.transform.rotation
+                sinp = 2.0 * (q2.w * q2.y - q2.z * q2.x)
+                self.camera_pitch = np.degrees(np.arcsin(np.clip(sinp, -1.0, 1.0)))
+            except TransformException:
+                pass  # Keep previous values
+
             # Debug: Log transform for first few frames
             self._tf_log_count += 1
             if self._tf_log_count <= 3:
                 self.get_logger().info(f'TF base->cam: t=[{t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f}]')
-                self.get_logger().info(f'  R row0 (cam X in base): [{R[0,0]:.3f}, {R[0,1]:.3f}, {R[0,2]:.3f}]')
-                self.get_logger().info(f'  R row1 (cam Y in base): [{R[1,0]:.3f}, {R[1,1]:.3f}, {R[1,2]:.3f}]')
-                self.get_logger().info(f'  R row2 (cam Z in base): [{R[2,0]:.3f}, {R[2,1]:.3f}, {R[2,2]:.3f}]')
-            
+                self.get_logger().info(f'  Camera height: {self.camera_height:.2f}m, pitch: {self.camera_pitch:.1f}deg')
+
             return R, t
-            
+
         except TransformException as e:
             self.get_logger().warn(f'TF lookup failed: {e}')
             return None, None
@@ -280,26 +301,29 @@ class InversePerspectiveMapperNode2(Node):
     def semantic_callback(self, msg: Image):
         """Process semantic segmentation image and generate occupancy grid."""
         t_start = time.perf_counter()
-        
+
         if self.K is None:
             self.get_logger().warn('No camera info yet, skipping frame')
             return
-        
+
         # 1. Get Transform: base_link -> camera_link
         R, t = self._get_base_to_camera_transform(msg.header.stamp)
         if R is None:
             return
-        
+
         # 2. Parse Semantic Image
         height = msg.height
         width = msg.width
-        
+
         try:
             semantic_img = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
         except Exception as e:
             self.get_logger().warn(f'cv_bridge conversion failed: {e}')
             return
-        
+
+        # Store original for lane fitting (before drop skirt modification)
+        semantic_img_original = semantic_img.copy()
+
         # Debug: Log unique labels and road pixel count
         self._img_log_count += 1
         if self._img_log_count <= 3:
@@ -308,21 +332,22 @@ class InversePerspectiveMapperNode2(Node):
             self.get_logger().info(f'Image: {width}x{height}, encoding: {msg.encoding}')
             self.get_logger().info(f'  Unique labels: {unique[:15]}...')
             self.get_logger().info(f'  Road pixels: {road_count}')
-        
+
         # 3. Extract camera intrinsics
         fx, fy = self.K[0, 0], self.K[1, 1]
         cx, cy = self.K[0, 2], self.K[1, 2]
-        
-        # 4. Apply column drop skirt to semantic image to avoid detecting drivable area under the car
+
+        # 4. Apply column drop skirt to semantic image to avoid detecting local lane data under the car
         hood_mask_rows = 135  # Rows to mask at bottom of image (camera+position-specific)
         semantic_img = apply_column_drop_skirt(semantic_img, obstacle_ids=list(VEHICLE_LABEL_IDS), drop_pixels=5, hood_mask_rows=hood_mask_rows)
-        
+
         # Create debug image after drop skirt
         colorized_dropped = colorize_mask(semantic_img)
         colorized_dropped[-hood_mask_rows:, :] = [128, 128, 128]  # Gray out hood-masked area
         debug_msg = self.cv_bridge.cv2_to_imgmsg(colorized_dropped, encoding='rgb8')
         debug_msg.header = msg.header
         self.debug_image_pub.publish(debug_msg)
+
         # 5. Run Reverse Projection (Numba JIT with parallel)
         grid = reverse_project_grid(
             self.grid_cells,
@@ -341,20 +366,10 @@ class InversePerspectiveMapperNode2(Node):
             FREE,
             OCCUPIED
         )
-        
-        # 5. Apply morphological operations on obstacles
+
+        # 6. Apply morphological operations on obstacles
         grid = self._apply_morphology(grid)
-        
-        # # 6. Mark ego vehicle footprint as FREE
-        # grid = mark_ego_footprint(
-        #     grid=grid,
-        #     resolution=self.resolution,
-        #     vehicle_length=self.vehicle_length,
-        #     vehicle_width=self.vehicle_width,
-        #     rear_to_base=self.rear_to_base_link,
-        #     FREE=FREE
-        # )
-        
+
         # 7. Mark circular clear zone around vehicle
         if self.clear_zone_radius > 0:
             grid = mark_circular_clear_zone(
@@ -363,15 +378,24 @@ class InversePerspectiveMapperNode2(Node):
                 resolution=self.resolution,
                 FREE=FREE
             )
-        
+
         # 8. Publish OccupancyGrid
         self._publish_grid(grid=grid, stamp=msg.header.stamp)
 
-        # 9. Road boundary extraction from drivable-area mask
-        self._extract_and_publish_boundaries(grid, msg.header.stamp)
+        # 9. Estimate local road structure (unified call)
+        road_estimate = self.lane_estimator.estimate(
+            grid=grid,
+            semantic_img=semantic_img_original,
+            camera_fov=self.camera_fov,
+            camera_pitch=self.camera_pitch,
+            camera_height=self.camera_height,
+        )
+
+        # 10. Publish all road structure data
+        self._publish_road_estimate(road_estimate, msg.header.stamp)
 
         t_end = time.perf_counter()
-        
+
         # Log stats
         n_free = np.sum(grid == FREE)
         n_occupied = np.sum(grid == OCCUPIED)
@@ -381,77 +405,54 @@ class InversePerspectiveMapperNode2(Node):
             f'Free: {n_free}, Occupied: {n_occupied}, Unknown: {n_unknown}', throttle_duration_sec=5.0
         )
 
-    # ─────────────── Road boundary helpers ───────────────────
+    # ─────────────── Road structure publishing ───────────────────
 
-    def _extract_and_publish_boundaries(self, grid: np.ndarray, stamp):
-        """
-        Build a binary drivable mask from the occupancy grid, run the
-        sliding-window boundary extractor, and publish the left/right
-        boundaries as nav_msgs/Path plus a debug overlay image.
-        Also generates and publishes structured DrivableArea message.
-        """
-        # Binary mask: 1 = drivable (FREE), 0 = everything else
-        binary_mask = np.uint8(grid == FREE)
-        # Observed mask: 1 = actually seen by camera/IPM projection
-        observed_mask = np.uint8(grid != UNKNOWN)
+    def _publish_road_estimate(self, estimate: LocalRoadEstimate, stamp):
+        """Publish all components of the road estimate."""
+        # Publish boundaries as Path messages
+        if estimate.left_boundary is not None:
+            self._publish_boundary_path(estimate.left_boundary, stamp, self.left_boundary_pub)
+        if estimate.right_boundary is not None:
+            self._publish_boundary_path(estimate.right_boundary, stamp, self.right_boundary_pub)
 
-        left, right, edge_img, l_diag, r_diag = extract_boundaries(binary_mask, observed_mask)
+        # Publish boundary debug image
+        if 'boundary_overlay' in estimate.debug_images:
+            debug_msg = self.cv_bridge.cv2_to_imgmsg(estimate.debug_images['boundary_overlay'], encoding='bgr8')
+            debug_msg.header.stamp = stamp
+            debug_msg.header.frame_id = self.base_frame
+            self.boundary_debug_pub.publish(debug_msg)
 
-        # Publish debug overlay
-        bev_vis = (binary_mask * 255).astype(np.uint8)
-        overlay = draw_boundary_overlay(bev_vis, left, right, l_diag, r_diag, edge_img)
-        debug_msg = self.cv_bridge.cv2_to_imgmsg(overlay, encoding='bgr8')
-        debug_msg.header.stamp = stamp
-        debug_msg.header.frame_id = self.base_frame
-        self.boundary_debug_pub.publish(debug_msg)
+        # Publish local lane data
+        if estimate.local_lane_data is not None:
+            self._publish_local_lane_data(estimate.local_lane_data, stamp)
 
-        # Convert pixel boundaries → base_link coordinates
-        min_path_points = 8
-        min_forward_span_m = 3.0
-        left_pts = None
-        right_pts = None
+        # Publish lane detection (polynomial fits)
+        if estimate.lane_fits is not None:
+            self._publish_lane_detection(estimate.lane_fits, stamp)
+            self._publish_lane_markers(estimate.lane_fits, stamp)
 
-        for result, label in [(left, 'left'), (right, 'right')]:
-            pts = boundary_to_base_link(
-                result,
-                grid_cells=self.grid_cells,
-                origin_x=self.origin_x,
-                origin_y=self.origin_y,
-                resolution=self.resolution,
-                sample_step=3,
-            )
-            if pts is None or len(pts) < min_path_points:
-                continue
+            if estimate.lane_fits.debug_image is not None:
+                debug_msg = self.cv_bridge.cv2_to_imgmsg(estimate.lane_fits.debug_image, encoding='bgr8')
+                debug_msg.header.stamp = stamp
+                debug_msg.header.frame_id = self.base_frame
+                self.lane_fit_debug_pub.publish(debug_msg)
 
-            forward_span = float(np.max(pts[:, 0]) - np.min(pts[:, 0]))
-            if forward_span < min_forward_span_m:
-                continue
-
-            if label == 'left':
-                left_pts = pts
-                self._publish_boundary_path(pts, stamp, self.left_boundary_pub)
-            else:
-                right_pts = pts
-                self._publish_boundary_path(pts, stamp, self.right_boundary_pub)
-
-        # Generate and publish structured drivable area
-        drivable_result = self.drivable_area_generator.generate(left_pts, right_pts)
-        self._publish_drivable_area(drivable_result, stamp)
-
-    def _publish_drivable_area(self, result: DrivableAreaResult, stamp):
-        """Publish DrivableArea message with structured lane data."""
-        msg = DrivableArea()
+    def _publish_local_lane_data(self, result, stamp):
+        """Publish LocalLaneData message with structured lane data."""
+        msg = LocalLaneData()
         msg.header.stamp = stamp
         msg.header.frame_id = self.base_frame
         msg.valid = result.valid
         msg.status_code = result.status_code
         msg.road_width_avg = result.road_width_avg
         msg.lane_count = result.lane_count
+
         # Convert numpy arrays to geometry_msgs/Point[]
         for x, y in result.left_boundary:
             msg.left_boundary.append(Point(x=float(x), y=float(y), z=0.0))
         for x, y in result.right_boundary:
             msg.right_boundary.append(Point(x=float(x), y=float(y), z=0.0))
+
         # Convert lane results
         for lane_result in result.lanes:
             lane_msg = Lane()
@@ -467,15 +468,111 @@ class InversePerspectiveMapperNode2(Node):
             for x, y in lane_result.centerline:
                 lane_msg.centerline.append(Point(x=float(x), y=float(y), z=0.0))
             msg.lanes.append(lane_msg)
-        self.get_logger().info(f'Publishing DrivableArea with {len(msg.lanes)} lanes', throttle_duration_sec=5.0)
-        self.drivable_area_pub.publish(msg)
 
-    def _publish_boundary_path(
-        self,
-        points: np.ndarray,
-        stamp,
-        publisher,
-    ):
+        self.get_logger().info(f'Publishing LocalLaneData with {len(msg.lanes)} lanes', throttle_duration_sec=5.0)
+        self.local_lane_data_pub.publish(msg)
+
+    def _publish_lane_detection(self, lane_fits, stamp):
+        """Publish LaneDetection message with polynomial coefficients."""
+        msg = LaneDetection()
+        msg.header.stamp = stamp
+        msg.header.frame_id = self.base_frame
+        msg.valid = lane_fits.valid
+        msg.confidence = 0.8 if lane_fits.valid else 0.0
+
+        if lane_fits.left_fit is not None:
+            msg.left_poly_coeffs = lane_fits.left_fit.coeffs.tolist()
+        if lane_fits.right_fit is not None:
+            msg.right_poly_coeffs = lane_fits.right_fit.coeffs.tolist()
+
+        bev = lane_fits.bev_params
+        msg.bev_width = bev.get('width', 0)
+        msg.bev_height = bev.get('height', 0)
+        msg.bev_x_min = float(bev.get('y_range', (0, 0))[0])  # Note: x/y swap for BEV convention
+        msg.bev_x_max = float(bev.get('y_range', (0, 0))[1])
+        msg.bev_y_min = float(bev.get('x_range', (0, 0))[0])
+        msg.bev_y_max = float(bev.get('x_range', (0, 0))[1])
+
+        if lane_fits.lane_width_m is not None:
+            msg.lane_width_m = lane_fits.lane_width_m
+        else:
+            msg.lane_width_m = -1.0
+
+        self.lane_detection_pub.publish(msg)
+
+    def _publish_lane_markers(self, lane_fits, stamp):
+        """Publish lane polynomial fits as RViz MarkerArray."""
+        marker_array = MarkerArray()
+
+        # Clear previous markers
+        clear = Marker()
+        clear.header.frame_id = self.base_frame
+        clear.header.stamp = stamp
+        clear.ns = 'lane_fits'
+        clear.id = 0
+        clear.action = Marker.DELETEALL
+        marker_array.markers.append(clear)
+
+        if not lane_fits.valid:
+            self.lane_markers_pub.publish(marker_array)
+            return
+
+        bev = lane_fits.bev_params
+        bev_height = bev.get('height', 300)
+        bev_width = bev.get('width', 100)
+        x_range = bev.get('x_range', (5.0, 35.0))
+        y_range = bev.get('y_range', (-5.0, 5.0))
+
+        if lane_fits.left_fit is not None:
+            marker_array.markers.append(
+                self._make_lane_marker(
+                    lane_fits.left_fit.coeffs, bev_height, bev_width, x_range, y_range,
+                    marker_id=1,
+                    color=ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.8),
+                    stamp=stamp))
+
+        if lane_fits.right_fit is not None:
+            marker_array.markers.append(
+                self._make_lane_marker(
+                    lane_fits.right_fit.coeffs, bev_height, bev_width, x_range, y_range,
+                    marker_id=2,
+                    color=ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.8),
+                    stamp=stamp))
+
+        # Center line
+        if lane_fits.center_fit is not None:
+            marker_array.markers.append(
+                self._make_lane_marker(
+                    lane_fits.center_fit, bev_height, bev_width, x_range, y_range,
+                    marker_id=3,
+                    color=ColorRGBA(r=0.0, g=1.0, b=1.0, a=0.6),
+                    stamp=stamp))
+
+        self.lane_markers_pub.publish(marker_array)
+
+    def _make_lane_marker(self, fit, bev_height, bev_width, x_range, y_range, marker_id, color, stamp):
+        """Create a LINE_STRIP marker from polynomial coefficients in BEV space."""
+        marker = Marker()
+        marker.header.frame_id = self.base_frame
+        marker.header.stamp = stamp
+        marker.ns = 'lane_fits'
+        marker.id = marker_id
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.scale.x = 0.15
+        marker.color = color
+
+        for y_bev in np.linspace(0, bev_height - 1, 30):
+            x_bev = np.polyval(fit, y_bev)
+            # Convert BEV pixel to world coordinates
+            x_world = x_range[1] - (y_bev / bev_height) * (x_range[1] - x_range[0])
+            y_world = y_range[0] + (x_bev / bev_width) * (y_range[1] - y_range[0])
+            pt = Point(x=float(x_world), y=float(-y_world), z=0.0)
+            marker.points.append(pt)
+
+        return marker
+
+    def _publish_boundary_path(self, points: np.ndarray, stamp, publisher):
         """Publish an Nx2 array of (x, y) base_link points as a Path."""
         path_msg = Path()
         path_msg.header.stamp = stamp
@@ -495,16 +592,16 @@ class InversePerspectiveMapperNode2(Node):
     def _apply_morphology(self, grid: np.ndarray) -> np.ndarray:
         """
         Apply morphological closing (dilation + erosion) to obstacle layer.
-        
+
         Closing fills small holes and smooths boundaries without changing
         the overall obstacle size.
         """
         if self.morphology_iterations == 0:
             return grid
-        
+
         # Create binary obstacle mask
         obstacle_mask = (grid == OCCUPIED)
-        
+
         # Morphological closing: dilate then erode with same iterations
         struct = ndimage.generate_binary_structure(2, 1)  # 4-connected
         obstacle_mask = ndimage.binary_dilation(
@@ -513,11 +610,11 @@ class InversePerspectiveMapperNode2(Node):
         obstacle_mask = ndimage.binary_erosion(
             obstacle_mask, structure=struct, iterations=self.morphology_iterations
         )
-        
+
         # Apply back to grid
         result = grid.copy()
         result[obstacle_mask & (grid == FREE)] = OCCUPIED
-        
+
         return result
 
     def _publish_grid(self, grid: np.ndarray, stamp):
@@ -525,7 +622,7 @@ class InversePerspectiveMapperNode2(Node):
         msg = OccupancyGrid()
         msg.header.stamp = stamp
         msg.header.frame_id = self.base_frame  # Grid centered on vehicle
-        
+
         msg.info.resolution = float(self.resolution)
         msg.info.width = self.grid_cells
         msg.info.height = self.grid_cells
@@ -533,7 +630,7 @@ class InversePerspectiveMapperNode2(Node):
         msg.info.origin.position.y = self.origin_y
         msg.info.origin.position.z = 0.0
         msg.info.origin.orientation.w = 1.0  # No rotation
-        
+
         msg.data = grid.flatten().tolist()
         self.costmap_pub.publish(msg)
 
@@ -541,7 +638,7 @@ class InversePerspectiveMapperNode2(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = InversePerspectiveMapperNode2()
-    
+
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

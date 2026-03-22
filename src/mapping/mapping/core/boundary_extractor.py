@@ -3,7 +3,7 @@ Road Boundary Extractor — Sliding Window on BEV Drivable-Area Mask
 ==================================================================
 
 Extracts left and right continuous road boundaries from a binary Bird's-Eye
-View (BEV) drivable area mask produced by Inverse Perspective Mapping.
+View (BEV) local lane data mask produced by Inverse Perspective Mapping.
 
 The algorithm uses a highly constrained Sliding Window approach designed to
 explicitly reject sudden road cutouts such as U-turns, intersections, and

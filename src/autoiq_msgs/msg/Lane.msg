@@ -1,5 +1,5 @@
-# Single lane within the drivable area
-# Part of DrivableArea message for mapping -> planning communication
+# Single lane within the local lane data
+# Part of LocalLaneData message for mapping -> planning communication
 
 # Lane index: 0 = rightmost (closest to wall/kerb), higher = toward center
 uint8 lane_index

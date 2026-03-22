@@ -2,7 +2,7 @@
 Lane Detector
 =============
 
-Detects lane boundaries from CARLA semantic segmentation images.
+Detects lane boundaries from semantic segmentation images.
 Uses bird's eye view transform for better lane line fitting.
 Outputs polynomial fits and lane geometry for path planning.
 """
@@ -16,8 +16,8 @@ import numpy as np
 import cv2
 
 from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME
-from perception.data_classes.lane import LaneDetection
-from perception.utils.ipm_transform import convert_to_ipm
+from mapping.data_classes.lane import LaneDetection
+from mapping.utils.ipm_transform import convert_to_ipm
 
 # Semantic class ID
 ROAD_LINE = SEMANTIC_BY_NAME['road_line']
@@ -31,9 +31,9 @@ ROAD_LINE = SEMANTIC_BY_NAME['road_line']
 @dataclass(frozen=True)
 class BEVConfig:
     """Bird's Eye View transform parameters."""
-    bev_width: int = 400
+    bev_width: int = 600
     x_range: Tuple[float, float] = (5.0, 35.0)     # forward distance range (meters)
-    y_range: Tuple[float, float] = (-5.0, 5.0)     # lateral range (meters)
+    y_range: Tuple[float, float] = (-15.0, 15.0)     # lateral range (meters)
 
 
 @dataclass(frozen=True)
@@ -57,7 +57,7 @@ CONFIG = LaneDetectorConfig()
 class LaneDetector:
     """
     Lane detection using semantic segmentation with bird's eye view transform.
-    
+
     Pipeline:
     1. Extract lane markings (RoadLine) from semantic image
     2. Transform to bird's eye view (top-down perspective)
@@ -65,15 +65,15 @@ class LaneDetector:
     4. Fit polynomial curves to left and right lanes
     5. Return lane geometry and polynomial fits for path planning
     """
-    
+
     def __init__(self, image_width, image_height):
         """
         Initialize lane detector.
-        
+
         Args:
             image_width: Camera image width in pixels
             image_height: Camera image height in pixels
-        
+
         Note:
             Camera extrinsics (fov, pitch, height) must be set via
             set_camera_params() before calling detect(). In the ROS
@@ -81,72 +81,72 @@ class LaneDetector:
         """
         self.width = image_width
         self.height = image_height
-        
+
         # Camera extrinsics — must be set via set_camera_params() before detect().
         self.fov = None
         self.pitch = None
         self.camera_height = None
-        
+
         # Bird's eye view output size and real-world coverage
         self.bev_width = CONFIG.bev.bev_width
-        
+
         # BEV real-world dimensions (meters)
         # Using the same coordinate system as ipm_transform (X=forward, Y=left)
         self.bev_x_range = CONFIG.bev.x_range    # Forward distance range (meters)
         self.bev_y_range = CONFIG.bev.y_range     # Lateral range (meters)
         self.pixels_per_meter = self.bev_width / (self.bev_y_range[1] - self.bev_y_range[0])
-        
+
         # Derive BEV height from the forward span and pixels_per_meter
         x_span = self.bev_x_range[1] - self.bev_x_range[0]
         self.bev_height = int(x_span * self.pixels_per_meter)
-        
+
         # Sliding window parameters
         self.n_windows = 9
         self.sw_margin = 50
         self.sw_min_pixels = 30
-        
+
         # Temporal smoothing factors
         self.smoothing = 0.7
         self.lane_width_smoothing = 0.95
-        
+
         # State tracking
         self.left_lane_x = None
         self.right_lane_x = None
         self.lane_center = self.width // 2
         self.lane_width_pixels = None
         self.avg_lane_width = None  # Track average lane width for stability
-        
+
         # Previous polynomial fits for temporal smoothing
         self.prev_left_fit = None
         self.prev_right_fit = None
-        
+
         # Debug images for visualization (only lane_fit is consumed by nodes)
         self.debug_images = {
             'bev_lane_mask': None,
             'lane_fit': None
         }
-    
+
     def detect(self, semantic_image):
         """
         Detect lanes from semantic segmentation image.
-        
+
         Args:
             semantic_image: 2D numpy array of semantic labels (H x W)
-            
+
         Returns:
             dict with detection results including CTE, heading error, confidence
         """
         if semantic_image is None:
             raise ValueError('semantic_image must not be None')
-        
+
         _, w = semantic_image.shape[:2]
-        
-        # Extract lane marking mask
-        lane_mask = (semantic_image == ROAD_LINE).astype(np.uint8) * 255
-        
+
+        # Extract drivable area mask
+        drivable_mask = ((semantic_image == ROAD_ID) | (semantic_image == ROAD_LINE)).astype(np.uint8) * 255
+
         # Transform to bird's eye view
-        bev_lane, _, _ = convert_to_ipm(
-            image=lane_mask,
+        bev_drivable, _, _ = convert_to_ipm(
+            image=drivable_mask,
             fov=self.fov,
             pitch=self.pitch,
             camera_height=self.camera_height,
@@ -155,199 +155,201 @@ class LaneDetector:
             pixels_per_meter=self.pixels_per_meter,
             interpolation=cv2.INTER_NEAREST
         )
+        # Apply Canny edge detection to find the actual lanes
+        bev_lane = cv2.Canny(bev_drivable, 50, 150)
         self.debug_images['bev_lane_mask'] = bev_lane
-        
+
         # Fit lane polynomials using sliding window
         left_fit, right_fit, lane_fit_img = self._fit_lanes_sliding_window(bev_lane)
         self.debug_images['lane_fit'] = lane_fit_img
-        
+
         # Apply temporal smoothing to fits
         if left_fit is not None:
             if self.prev_left_fit is not None:
                 left_fit = self.smoothing * self.prev_left_fit + (1 - self.smoothing) * left_fit
             self.prev_left_fit = left_fit
-        
+
         if right_fit is not None:
             if self.prev_right_fit is not None:
                 right_fit = self.smoothing * self.prev_right_fit + (1 - self.smoothing) * right_fit
             self.prev_right_fit = right_fit
-        
+
         # Calculate outputs
         return self._compute_lane_metrics(left_fit, right_fit, w)
-    
+
     def _fit_lanes_sliding_window(self, bev_lane_mask):
         """
         Fit polynomial curves to lane lines using sliding window search.
-        
+
         Returns:
             (left_fit, right_fit, visualization_image)
         """
         # Visualization image
         vis_img = np.zeros((self.bev_height, self.bev_width, 3), dtype=np.uint8)
         vis_img[bev_lane_mask > 127] = [255, 255, 0]
-        
+
         # Histogram of bottom half to find lane bases
         histogram = np.sum(bev_lane_mask[self.bev_height//2:, :], axis=0)
-        
+
         midpoint = self.bev_width // 2
         left_base = np.argmax(histogram[:midpoint]) if np.max(histogram[:midpoint]) > 100 else None
         right_base = np.argmax(histogram[midpoint:]) + midpoint if np.max(histogram[midpoint:]) > 100 else None
-        
+
         # Sliding window params
         n_windows = self.n_windows
         window_height = self.bev_height // n_windows
-        
+
         # Get nonzero pixels
         nonzero = bev_lane_mask.nonzero()
         nonzero_y = np.array(nonzero[0])
         nonzero_x = np.array(nonzero[1])
-        
+
         left_current = left_base
         right_current = right_base
         left_lane_inds = []
         right_lane_inds = []
-        
+
         # Slide windows
         for window in range(n_windows):
             win_y_low = self.bev_height - (window + 1) * window_height
             win_y_high = self.bev_height - window * window_height
-            
+
             # Left window
             if left_current is not None:
                 win_x_low = max(0, left_current - self.sw_margin)
                 win_x_high = min(self.bev_width, left_current + self.sw_margin)
-                
-                cv2.rectangle(vis_img, (win_x_low, win_y_low), 
+
+                cv2.rectangle(vis_img, (win_x_low, win_y_low),
                              (win_x_high, win_y_high), (0, 255, 0), 2)
-                
+
                 good_inds = ((nonzero_y >= win_y_low) & (nonzero_y < win_y_high) &
                             (nonzero_x >= win_x_low) & (nonzero_x < win_x_high)).nonzero()[0]
                 left_lane_inds.append(good_inds)
-                
+
                 if len(good_inds) > self.sw_min_pixels:
                     left_current = int(np.mean(nonzero_x[good_inds]))
-            
+
             # Right window
             if right_current is not None:
                 win_x_low = max(0, right_current - self.sw_margin)
                 win_x_high = min(self.bev_width, right_current + self.sw_margin)
-                
+
                 cv2.rectangle(vis_img, (win_x_low, win_y_low),
                              (win_x_high, win_y_high), (0, 255, 0), 2)
-                
+
                 good_inds = ((nonzero_y >= win_y_low) & (nonzero_y < win_y_high) &
                             (nonzero_x >= win_x_low) & (nonzero_x < win_x_high)).nonzero()[0]
                 right_lane_inds.append(good_inds)
-                
+
                 if len(good_inds) > self.sw_min_pixels:
                     right_current = int(np.mean(nonzero_x[good_inds]))
-        
+
         # Collect lane pixel arrays
         left_x = left_y = right_x = right_y = None
-        
+
         if left_lane_inds:
             left_lane_inds = np.concatenate(left_lane_inds)
             if len(left_lane_inds) > 50:
                 left_x = nonzero_x[left_lane_inds]
                 left_y = nonzero_y[left_lane_inds]
-        
+
         if right_lane_inds:
             right_lane_inds = np.concatenate(right_lane_inds)
             if len(right_lane_inds) > 50:
                 right_x = nonzero_x[right_lane_inds]
                 right_y = nonzero_y[right_lane_inds]
-        
+
         # ----- Shared-coefficient polynomial fitting -----
-        # Both lanes share curvature (a) and heading (b): x = a*y² + b*y + c
+        # Both lanes share curvature (a) and heading (b): x = a*y^2 + b*y + c
         # Only the lateral offset c differs between left and right.
         # This is solved as a single least-squares problem:
-        #   Design matrix columns: [y², y, is_left, is_right]
+        #   Design matrix columns: [y^2, y, is_left, is_right]
         #   Unknowns:              [a,  b, c_left,  c_right ]
         left_fit = None
         right_fit = None
         has_left = left_x is not None
         has_right = right_x is not None
-        
+
         if has_left and has_right:
             # --- Both lanes: shared a, b with separate c_left, c_right ---
             n_l = len(left_y)
             n_r = len(right_y)
             all_y = np.concatenate([left_y, right_y])
             all_x = np.concatenate([left_x, right_x])
-            
+
             # Indicator columns
             is_left = np.concatenate([np.ones(n_l), np.zeros(n_r)])
             is_right = np.concatenate([np.zeros(n_l), np.ones(n_r)])
-            
-            # Design matrix: [y², y, is_left, is_right]
+
+            # Design matrix: [y^2, y, is_left, is_right]
             A = np.column_stack([all_y ** 2, all_y, is_left, is_right])
-            
+
             # Least-squares solve for [a, b, c_left, c_right]
             coeffs, _, _, _ = np.linalg.lstsq(A, all_x, rcond=None)
             a, b, c_left, c_right = coeffs
-            
+
             left_fit = np.array([a, b, c_left])
             right_fit = np.array([a, b, c_right])
-        
+
         elif has_left:
             # --- Only left lane: independent fit ---
             left_fit = np.polyfit(left_y, left_x, 2)
-        
+
         elif has_right:
             # --- Only right lane: independent fit ---
             right_fit = np.polyfit(right_y, right_x, 2)
-        
+
         # ----- Visualize fitted curves -----
         plot_y = np.linspace(0, self.bev_height - 1, self.bev_height)
-        
+
         if left_fit is not None:
             plot_x = np.polyval(left_fit, plot_y)
             pts = np.column_stack((plot_x, plot_y)).astype(np.int32)
             cv2.polylines(vis_img, [pts], False, (255, 0, 0), 3)  # Blue
-        
+
         if right_fit is not None:
             plot_x = np.polyval(right_fit, plot_y)
             pts = np.column_stack((plot_x, plot_y)).astype(np.int32)
             cv2.polylines(vis_img, [pts], False, (0, 0, 255), 3)  # Red
-        
+
         # Draw lane center
         if left_fit is not None and right_fit is not None:
             center_x = (np.polyval(left_fit, plot_y) + np.polyval(right_fit, plot_y)) / 2
             pts = np.column_stack((center_x, plot_y)).astype(np.int32)
             cv2.polylines(vis_img, [pts], False, (0, 255, 255), 2)  # Cyan
-        
+
         # Draw vehicle position (center line)
-        cv2.line(vis_img, (self.bev_width // 2, 0), 
+        cv2.line(vis_img, (self.bev_width // 2, 0),
                 (self.bev_width // 2, self.bev_height), (255, 255, 255), 1)
-        
+
         return left_fit, right_fit, vis_img
-    
+
     def _compute_lane_metrics(self, left_fit, right_fit, orig_width):
         """Compute lane metrics from polynomial fits."""
         confidence = 0.0
         y_eval = self.bev_height - 10  # Near bottom (closest to vehicle)
-        
+
         left_x = None
         right_x = None
-        
+
         if left_fit is not None:
             left_x = int(np.polyval(left_fit, y_eval))
             confidence += 0.4
-        
+
         if right_fit is not None:
             right_x = int(np.polyval(right_fit, y_eval))
             confidence += 0.4
-        
+
         if left_x is not None and right_x is not None:
             lane_width_bev = right_x - left_x
-            
+
             # Update average lane width (with heavy smoothing to reject noise)
             if self.avg_lane_width is None:
                 self.avg_lane_width = lane_width_bev
             else:
                 self.avg_lane_width = (self.lane_width_smoothing * self.avg_lane_width
                                        + (1 - self.lane_width_smoothing) * lane_width_bev)
-                
+
             confidence += 0.2
         elif self.avg_lane_width is not None:
             # Use tracked average from previous frames (only one lane visible)
@@ -355,7 +357,7 @@ class LaneDetector:
         else:
             # No width data available — do not guess
             lane_width_bev = None
-        
+
         # Map to original image coords (approximate)
         if left_x is not None:
             self.left_lane_x = int((left_x / self.bev_width) * orig_width)
@@ -363,7 +365,7 @@ class LaneDetector:
             self.right_lane_x = int((right_x / self.bev_width) * orig_width)
         if lane_width_bev is not None:
             self.lane_width_pixels = int(lane_width_bev * (orig_width / self.bev_width))
-        
+
         return LaneDetection(
             valid=confidence > 0.2,
             confidence=min(confidence, 1.0),
@@ -381,10 +383,10 @@ class LaneDetector:
                 'lateral_range': self.bev_y_range
             }
         )
-    
+
     def set_camera_params(self, fov, pitch, camera_height):
         """Set camera extrinsics (called by the node once available).
-        
+
         Args:
             fov: Camera horizontal field of view in degrees.
             pitch: Camera pitch angle in degrees.
@@ -403,11 +405,11 @@ class LaneDetector:
         self.prev_left_fit = None
         self.prev_right_fit = None
         self.avg_lane_width = None
-    
+
     def get_debug_images(self):
         """
         Get intermediate debug images for visualization.
-        
+
         Returns:
             dict with:
                 - 'bev_lane_mask': Binary lane markings in bird's eye view
@@ -491,13 +493,13 @@ def main():
     cli_examples = """
 Examples:
     # Single semantic image
-    python -m perception.core.lane_detector --image semantic.png
+    python -m mapping.core.lane_fitting --image semantic.png
 
     # Batch process a folder
-    python -m perception.core.lane_detector --folder /data/semantic_maps/ --output ./lane_results/
+    python -m mapping.core.lane_fitting --folder /data/semantic_maps/ --output ./lane_results/
 
     # Display results
-    python -m perception.core.lane_detector --image semantic.png --show
+    python -m mapping.core.lane_fitting --image semantic.png --show
 """
 
     parser = argparse.ArgumentParser(
@@ -550,7 +552,7 @@ Examples:
 
     # ---- Create detector ----
     print(f'Image:  {img_w}x{img_h}')
-    print(f'Camera: fov={args.fov}°, pitch={args.pitch}°, height={args.camera_height}m')
+    print(f'Camera: fov={args.fov}deg, pitch={args.pitch}deg, height={args.camera_height}m')
 
     detector = LaneDetector(
         image_width=img_w,
