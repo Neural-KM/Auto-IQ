@@ -6,12 +6,12 @@ Launches the mapping nodes:
 
 1. inverse_perspective_mapper_v2 - Provides:
    - 2D occupancy grid from semantic segmentation (reverse projection IPM)
-   - Road boundary extraction from local lane data mask
-   - Structured local lane data with lane centerlines
 
 2. lane_fitting_node - Provides:
    - Multi-lane polynomial fitting from road_line pixels
+   - Boundary-based local lane estimation from occupancy grid
    - RViz lane markers for visualization
+   - LocalLaneData with estimated lane structure
 """
 
 from launch import LaunchDescription
@@ -39,12 +39,20 @@ def generate_launch_description():
             'enable_lane_debug_viz', default_value='true',
             description='Enable lane fitting debug BEV image publishing'
         ),
+        # Lane estimation parameters (for boundary-based estimation)
+        DeclareLaunchArgument(
+            'lane_count', default_value='4',
+            description='Expected number of lanes for boundary-based estimation'
+        ),
+        DeclareLaunchArgument(
+            'total_road_width', default_value='22.0',
+            description='Expected total road width in meters'
+        ),
 
-        # ==================== IPM Node (with local lane estimation) ====================
+        # ==================== IPM Node (Occupancy Grid) ====================
         # Publishes:
         #   /mapping/ipm_costmap (OccupancyGrid)
-        #   /mapping/boundary/left, /mapping/boundary/right (Path)
-        #   /mapping/local_lane_data (LocalLaneData with lane structure)
+        #   /mapping/ipm_debug_image (Image)
         Node(
             package='mapping',
             executable='inverse_perspective_mapper_node_v2',
@@ -63,6 +71,9 @@ def generate_launch_description():
         #   /mapping/lane_detection (LaneDetection with polynomial fits)
         #   /mapping/lanes (MarkerArray for RViz)
         #   /mapping/debug/lane_bev (Image, debug visualization)
+        #   /mapping/local_lane_data (LocalLaneData with lane structure)
+        #   /mapping/boundary/left, /mapping/boundary/right (Path)
+        #   /mapping/boundary_debug_image (Image)
         Node(
             package='mapping',
             executable='lane_fitting_node',
@@ -72,6 +83,12 @@ def generate_launch_description():
                 'use_sim_time': True,
                 'semantic_source': LaunchConfiguration('semantic_source'),
                 'enable_debug_viz': LaunchConfiguration('enable_lane_debug_viz'),
+                # Grid params must match IPM node
+                'grid_size': LaunchConfiguration('grid_size'),
+                'resolution': LaunchConfiguration('resolution'),
+                # Lane estimation params
+                'lane_count': LaunchConfiguration('lane_count'),
+                'total_road_width': LaunchConfiguration('total_road_width'),
             }],
         ),
     ])
