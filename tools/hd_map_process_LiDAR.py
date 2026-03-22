@@ -1270,9 +1270,10 @@ class HDMapProcessor:
 
         return self.global_lane_map
 
-    def cluster_and_fit_splines(self, eps: float = 1.0, min_samples: int = 10,
-                                  min_lane_points: int = 50,
-                                  spline_resolution: float = 0.5) -> HDMapLanes:
+    def cluster_and_fit_splines(self, eps: float = 1.5, min_samples: int = 5,
+                                  min_lane_points: int = 20,
+                                  spline_resolution: float = 0.5,
+                                  voxel_size: float = 1.0) -> HDMapLanes:
         """
         Step E: Cluster global lane points and fit splines to each lane marking.
 
@@ -1307,7 +1308,8 @@ class HDMapProcessor:
         print(f"  Input points: {len(points):,}")
 
         # Step 1: Voxel-based downsampling for efficiency
-        voxel_size = eps / 2
+        # Using a large voxel size collapses lateral noise/smearing into
+        # single points, forcing the greedy nearest-neighbor to step longitudinally.
         print(f"  Downsampling with voxel size: {voxel_size:.2f}m")
         downsampled = self._voxel_downsample(points, voxel_size)
         print(f"  After downsampling: {len(downsampled):,} points")
@@ -1387,13 +1389,41 @@ class HDMapProcessor:
 
     def _order_points_along_curve(self, points: np.ndarray) -> Optional[np.ndarray]:
         """
-        Order 3D points along a curve using greedy nearest-neighbor traversal.
-
-        Uses PCA to find starting point (endpoint), then greedy trace.
+        Order 3D points along a curve using trajectory projection.
+        This collapses lateral noise by slicing points perpendicular to the path.
         """
         if len(points) < 2:
             return points
 
+        traj_data = self.trajectory.to_numpy()
+        if traj_data and 'x' in traj_data and len(traj_data['x']) > 0:
+            from scipy.spatial import cKDTree
+            traj_xy = np.column_stack([traj_data['x'], traj_data['y']])
+            
+            # Map lane cluster points to the nearest vehicle trajectory node
+            tree = cKDTree(traj_xy)
+            _, indices = tree.query(points[:, :2])
+            
+            # Group points by nearest trajectory index, advancing straight down the lane length
+            unique_indices = np.unique(indices)
+            
+            ordered_pts = []
+            for idx in np.sort(unique_indices):
+                mask = indices == idx
+                # Take the geometric center of this cross-section to eliminate width/zig-zag
+                ordered_pts.append(np.mean(points[mask], axis=0))
+                
+            ordered_array = np.array(ordered_pts)
+            
+            # Remove duplicated or excessively close points to prevent spline math errors
+            if len(ordered_array) >= 2:
+                diffs = np.linalg.norm(np.diff(ordered_array, axis=0), axis=1)
+                valid_mask = np.concatenate(([True], diffs > 0.05)) # At least 5cm apart
+                ordered_array = ordered_array[valid_mask]
+                
+            return ordered_array
+
+        # -- Fallback (If no trajectory) --
         # Use PCA to find principal direction
         xy = points[:, :2]
         center = np.mean(xy, axis=0)
@@ -1460,7 +1490,7 @@ class HDMapProcessor:
             x, y, z = points[:, 0], points[:, 1], points[:, 2]
 
             # Adjust smoothing factor based on number of points
-            s = len(points) * 0.1  # Small smoothing
+            s = len(points) * 0.2  # Moderate smoothing since points are pre-centered by trajectory
 
             tck, u = splprep([x, y, z], s=s, k=min(3, len(points) - 1))
 
