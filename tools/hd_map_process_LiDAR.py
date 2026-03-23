@@ -1487,11 +1487,14 @@ class HDMapProcessor:
 
         try:
             # Fit B-spline (use smoothing to handle noise)
+            # High smoothing factor acts as a low-pass filter to aggressively flatten micro-jitters
             x, y, z = points[:, 0], points[:, 1], points[:, 2]
 
-            # Adjust smoothing factor based on number of points
-            s = len(points) * 0.2  # Moderate smoothing since points are pre-centered by trajectory
+            # Adjust smoothing factor based on number of points.
+            # Using a much higher constant to heavily smooth out the remaining jitter.
+            s = len(points) * 5.0  # Very aggressive smoothing for highway-like curves
 
+            # Fit 3rd degree B-spline
             tck, u = splprep([x, y, z], s=s, k=min(3, len(points) - 1))
 
             # Compute arc length by sampling densely
