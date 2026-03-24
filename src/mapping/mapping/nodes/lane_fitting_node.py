@@ -3,32 +3,57 @@
 Lane Fitting Node
 =================
 
-ROS2 node that performs:
-1. Multi-lane polynomial fitting on semantic segmentation maps
-2. Local lane estimation from road boundaries in the IPM image
+ROS2 node for lane detection from semantic segmentation images.
 
-Uses a single IPM (Inverse Perspective Mapping) transform from the semantic
-image for both polynomial lane fitting and boundary-based lane estimation.
+Lane Fitting Pipeline (from BEV):
+---------------------------------
+1. Receives semantic segmentation image (mono8)
+2. LaneDetector transforms to BEV using IPM (Inverse Perspective Mapping)
+3. Histogram peak detection finds lane base positions
+4. Sliding windows track lane pixels from vehicle to horizon
+5. 2nd-order polynomials fitted to each detected lane
+6. Results published as LaneDetection msg and RViz markers
+
+Debug Visualization:
+--------------------
+Set enable_debug_viz:=true to enable the BEV debug image.
+The '/mapping/debug/lane_bev' topic shows:
+- Yellow pixels: Detected road_line pixels in BEV
+- Colored filled rectangles: Sliding window search regions (one color per lane)
+- Colored polylines: Fitted polynomial curves
+- White line: Vehicle centerline
+
+Note: This node also runs boundary-based lane estimation (separate pipeline).
+See local_lane_estimator.py for that logic.
 
 Parameters:
+-----------
 - semantic_source: 'road_lane_extraction' (perception) or 'ground_truth' (CARLA GT)
 - camera_info_topic: Camera info for intrinsics
 - camera_frame: TF frame name for the camera sensor
-- enable_debug_viz: Publish debug BEV images
+- enable_debug_viz: Publish debug BEV images (default: false)
 - lane_config_file: Path to YAML file with lane structure parameters
 
 Subscribes:
+-----------
 - Semantic segmentation (mono8) - topic depends on semantic_source parameter
 - /carla/ego_vehicle/sensor/camera/rgb/front/camera_info (CameraInfo)
 
 Publishes:
+----------
 - /mapping/lane_detection (LaneDetection) - polynomial fits + metrics
 - /mapping/lanes (MarkerArray) - RViz lane line visualization
-- /mapping/debug/lane_bev (Image, bgr8) - BEV debug visualization
+- /mapping/debug/lane_bev (Image, bgr8) - BEV debug visualization (if enabled)
 - /mapping/local_lane_data (LocalLaneData) - estimated lanes from boundaries
 - /mapping/boundary/left (Path) - left road boundary
 - /mapping/boundary/right (Path) - right road boundary
 - /mapping/boundary_debug_image (Image) - boundary extraction debug
+
+Changelog:
+----------
+2026-03-25: Fixed curve handling:
+    - Increased max_quadratic from 0.002 to 0.015 (allows tighter curves)
+    - Semi-transparent filled windows in debug visualization
 """
 
 import numpy as np

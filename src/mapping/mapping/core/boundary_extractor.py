@@ -23,6 +23,14 @@ performed at any stage.
 Designed for Level 4 autonomous driving on heavy-duty trucks where lane
 boundary stability is safety-critical.
 
+Changelog:
+---------
+2026-03-25: Improved curve handling:
+    - Increased MAX_LATERAL_SHIFT from 25 to 45 pixels for better turn tracking
+    - Increased MARGIN from 40 to 60 for wider search windows
+    - Enhanced visualization with thicker window borders and alpha blending
+    - Windows now more visible with semi-transparent fill
+
 Author : Auto-IQ Mapping Stack
 """
 
@@ -104,10 +112,10 @@ def extract_boundaries(
     """
     # ── Hardcoded parameters ────────────────────────────────────
     NWINDOWS = 15
-    MARGIN = 40                    # half-height of search window (rows)
+    MARGIN = 60                    # half-height of search window (rows) - increased from 40
     MINPIX = 10                    # min edge pixels to recenter
-    MAX_LATERAL_SHIFT = 25         # max row-shift between consecutive windows
-    LANE_WIDTH_TOLERANCE = 40      # allowed row-width deviation
+    MAX_LATERAL_SHIFT = 45         # max row-shift between consecutive windows - increased from 25
+    LANE_WIDTH_TOLERANCE = 60      # allowed row-width deviation - increased from 40
     POLY_ORDER = 2
     VALID_MASK_ERODE = 5
 
@@ -307,7 +315,8 @@ def draw_boundary_overlay(
     At the end the image is rotated for human-friendly display:
         top = ahead,  bottom = behind,  left = left,  right = right.
 
-    Windows: green = valid,  red = frozen / constrained.
+    Windows: green = valid (active tracking),  red = frozen / constrained.
+             Windows now drawn with semi-transparent fill for better visibility.
     Curves:  yellow = left boundary,  cyan = right boundary.
 
     Each diag entry is a tuple: (c_lo, c_hi, r_center, margin, is_frozen).
@@ -328,12 +337,19 @@ def draw_boundary_overlay(
     YELLOW = (0, 255, 255)
     CYAN   = (255, 255, 0)
 
-    # Draw sliding windows — cv2 uses (x, y) = (col, row)
+    # Draw sliding windows with semi-transparent fill for better visibility
+    overlay = vis.copy()
     for c_lo, c_hi, r_center, margin, is_frozen in left_diags + right_diags:
         colour = RED if is_frozen else GREEN
         pt1 = (int(c_lo), int(r_center - margin))
         pt2 = (int(c_hi), int(r_center + margin))
-        cv2.rectangle(vis, pt1, pt2, colour, 2)
+        # Draw filled rectangle on overlay
+        cv2.rectangle(overlay, pt1, pt2, colour, -1)
+        # Draw border on main image with thicker line
+        cv2.rectangle(vis, pt1, pt2, colour, 3)
+
+    # Blend overlay with main image for semi-transparent windows
+    vis = cv2.addWeighted(overlay, 0.3, vis, 0.7, 0)
 
     # Draw fitted curves
     for result, colour in [(left_result, YELLOW), (right_result, CYAN)]:
@@ -344,7 +360,7 @@ def draw_boundary_overlay(
             ])
             pts[:, 0] = np.clip(pts[:, 0], 0, vis.shape[1] - 1)
             pts[:, 1] = np.clip(pts[:, 1], 0, vis.shape[0] - 1)
-            cv2.polylines(vis, [pts], isClosed=False, color=colour, thickness=2)
+            cv2.polylines(vis, [pts], isClosed=False, color=colour, thickness=3)
 
     # ── Display rotation ────────────────────────────────────────
     # Native grid: rows top→bot = right→left,  cols left→right = behind→ahead.

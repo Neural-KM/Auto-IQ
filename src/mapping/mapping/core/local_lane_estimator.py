@@ -21,6 +21,12 @@ Right-hand drive lane numbering (lane_index):
 NOTE: The "local_lane_data" lanes are NOT detected - they are estimated/guessed
 by dividing the detected road width using configured lane_count and road_width
 parameters. This uses a priori knowledge about expected road structure.
+
+Changelog:
+---------
+2026-03-25: Improved curve handling via updated boundary_extractor constraints.
+    Boundary extraction now uses wider search windows and allows more lateral
+    movement per step for better tracking on turns.
 """
 
 from __future__ import annotations

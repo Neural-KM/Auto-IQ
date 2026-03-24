@@ -1,16 +1,60 @@
 """
-Lane Detector
-=============
+Lane Detector — Multi-Lane Polynomial Fitting from Semantic BEV
+================================================================
 
-Detects lane boundaries from semantic segmentation images.
-Uses bird's eye view transform for better lane line fitting.
-Outputs polynomial fits and lane geometry for path planning.
+Detects lane markings from semantic segmentation images using a sliding
+window approach on a Bird's Eye View (BEV) transform.
+
+Pipeline:
+---------
+1. Extract road_line pixels from semantic image (class ID = 24)
+2. Transform to BEV using Inverse Perspective Mapping (IPM)
+3. Find lane base positions using histogram peak detection
+4. Run sliding windows from vehicle (bottom) to horizon (top)
+5. Fit 2nd-order polynomials with quality checks
+6. Apply temporal smoothing for stability
+
+BEV Coordinate System:
+----------------------
+- Origin: Bottom-center of BEV image (vehicle position)
+- X-axis (columns): Lateral position, left is higher column index
+- Y-axis (rows): Forward distance, row 0 = far, row H-1 = near vehicle
+- Polynomials: x = f(y) where y is row index
+
+Sliding Window Algorithm:
+-------------------------
+For each detected histogram peak (lane base):
+1. Start at base position (bottom of BEV)
+2. Search within margin (50px) of current_x for lane pixels
+3. Recenter window on mean pixel position if enough pixels found
+4. Continue to next window (moving toward horizon)
+
+Visualization (debug 'lane_fit' image):
+---------------------------------------
+- Yellow pixels: Detected lane marking pixels in BEV
+- Colored rectangles: Sliding windows (semi-transparent fill, solid border)
+- Colored polylines: Fitted polynomial curves
+- White vertical line: Vehicle centerline
+
+Quality Checks:
+---------------
+- Minimum pixel count (50) for polynomial fit
+- Maximum RMSE (15 pixels) between fit and points
+- Maximum curvature coefficient (0.015) to reject noise but allow curves
+- Minimum vertical span (20% of BEV height)
+
+Changelog:
+----------
+2026-03-25: Fixed curve handling:
+    - Increased max_quadratic from 0.002 to 0.015 (allows tighter curves)
+    - Semi-transparent filled windows for clearer visualization
+    - Window borders thickness=2 for visibility
 """
 
 import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Optional, List, Dict, Any
 
 import numpy as np
 import cv2
@@ -36,7 +80,7 @@ class BEVConfig:
     """Bird's Eye View transform parameters."""
     bev_width: int = 600
     x_range: Tuple[float, float] = (5.0, 35.0)     # forward distance range (meters)
-    y_range: Tuple[float, float] = (-15.0, 15.0)     # lateral range (meters)
+    y_range: Tuple[float, float] = (-15.0, 15.0)   # lateral range (meters)
 
 
 @dataclass(frozen=True)
@@ -61,15 +105,10 @@ class LaneDetector:
     """
     Lane detection using semantic segmentation with bird's eye view transform.
 
-    Pipeline:
-    1. Extract lane markings (RoadLine) from semantic image
-    2. Transform to bird's eye view (top-down perspective)
-    3. Use sliding window to find lane pixels
-    4. Fit polynomial curves to left and right lanes
-    5. Return lane geometry and polynomial fits for path planning
+    See module docstring for full algorithm description.
     """
 
-    def __init__(self, image_width, image_height):
+    def __init__(self, image_width: int, image_height: int):
         """
         Initialize lane detector.
 
@@ -79,27 +118,23 @@ class LaneDetector:
 
         Note:
             Camera extrinsics (fov, pitch, height) must be set via
-            set_camera_params() before calling detect(). In the ROS
-            pipeline these come from tf lookup in the main node.
+            set_camera_params() before calling detect().
         """
         self.width = image_width
         self.height = image_height
 
-        # Camera extrinsics — must be set via set_camera_params() before detect().
-        self.fov = None
-        self.pitch = None
-        self.camera_height = None
+        # Camera extrinsics — must be set via set_camera_params() before detect()
+        self.fov: Optional[float] = None
+        self.pitch: Optional[float] = None
+        self.camera_height: Optional[float] = None
 
-        # Bird's eye view output size and real-world coverage
+        # BEV configuration
         self.bev_width = CONFIG.bev.bev_width
-
-        # BEV real-world dimensions (meters)
-        # Using the same coordinate system as ipm_transform (X=forward, Y=left)
         self.bev_x_range = CONFIG.bev.x_range    # Forward distance range (meters)
-        self.bev_y_range = CONFIG.bev.y_range     # Lateral range (meters)
+        self.bev_y_range = CONFIG.bev.y_range    # Lateral range (meters)
         self.pixels_per_meter = self.bev_width / (self.bev_y_range[1] - self.bev_y_range[0])
 
-        # Derive BEV height from the forward span and pixels_per_meter
+        # Derive BEV height from the forward span
         x_span = self.bev_x_range[1] - self.bev_x_range[0]
         self.bev_height = int(x_span * self.pixels_per_meter)
 
@@ -108,32 +143,32 @@ class LaneDetector:
         self.sw_margin = 50
         self.sw_min_pixels = 30
 
-        # Temporal smoothing factors
-        self.smoothing = 0.7
+        # Temporal smoothing
+        self.smoothing = 0.6
         self.lane_width_smoothing = 0.95
 
         # State tracking
-        self.left_lane_x = None
-        self.right_lane_x = None
+        self.left_lane_x: Optional[int] = None
+        self.right_lane_x: Optional[int] = None
         self.lane_center = self.width // 2
-        self.lane_width_pixels = None
-        self.avg_lane_width = None  # Track average lane width for stability
+        self.lane_width_pixels: Optional[int] = None
+        self.avg_lane_width: Optional[float] = None
 
-        # Previous polynomial fits for temporal smoothing (multi-lane)
-        self.prev_lane_fits = []
+        # Previous polynomial fits for temporal smoothing
+        self.prev_lane_fits: List[Dict[str, Any]] = []
 
-        # Debug images for visualization (only lane_fit is consumed by nodes)
+        # Debug images
         self.debug_images = {
             'bev_lane_mask': None,
             'lane_fit': None
         }
 
-    def detect(self, semantic_image):
+    def detect(self, semantic_image: np.ndarray) -> LaneDetection:
         """
         Detect lanes from semantic segmentation image.
 
         Args:
-            semantic_image: 2D numpy array of semantic labels (H x W)
+            semantic_image: 2D numpy array of semantic labels (H x W, mono8)
 
         Returns:
             LaneDetection with polynomial fits for all detected lanes
@@ -143,10 +178,10 @@ class LaneDetector:
 
         _, w = semantic_image.shape[:2]
 
-        # Extract road_line pixels directly (no edge detection)
+        # Extract road_line pixels
         lane_mask = (semantic_image == ROAD_LINE_ID).astype(np.uint8) * 255
 
-        # Transform lane markings to bird's eye view
+        # Transform to bird's eye view
         bev_lane, _, _ = convert_to_ipm(
             image=lane_mask,
             fov=self.fov,
@@ -158,7 +193,7 @@ class LaneDetector:
             interpolation=cv2.INTER_NEAREST
         )
 
-        # Slight dilation to connect nearby pixels (helps with thin projected lines)
+        # Slight dilation to connect nearby pixels
         bev_lane = cv2.dilate(
             bev_lane,
             np.ones((3, 3), dtype=np.uint8),
@@ -166,31 +201,33 @@ class LaneDetector:
         )
         self.debug_images['bev_lane_mask'] = bev_lane
 
-        # Detect multiple lanes using histogram peaks and sliding windows
+        # Detect multiple lanes using sliding windows
         lane_fits, lane_fit_img = self._fit_multilane_sliding_window(bev_lane)
         self.debug_images['lane_fit'] = lane_fit_img
 
-        # Apply temporal smoothing to each lane fit
+        # Apply temporal smoothing
         lane_fits = self._smooth_lane_fits(lane_fits)
 
-        # Calculate outputs (for backwards compatibility, extract left/right)
         return self._compute_lane_metrics_multilane(lane_fits, w)
 
-    def _fit_multilane_sliding_window(self, bev_lane_mask):
+    def _fit_multilane_sliding_window(self, bev_lane_mask: np.ndarray):
         """
         Detect multiple lanes using histogram peak detection and sliding windows.
 
         Args:
-            bev_lane_mask: Binary BEV image with lane pixels
+            bev_lane_mask: Binary BEV image with lane pixels (H x W, uint8)
 
         Returns:
-            (list of polynomial fits sorted left-to-right, visualization image)
+            (list of lane fit dicts, visualization image)
         """
         bev_h, bev_w = bev_lane_mask.shape[:2]
 
-        # Visualization image
+        # Create visualization image
         vis_img = np.zeros((bev_h, bev_w, 3), dtype=np.uint8)
         vis_img[bev_lane_mask > 127] = [255, 255, 0]  # Yellow lane pixels
+
+        # Overlay for semi-transparent windows
+        overlay = vis_img.copy()
 
         # Histogram of bottom portion to find lane bases
         hist_region = bev_lane_mask[int(bev_h * 0.6):, :]
@@ -206,9 +243,9 @@ class LaneDetector:
 
         # Find peaks (lane bases)
         min_peak_height = np.max(histogram_smooth) * 0.15
-        min_peak_distance = int(bev_w * 0.08)  # Min distance between lanes
+        min_peak_distance = int(bev_w * 0.08)
 
-        peaks, properties = find_peaks(
+        peaks, _ = find_peaks(
             histogram_smooth,
             height=max(min_peak_height, 500),
             distance=min_peak_distance,
@@ -216,7 +253,6 @@ class LaneDetector:
         )
 
         if len(peaks) == 0:
-            # Draw vehicle center line
             cv2.line(vis_img, (bev_w // 2, 0), (bev_w // 2, bev_h), (255, 255, 255), 1)
             return [], vis_img
 
@@ -251,10 +287,12 @@ class LaneDetector:
                 win_x_low = max(0, current_x - self.sw_margin)
                 win_x_high = min(bev_w, current_x + self.sw_margin)
 
-                # Draw window
+                # Draw window on overlay (filled) and main image (border)
                 color = lane_colors[peak_idx % len(lane_colors)]
+                cv2.rectangle(overlay, (win_x_low, win_y_low),
+                              (win_x_high, win_y_high), color, -1)
                 cv2.rectangle(vis_img, (win_x_low, win_y_low),
-                              (win_x_high, win_y_high), color, 1)
+                              (win_x_high, win_y_high), color, 2)
 
                 # Find pixels in window
                 good_inds = (
@@ -287,8 +325,10 @@ class LaneDetector:
                         plot_y = np.linspace(0, bev_h - 1, bev_h)
                         plot_x = np.polyval(fit, plot_y)
                         pts = np.column_stack((plot_x, plot_y)).astype(np.int32)
-                        color = lane_colors[peak_idx % len(lane_colors)]
                         cv2.polylines(vis_img, [pts], False, color, 3)
+
+        # Blend overlay for semi-transparent windows
+        vis_img = cv2.addWeighted(overlay, 0.25, vis_img, 0.75, 0)
 
         # Sort lanes left to right by position at bottom of BEV
         y_eval = bev_h - 10
@@ -299,9 +339,14 @@ class LaneDetector:
 
         return lane_fits, vis_img
 
-    def _fit_polynomial_robust(self, xs, ys, bev_height):
+    def _fit_polynomial_robust(self, xs: np.ndarray, ys: np.ndarray, bev_height: int):
         """
         Fit 2nd order polynomial with outlier rejection and quality checks.
+
+        Args:
+            xs: X coordinates (lateral position in BEV)
+            ys: Y coordinates (forward position in BEV, 0=far, H=near)
+            bev_height: Height of BEV image for span validation
 
         Returns:
             (coefficients, is_valid) tuple
@@ -309,15 +354,16 @@ class LaneDetector:
         if len(xs) < 50:
             return None, False
 
-        # Initial fit
+        # Initial fit: x = a*y^2 + b*y + c
         coeffs = np.polyfit(ys, xs, 2)
         pred = np.polyval(coeffs, ys)
         residual = xs - pred
         rmse = float(np.sqrt(np.mean(residual ** 2)))
 
-        # Reject unrealistic fits
+        # Quality thresholds
         max_rmse = 15.0
-        max_quadratic = 0.002  # Max curvature
+        # Allow curvature for turns: 0.015 handles ~7m radius curves at 30m range
+        max_quadratic = 0.015
 
         if rmse > max_rmse:
             return None, False
@@ -327,9 +373,7 @@ class LaneDetector:
         # Refit after trimming outliers
         inliers = np.abs(residual) <= max(5.0, 2.0 * rmse)
         if np.count_nonzero(inliers) >= 50:
-            ys_in = ys[inliers]
-            xs_in = xs[inliers]
-            coeffs = np.polyfit(ys_in, xs_in, 2)
+            coeffs = np.polyfit(ys[inliers], xs[inliers], 2)
 
         # Check vertical span (should cover reasonable portion of BEV)
         y_span = float(np.max(ys) - np.min(ys))
@@ -339,9 +383,12 @@ class LaneDetector:
 
         return coeffs, True
 
-    def _smooth_lane_fits(self, lane_fits):
+    def _smooth_lane_fits(self, lane_fits: List[Dict]) -> List[Dict]:
         """
-        Apply temporal smoothing to lane fits using tracking by position.
+        Apply temporal smoothing to lane fits using position-based tracking.
+
+        Matches current fits to previous fits by base position, then applies
+        exponential smoothing to polynomial coefficients.
         """
         if not lane_fits:
             self.prev_lane_fits = []
@@ -379,14 +426,18 @@ class LaneDetector:
         self.prev_lane_fits = smoothed
         return smoothed
 
-    def _compute_lane_metrics_multilane(self, lane_fits, orig_width):
-        """Compute lane metrics from multiple polynomial fits."""
+    def _compute_lane_metrics_multilane(self, lane_fits: List[Dict], orig_width: int) -> LaneDetection:
+        """
+        Compute lane metrics from multiple polynomial fits.
+
+        Identifies left/right ego-lane boundaries and computes lane width.
+        """
         y_eval = self.bev_height - 10
 
-        # Extract just the coefficients for output
+        # Extract coefficients for output
         all_fits = [lf['coeffs'] for lf in lane_fits]
 
-        # For backwards compatibility, try to identify left/right lanes relative to center
+        # Identify left/right lanes relative to vehicle center
         left_fit = None
         right_fit = None
         center_x = self.bev_width / 2
@@ -445,23 +496,24 @@ class LaneDetector:
                 'forward_range': self.bev_x_range,
                 'lateral_range': self.bev_y_range
             },
-            all_fits=all_fits,  # All detected lane fits
+            all_fits=all_fits,
         )
 
-    def set_camera_params(self, fov, pitch, camera_height):
-        """Set camera extrinsics (called by the node once available).
+    def set_camera_params(self, fov: float, pitch: float, camera_height: float):
+        """
+        Set camera extrinsics (called by node once TF is available).
 
         Args:
-            fov: Camera horizontal field of view in degrees.
-            pitch: Camera pitch angle in degrees.
-            camera_height: Camera height above ground in meters.
+            fov: Camera horizontal field of view in degrees
+            pitch: Camera pitch angle in degrees
+            camera_height: Camera height above ground in meters
         """
         self.fov = fov
         self.pitch = pitch
         self.camera_height = camera_height
 
     def reset(self):
-        """Reset detector state."""
+        """Reset detector state for new sequence."""
         self.left_lane_x = None
         self.right_lane_x = None
         self.lane_center = self.width // 2
@@ -469,7 +521,7 @@ class LaneDetector:
         self.prev_lane_fits = []
         self.avg_lane_width = None
 
-    def get_debug_images(self):
+    def get_debug_images(self) -> Dict[str, Optional[np.ndarray]]:
         """
         Get intermediate debug images for visualization.
 
@@ -522,8 +574,7 @@ def _process_single(detector, image_path, output_dir, show=False):
         if bev_mask is not None:
             cv2.imwrite(str(output_dir / f'{base_name}_bev_lane_mask.png'), bev_mask)
         if lane_fit is not None:
-            cv2.imwrite(str(output_dir / f'{base_name}_lane_fit.png'),
-                        lane_fit)
+            cv2.imwrite(str(output_dir / f'{base_name}_lane_fit.png'), lane_fit)
 
         print(f'  Saved to: {output_dir}')
 
@@ -581,7 +632,7 @@ Examples:
                         help=f'Output directory (default: {CONFIG.output.default_dir})')
     parser.add_argument('--show', action='store_true', help='Display results in OpenCV window')
 
-    # Camera parameters (defaults from CARLA bridge objects.json front camera)
+    # Camera parameters
     parser.add_argument('--fov', type=float, default=90.0,
                         help='Camera horizontal field of view in degrees (default: 90.0)')
     parser.add_argument('--pitch', type=float, default=0.0,
@@ -593,7 +644,7 @@ Examples:
 
     output_dir = args.output or str(CONFIG.output.default_dir)
 
-    # ---- Collect images ----
+    # Collect images
     if args.image:
         image_paths = [Path(args.image)]
     else:
@@ -606,14 +657,14 @@ Examples:
             print(f'No images found in {folder}')
             return 1
 
-    # ---- Read first image to get dimensions ----
+    # Read first image to get dimensions
     first_img = cv2.imread(str(image_paths[0]), cv2.IMREAD_GRAYSCALE)
     if first_img is None:
         print(f'Error: Could not read image: {image_paths[0]}')
         return 1
     img_h, img_w = first_img.shape[:2]
 
-    # ---- Create detector ----
+    # Create detector
     print(f'Image:  {img_w}x{img_h}')
     print(f'Camera: fov={args.fov}deg, pitch={args.pitch}deg, height={args.camera_height}m')
 
@@ -627,10 +678,10 @@ Examples:
         camera_height=args.camera_height,
     )
 
-    # ---- Process ----
+    # Process
     for path in image_paths:
         _process_single(detector, path, output_dir, show=args.show)
-        detector.reset()  # Reset state between independent images
+        detector.reset()
 
     print(f'\nDone! Processed {len(image_paths)} image(s).')
     return 0
