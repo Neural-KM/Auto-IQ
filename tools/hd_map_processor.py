@@ -7,7 +7,9 @@ Processes recorded rosbags to generate HD maps.
 
 Pipeline Steps:
     A. Extract trajectory from odometry (IMPLEMENTED)
-    B. Extract semantic masks (road/lanes) from ground truth camera (IMPLEMENTED)
+    B. Extract semantic masks (road/lanes) from:
+       - Ground truth camera (default)
+       - SegFormer inference on RGB images (--segmentation-source segformer)
     C. Project 2D lane pixels to 3D using IPM (IMPLEMENTED)
     D. Transform to global frame using trajectory (IMPLEMENTED)
     E. Cluster and fit splines (IMPLEMENTED)
@@ -16,8 +18,14 @@ Pipeline Steps:
        - Exports lane centerlines as JSON
 
 Usage:
-    # Full processing (Steps A-E)
+    # Using ground truth (default)
     python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-05_52_15
+
+    # Using SegFormer inference
+    python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-05_52_15 --segmentation-source segformer
+
+    # SegFormer with specific model variant (b0-b5, b5=most accurate)
+    python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-05_52_15 --segmentation-source segformer --model b2
 
     # With visualizations
     python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-05_52_15 --visualize
@@ -323,6 +331,7 @@ class HDMapProcessor:
     ODOMETRY_TOPIC = '/carla/ego_vehicle/ground_truth/odometry'
     GNSS_TOPIC = '/carla/ego_vehicle/sensor/gnss/gnss/fix'
     SEMANTIC_TOPIC = '/carla/ego_vehicle/ground_truth/camera/semantic/front/image'  # mono8 encoding
+    RGB_TOPIC = '/carla/ego_vehicle/sensor/camera/rgb/front/image'  # For SegFormer inference
     LIDAR_TOPIC = '/carla/ego_vehicle/sensor/lidar/at128_front/point_cloud'
 
     CLASS_ROAD = 1
@@ -465,16 +474,20 @@ class HDMapProcessor:
 
         return self.gnss_data
 
-    def extract_semantic_data(self, sample_rate: int = 1) -> List[SemanticFrame]:
+    def extract_semantic_data(self, sample_rate: int = 1, source: str = 'ground_truth',
+                               model_name: str = 'b0', device: str = 'cuda') -> List[SemanticFrame]:
         """
-        Step B: Extract semantic masks from ground truth camera.
+        Step B: Extract semantic masks from camera data.
 
-        Reads semantic segmentation images and extracts:
-        - Road mask (class ID = 1)
-        - Lane marking pixel coordinates (class ID = 24)
+        Supports two sources:
+        - ground_truth: Use CARLA ground truth semantic camera (has lane markings)
+        - segformer: Use SegFormer inference on RGB camera + LaneExtractor for lane detection
 
         Args:
             sample_rate: Process every Nth frame (1 = all frames, 5 = every 5th frame)
+            source: 'ground_truth' or 'segformer'
+            model_name: SegFormer model variant (b0-b5) when source='segformer'
+            device: 'cuda' or 'cpu' for SegFormer inference
 
         Returns:
             List of SemanticFrame objects
@@ -483,20 +496,43 @@ class HDMapProcessor:
         from rclpy.serialization import deserialize_message
 
         print(f"\n{'='*60}")
-        print(" Step B: Extracting Semantic Data (Road & Lane Markings)")
+        if source == 'segformer':
+            print(" Step B: Extracting Semantic Data (SegFormer Inference)")
+        else:
+            print(" Step B: Extracting Semantic Data (Ground Truth)")
         print(f"{'='*60}")
+
+        # Initialize SegFormer and LaneExtractor if needed
+        segformer = None
+        lane_extractor = None
+        if source == 'segformer':
+            from perception.core.segformer import SegFormer
+            from perception.core.lane_extraction import LaneExtractor
+
+            print(f"  Model: SegFormer-{model_name}")
+            print(f"  Device: {device}")
+            print(f"\n  Loading SegFormer-{model_name}...")
+            segformer = SegFormer(model_name=model_name, device=device)
+            lane_extractor = LaneExtractor(road_grayscale_id=0)
 
         reader = self._create_bag_reader()
         topic_types = {t.name: t.type for t in reader.get_all_topics_and_types()}
 
-        if self.SEMANTIC_TOPIC not in topic_types:
-            print(f"  WARNING: Semantic topic not found: {self.SEMANTIC_TOPIC}")
-            print("  Make sure to record with semantic camera enabled.")
+        # Select topic based on source
+        if source == 'segformer':
+            topic = self.RGB_TOPIC
+            topic_desc = "RGB"
+        else:
+            topic = self.SEMANTIC_TOPIC
+            topic_desc = "Semantic"
+
+        if topic not in topic_types:
+            print(f"  WARNING: {topic_desc} topic not found: {topic}")
+            print(f"  Make sure to record with {topic_desc.lower()} camera enabled.")
             return []
 
-        img_type = self._get_message_type(topic_types[self.SEMANTIC_TOPIC])
-
-        storage_filter = rosbag2_py.StorageFilter(topics=[self.SEMANTIC_TOPIC])
+        img_type = self._get_message_type(topic_types[topic])
+        storage_filter = rosbag2_py.StorageFilter(topics=[topic])
         reader.set_filter(storage_filter)
 
         frame_count = 0
@@ -505,9 +541,9 @@ class HDMapProcessor:
         total_road_coverage = 0.0
 
         while reader.has_next():
-            topic, data, timestamp_ns = reader.read_next()
+            topic_name, data, timestamp_ns = reader.read_next()
 
-            if topic == self.SEMANTIC_TOPIC:
+            if topic_name == topic:
                 frame_count += 1
 
                 # Sample rate - skip frames if needed
@@ -515,37 +551,58 @@ class HDMapProcessor:
                     continue
 
                 msg = deserialize_message(data, img_type)
-
-                # Convert ROS Image to numpy array
-                # Bridge sends mono8 (single channel, each pixel = class ID)
                 height = msg.height
                 width = msg.width
 
-                # Handle different encodings
-                if msg.encoding == 'mono8':
-                    # Expected format from bridge - single channel class IDs
-                    class_ids = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width)
-                elif msg.encoding == 'bgra8':
-                    # Raw CARLA format - class ID is in R channel (index 2)
-                    img_data = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width, 4)
-                    class_ids = img_data[:, :, 2]
-                elif msg.encoding == 'rgb8':
-                    img_data = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width, 3)
-                    class_ids = img_data[:, :, 0]
-                else:
-                    # Try to parse as single channel
-                    try:
-                        class_ids = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width)
-                    except ValueError:
+                if source == 'segformer':
+                    # Convert ROS Image to numpy RGB array
+                    if msg.encoding == 'rgb8':
+                        rgb_image = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width, 3)
+                    elif msg.encoding == 'bgr8':
+                        bgr_image = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width, 3)
+                        rgb_image = bgr_image[:, :, ::-1]
+                    elif msg.encoding == 'bgra8':
+                        bgra_image = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width, 4)
+                        rgb_image = bgra_image[:, :, [2, 1, 0]]
+                    else:
                         print(f"  Warning: Unknown encoding {msg.encoding}, skipping frame")
                         continue
 
-                # Extract road mask (class ID = 1)
-                road_mask = (class_ids == self.CLASS_ROAD).astype(np.uint8)
+                    # Run SegFormer inference (Cityscapes classes)
+                    segmentation = segformer.predict(rgb_image)
 
-                # Extract lane marking pixels (class ID = 24)
-                lane_mask = (class_ids == self.CLASS_LANE_MARKING)
-                lane_pixel_coords = np.argwhere(lane_mask)  # Nx2 array of (row, col)
+                    # Convert Cityscapes to CARLA classes (+1)
+                    class_ids = (segmentation + 1).astype(np.uint8)
+
+                    # Extract road mask
+                    road_mask = (class_ids == self.CLASS_ROAD).astype(np.uint8)
+
+                    # Detect lane markings using LaneExtractor
+                    road_mask_255 = road_mask * 255
+                    lane_mask = lane_extractor.extract_lanes(rgb_image, road_mask_255)
+                    lane_pixel_coords = np.argwhere(lane_mask > 0)
+
+                else:
+                    # Ground truth: parse semantic image
+                    if msg.encoding == 'mono8':
+                        class_ids = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width)
+                    elif msg.encoding == 'bgra8':
+                        img_data = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width, 4)
+                        class_ids = img_data[:, :, 2]
+                    elif msg.encoding == 'rgb8':
+                        img_data = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width, 3)
+                        class_ids = img_data[:, :, 0]
+                    else:
+                        try:
+                            class_ids = np.frombuffer(msg.data, dtype=np.uint8).reshape(height, width)
+                        except ValueError:
+                            print(f"  Warning: Unknown encoding {msg.encoding}, skipping frame")
+                            continue
+
+                    # Extract road mask and lane markings from ground truth
+                    road_mask = (class_ids == self.CLASS_ROAD).astype(np.uint8)
+                    lane_mask = (class_ids == self.CLASS_LANE_MARKING)
+                    lane_pixel_coords = np.argwhere(lane_mask)
 
                 # Create semantic frame
                 semantic_frame = SemanticFrame(
@@ -559,8 +616,9 @@ class HDMapProcessor:
                 total_lane_pixels += semantic_frame.num_lane_pixels
                 total_road_coverage += semantic_frame.road_coverage
 
-                # Progress update every 100 frames
-                if processed_count % 100 == 0:
+                # Progress update
+                progress_interval = 50 if source == 'segformer' else 100
+                if processed_count % progress_interval == 0:
                     print(f"  Processed {processed_count} frames...")
 
         # Summary
@@ -573,7 +631,6 @@ class HDMapProcessor:
             print(f"  Avg lane pixels per frame: {avg_lane_pixels:.0f}")
             print(f"  Avg road coverage: {avg_road_coverage:.1f}%")
 
-            # Show first and last frame stats
             first_frame = self.semantic_frames[0]
             last_frame = self.semantic_frames[-1]
             print(f"\n  First frame: {first_frame.num_lane_pixels} lane pixels, {first_frame.road_coverage:.1f}% road")
@@ -1502,8 +1559,19 @@ class HDMapProcessor:
 # Main Entry Point
 # =============================================================================
 
-def process_bag(bag_path: str, output_dir: Optional[str] = None, visualize: bool = False, sample_rate: int = 1):
-    """Process a rosbag to generate HD map."""
+def process_bag(bag_path: str, output_dir: Optional[str] = None, visualize: bool = False, sample_rate: int = 1,
+                 segmentation_source: str = 'ground_truth', model_name: str = 'b0', device: str = 'cuda'):
+    """Process a rosbag to generate HD map.
+
+    Args:
+        bag_path: Path to rosbag directory
+        output_dir: Output directory for HD map data
+        visualize: Generate visualizations
+        sample_rate: Process every Nth semantic frame
+        segmentation_source: 'ground_truth' or 'segformer'
+        model_name: SegFormer model variant (b0-b5) when using segformer
+        device: 'cuda' or 'cpu' for SegFormer inference
+    """
     bag_path = Path(bag_path)
 
     if output_dir:
@@ -1517,6 +1585,7 @@ def process_bag(bag_path: str, output_dir: Optional[str] = None, visualize: bool
     print(f"{'='*60}")
     print(f"  Bag: {bag_path}")
     print(f"  Output: {out_dir}")
+    print(f"  Segmentation source: {segmentation_source}")
 
     processor = HDMapProcessor(str(bag_path))
 
@@ -1534,7 +1603,8 @@ def process_bag(bag_path: str, output_dir: Optional[str] = None, visualize: bool
         processor.visualize_trajectory(str(plot_path))
 
     # Step B: Extract semantic data
-    processor.extract_semantic_data(sample_rate=sample_rate)
+    processor.extract_semantic_data(sample_rate=sample_rate, source=segmentation_source,
+                                     model_name=model_name, device=device)
 
     # Visualize semantic data if requested
     if visualize and processor.semantic_frames:
@@ -1602,9 +1672,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Using ground truth (default)
   python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-04_29_03
   python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-04_29_03 --visualize
-  python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-04_29_03 --sample-rate 5
+
+  # Using SegFormer inference
+  python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-04_29_03 --segmentation-source segformer
+  python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-04_29_03 --segmentation-source segformer --model b2
+  python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-04_29_03 --segmentation-source segformer --device cpu
         """
     )
 
@@ -1613,11 +1688,21 @@ Examples:
     parser.add_argument('--visualize', action='store_true', help='Generate visualizations')
     parser.add_argument('--sample-rate', type=int, default=1,
                         help='Process every Nth semantic frame (default: 1 = all frames)')
+    parser.add_argument('--segmentation-source', type=str, default='ground_truth',
+                        choices=['ground_truth', 'segformer'],
+                        help='Semantic segmentation source: ground_truth or segformer (default: ground_truth)')
+    parser.add_argument('--model', type=str, default='b0',
+                        choices=['b0', 'b1', 'b2', 'b3', 'b4', 'b5'],
+                        help='SegFormer model variant when using segformer (default: b0, b5=most accurate)')
+    parser.add_argument('--device', type=str, default='cuda',
+                        choices=['cuda', 'cpu'],
+                        help='Device for SegFormer inference (default: cuda)')
 
     args = parser.parse_args()
 
     try:
-        process_bag(args.bag, args.output, args.visualize, args.sample_rate)
+        process_bag(args.bag, args.output, args.visualize, args.sample_rate,
+                    args.segmentation_source, args.model, args.device)
         return 0
     except Exception as e:
         print(f"\nError: {e}")
