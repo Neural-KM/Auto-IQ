@@ -763,108 +763,65 @@ class HDMapProcessor:
 
         return self.global_lane_map
 
-    def cluster_and_fit_splines(self, eps: float = 1.0, min_samples: int = 10,
-                                  min_lane_points: int = 50,
-                                  spline_resolution: float = 0.5) -> HDMapLanes:
+    def cluster_and_get_centroids(self, blob_eps: float = 0.5, blob_min_samples: int = 2) -> np.ndarray:
         """
-        Step E: Cluster global lane points and fit splines to each lane marking.
+        Step E: Cluster individual blobs and return their centroids.
 
         Pipeline:
-            1. Downsample points using voxel grid (for efficiency)
-            2. Cluster using DBSCAN (handles arbitrary lane shapes)
-            3. Order points along each cluster's principal direction
-            4. Fit B-spline to ordered points
-            5. Resample spline at fixed resolution
+            1. Voxel downsample to reduce memory usage
+            2. Cluster individual blobs using DBSCAN
+            3. Compute centroid of each blob cluster
 
         Args:
-            eps: DBSCAN max distance between points in same cluster (meters)
-            min_samples: DBSCAN min points to form a cluster
-            min_lane_points: Minimum points for a cluster to be considered a lane
-            spline_resolution: Distance between sampled spline points (meters)
+            blob_eps: DBSCAN max distance to cluster individual blobs (meters)
+            blob_min_samples: Minimum points to form a blob cluster
 
         Returns:
-            HDMapLanes containing fitted lane splines
+            numpy array of centroids (N, 3)
         """
         print(f"\n{'='*60}")
-        print(" Step E: Clustering and Fitting Splines")
+        print(" Step E: Clustering Blobs and Computing Centroids")
         print(f"{'='*60}")
 
         if self.global_lane_map.num_points == 0:
             print("  No global points. Run register_to_global_frame first.")
-            return self.hd_map_lanes
+            return np.array([])
 
         from sklearn.cluster import DBSCAN
-        from scipy.interpolate import splprep, splev
 
         points = self.global_lane_map.points
         print(f"  Input points: {len(points):,}")
 
-        # Step 1: Voxel-based downsampling for efficiency
-        voxel_size = eps / 2
-        print(f"  Downsampling with voxel size: {voxel_size:.2f}m")
+        # Step 1: Voxel downsample to reduce memory usage (use smaller voxel for better coverage)
+        voxel_size = 0.1  # Fixed small voxel to preserve sparse regions
+        print(f"  Downsampling with voxel size: {voxel_size:.3f}m")
         downsampled = self._voxel_downsample(points, voxel_size)
         print(f"  After downsampling: {len(downsampled):,} points")
 
-        # Step 2: DBSCAN clustering
-        print(f"  Clustering with DBSCAN (eps={eps}m, min_samples={min_samples})")
-        clustering = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1)
+        # Step 2: Cluster individual blobs
+        print(f"  Clustering blobs with DBSCAN (eps={blob_eps}m, min_samples={blob_min_samples})")
+        clustering = DBSCAN(eps=blob_eps, min_samples=blob_min_samples, n_jobs=-1)
         labels = clustering.fit_predict(downsampled[:, :2])  # Cluster on XY only
 
         unique_labels = set(labels)
         n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
         n_noise = np.sum(labels == -1)
-        print(f"  Found {n_clusters} clusters, {n_noise:,} noise points")
+        print(f"  Found {n_clusters} blob clusters, {n_noise:,} noise points")
 
-        # Step 3 & 4: Process each cluster
-        lane_id = 0
-        valid_lanes = 0
-        total_length = 0.0
-
+        # Step 3: Compute centroid of each blob
+        centroids = []
         for label in unique_labels:
             if label == -1:  # Skip noise
                 continue
-
             cluster_mask = labels == label
             cluster_points = downsampled[cluster_mask]
+            centroid = np.mean(cluster_points, axis=0)
+            centroids.append(centroid)
 
-            if len(cluster_points) < min_lane_points:
-                continue  # Too few points
+        centroids = np.array(centroids) if centroids else np.array([]).reshape(0, 3)
+        print(f"  Computed {len(centroids)} blob centroids")
 
-            # Order points along principal direction
-            ordered_pts = self._order_points_along_curve(cluster_points)
-
-            if ordered_pts is None or len(ordered_pts) < 4:
-                continue
-
-            # Fit spline and resample
-            spline_pts, length = self._fit_and_resample_spline(
-                ordered_pts, spline_resolution
-            )
-
-            if spline_pts is None or length < 1.0:  # Skip very short lanes
-                continue
-
-            lane = LaneSpline(
-                lane_id=lane_id,
-                points=cluster_points,
-                spline_points=spline_pts,
-                length=length,
-                num_raw_points=len(cluster_points)
-            )
-            self.hd_map_lanes.add_lane(lane)
-            lane_id += 1
-            valid_lanes += 1
-            total_length += length
-
-        # Summary
-        print(f"\n  Valid lanes extracted: {valid_lanes}")
-        print(f"  Total lane length: {total_length:.1f}m")
-        if self.hd_map_lanes.lanes:
-            lengths = [l.length for l in self.hd_map_lanes.lanes]
-            print(f"  Lane lengths: min={min(lengths):.1f}m, max={max(lengths):.1f}m, "
-                  f"avg={np.mean(lengths):.1f}m")
-
-        return self.hd_map_lanes
+        return centroids
 
     def _voxel_downsample(self, points: np.ndarray, voxel_size: float) -> np.ndarray:
         """Downsample points using voxel grid (keep one point per voxel)."""
@@ -1010,6 +967,60 @@ class HDMapProcessor:
                 resampled.append(pt)
 
         return np.array(resampled, dtype=np.float32), total_length
+
+    def visualize_centroids(self, centroids: np.ndarray, output_path: Optional[str] = None,
+                            show_trajectory: bool = True, show_raw_points: bool = True):
+        """
+        Visualize blob centroids (Step E result).
+
+        Args:
+            centroids: Array of centroid points (N, 3)
+            output_path: Save plot to file if provided
+            show_trajectory: Overlay vehicle trajectory
+            show_raw_points: Show raw points behind centroids
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("matplotlib not available, skipping visualization")
+            return
+
+        if len(centroids) == 0:
+            print("No centroids to visualize.")
+            return
+
+        fig, ax = plt.subplots(figsize=(14, 10))
+        fig.suptitle(f'Lane Blob Centroids - {self.bag_path.name}', fontsize=14)
+
+        # Show raw points as background
+        if show_raw_points and self.global_lane_map.num_points > 0:
+            pts = self.global_lane_map.points
+            ax.scatter(pts[:, 0], pts[:, 1], c='lightgray', s=0.5, alpha=0.3, label='Raw points')
+
+        # Plot centroids
+        ax.scatter(centroids[:, 0], centroids[:, 1], c='blue', s=20, alpha=0.8, label=f'Centroids ({len(centroids)})')
+
+        # Show trajectory
+        if show_trajectory and self.trajectory.poses:
+            traj = self.trajectory.to_numpy()
+            ax.plot(traj['x'], traj['y'], 'r-', linewidth=1, alpha=0.5, label='Vehicle path')
+            ax.plot(traj['x'][0], traj['y'][0], 'go', markersize=8, label='Start')
+            ax.plot(traj['x'][-1], traj['y'][-1], 'ro', markersize=8, label='End')
+
+        ax.set_xlabel('X (m)')
+        ax.set_ylabel('Y (m)')
+        ax.set_title(f'Blob Centroids: {len(centroids)} points')
+        ax.set_aspect('equal')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+
+        if output_path:
+            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+            print(f"  Saved centroid map to: {output_path}")
+
+        plt.close()
 
     def visualize_lane_splines(self, output_path: Optional[str] = None,
                                  show_trajectory: bool = True,
@@ -1555,18 +1566,15 @@ def process_bag(bag_path: str, output_dir: Optional[str] = None, visualize: bool
             global_map_path = out_dir / "global_lane_map.png"
             processor.visualize_global_map(str(global_map_path))
 
-    # Step E: Cluster and fit splines
+    # Step E: Cluster and get centroids
+    centroids = None
     if processor.global_lane_map.num_points > 0:
-        processor.cluster_and_fit_splines()
+        centroids = processor.cluster_and_get_centroids()
 
-        # Save HD map
-        hd_map_path = out_dir / "hd_map_lanes.json"
-        processor.save_hd_map(str(hd_map_path))
-
-        # Visualize lane splines if requested
-        if visualize and len(processor.hd_map_lanes) > 0:
-            splines_path = out_dir / "lane_splines.png"
-            processor.visualize_lane_splines(str(splines_path), show_raw_points=True)
+        # Visualize centroids if requested
+        if visualize and len(centroids) > 0:
+            centroids_path = out_dir / "lane_centroids.png"
+            processor.visualize_centroids(centroids, str(centroids_path))
 
     print(f"\n{'='*60}")
     print(" HD Map Processing Complete (Steps A-E)")
@@ -1581,9 +1589,8 @@ def process_bag(bag_path: str, output_dir: Optional[str] = None, visualize: bool
         bounds = processor.global_lane_map.get_bounds()
         print(f"  Map extent: X=[{bounds['x_min']:.1f}, {bounds['x_max']:.1f}]m, "
               f"Y=[{bounds['y_min']:.1f}, {bounds['y_max']:.1f}]m")
-    if len(processor.hd_map_lanes) > 0:
-        print(f"  Extracted lanes: {len(processor.hd_map_lanes)}")
-        print(f"  Total lane length: {processor.hd_map_lanes.total_length():.1f}m")
+    if centroids is not None and len(centroids) > 0:
+        print(f"  Blob centroids: {len(centroids)}")
     print()
 
     return processor
