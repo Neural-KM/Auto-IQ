@@ -379,34 +379,39 @@ class HDMapProcessor:
         reader.open(storage_options, converter_options)
         return reader
 
-    def extract_trajectory(self) -> Trajectory:
+    def extract_trajectory(self, source: str = 'ground_truth') -> Trajectory:
         """
         Step A: Extract odometry/trajectory from the rosbag.
 
-        Reads ground truth odometry and builds a time-indexed trajectory.
+        Reads odometry (Ground Truth or Fast-LIO2) and builds a time-indexed trajectory.
         """
         import rosbag2_py
         from rclpy.serialization import deserialize_message
 
         print(f"\n{'='*60}")
-        print(" Step A: Extracting Trajectory from Odometry")
+        if source == 'fast_lio2':
+            print(" Step A: Extracting Trajectory from Odometry (Fast-LIO2)")
+            odom_topic = '/Odometry'
+        else:
+            print(" Step A: Extracting Trajectory from Odometry (Ground Truth)")
+            odom_topic = self.ODOMETRY_TOPIC
         print(f"{'='*60}")
 
         reader = self._create_bag_reader()
         topic_types = {t.name: t.type for t in reader.get_all_topics_and_types()}
 
-        if self.ODOMETRY_TOPIC not in topic_types:
-            raise ValueError(f"Odometry topic not found: {self.ODOMETRY_TOPIC}")
+        if odom_topic not in topic_types:
+            raise ValueError(f"Odometry topic not found: {odom_topic}")
 
-        odom_type = self._get_message_type(topic_types[self.ODOMETRY_TOPIC])
+        odom_type = self._get_message_type(topic_types[odom_topic])
 
-        storage_filter = rosbag2_py.StorageFilter(topics=[self.ODOMETRY_TOPIC])
+        storage_filter = rosbag2_py.StorageFilter(topics=[odom_topic])
         reader.set_filter(storage_filter)
 
         pose_count = 0
         while reader.has_next():
             topic, data, timestamp_ns = reader.read_next()
-            if topic == self.ODOMETRY_TOPIC:
+            if topic == odom_topic:
                 msg = deserialize_message(data, odom_type)
                 x = msg.pose.pose.position.x
                 y = msg.pose.pose.position.y
@@ -1560,7 +1565,8 @@ class HDMapProcessor:
 # =============================================================================
 
 def process_bag(bag_path: str, output_dir: Optional[str] = None, visualize: bool = False, sample_rate: int = 1,
-                 segmentation_source: str = 'ground_truth', model_name: str = 'b0', device: str = 'cuda'):
+                 segmentation_source: str = 'ground_truth', model_name: str = 'b0', device: str = 'cuda',
+                 odometry_source: str = 'ground_truth'):
     """Process a rosbag to generate HD map.
 
     Args:
@@ -1571,6 +1577,7 @@ def process_bag(bag_path: str, output_dir: Optional[str] = None, visualize: bool
         segmentation_source: 'ground_truth' or 'segformer'
         model_name: SegFormer model variant (b0-b5) when using segformer
         device: 'cuda' or 'cpu' for SegFormer inference
+        odometry_source: 'ground_truth' or 'fast_lio2' for trajectory
     """
     bag_path = Path(bag_path)
 
@@ -1586,11 +1593,12 @@ def process_bag(bag_path: str, output_dir: Optional[str] = None, visualize: bool
     print(f"  Bag: {bag_path}")
     print(f"  Output: {out_dir}")
     print(f"  Segmentation source: {segmentation_source}")
+    print(f"  Odometry source: {odometry_source}")
 
     processor = HDMapProcessor(str(bag_path))
 
     # Step A: Extract trajectory
-    processor.extract_trajectory()
+    processor.extract_trajectory(source=odometry_source)
     processor.extract_gnss()
 
     # Save trajectory
@@ -1676,6 +1684,9 @@ Examples:
   python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-04_29_03
   python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-04_29_03 --visualize
 
+  # Using Fast-LIO2 for odometry
+  python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-04_29_03 --odometry-source fast_lio2
+
   # Using SegFormer inference
   python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-04_29_03 --segmentation-source segformer
   python tools/hd_map_processor.py --bag Rosbags/hdmap_2026_03_21-04_29_03 --segmentation-source segformer --model b2
@@ -1691,6 +1702,9 @@ Examples:
     parser.add_argument('--segmentation-source', type=str, default='ground_truth',
                         choices=['ground_truth', 'segformer'],
                         help='Semantic segmentation source: ground_truth or segformer (default: ground_truth)')
+    parser.add_argument('--odometry-source', type=str, default='ground_truth',
+                        choices=['ground_truth', 'fast_lio2'],
+                        help='Odometry source: ground_truth or fast_lio2 (default: ground_truth)')
     parser.add_argument('--model', type=str, default='b0',
                         choices=['b0', 'b1', 'b2', 'b3', 'b4', 'b5'],
                         help='SegFormer model variant when using segformer (default: b0, b5=most accurate)')
@@ -1702,7 +1716,8 @@ Examples:
 
     try:
         process_bag(args.bag, args.output, args.visualize, args.sample_rate,
-                    args.segmentation_source, args.model, args.device)
+                    args.segmentation_source, args.model, args.device,
+                    args.odometry_source)
         return 0
     except Exception as e:
         print(f"\nError: {e}")
