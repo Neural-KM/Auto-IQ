@@ -19,7 +19,7 @@ Boundary-Based Lane Estimation Pipeline:
 1. BoundaryExtractor creates BEV from semantic image (road + road_line)
 2. Sliding window extracts left/right road boundaries
 3. LocalLaneEstimator divides road into lanes using a priori knowledge
-4. Results published as LocalLaneData msg and boundary Paths
+4. Results published as EstimatedLanes msg and boundary markers
 
 Debug Visualization:
 --------------------
@@ -48,9 +48,8 @@ Publishes:
 - /mapping/lane_detection (LaneDetection) - polynomial fits + metrics
 - /mapping/lanes (MarkerArray) - RViz lane line visualization
 - /mapping/debug/lane_bev (Image, bgr8) - BEV debug visualization (if enabled)
-- /mapping/local_lane_data (LocalLaneData) - estimated lanes from boundaries
-- /mapping/boundary/left (Path) - left road boundary
-- /mapping/boundary/right (Path) - right road boundary
+- /mapping/estimated_lanes (EstimatedLanes) - estimated lanes from boundaries
+- /mapping/boundary_markers (MarkerArray) - drivable boundary visualization
 - /mapping/boundary_debug_image (Image) - boundary extraction debug
 
 Changelog:
@@ -84,7 +83,7 @@ from geometry_msgs.msg import Point
 from builtin_interfaces.msg import Time
 
 from autoiq_msgs.msg import LaneDetection as LaneDetectionMsg
-from autoiq_msgs.msg import LocalLaneData, Lane
+from autoiq_msgs.msg import EstimatedLanes, EstimatedLane
 
 from mapping.core.lane_fitting import LaneDetector
 from mapping.core.local_lane_estimator import LocalLaneEstimator
@@ -204,12 +203,10 @@ class LaneFittingNode(Node):
                 Image, '/mapping/debug/lane_bev', 10)
 
         # Lane estimation publishers (boundary-based estimation)
-        self.local_lane_data_pub = self.create_publisher(
-            LocalLaneData, '/mapping/local_lane_data', 10)
+        self.estimated_lanes_pub = self.create_publisher(
+            EstimatedLanes, '/mapping/estimated_lanes', 10)
         self.boundary_markers_pub = self.create_publisher(
             MarkerArray, '/mapping/boundary_markers', 10)
-        self.lane_estimate_markers_pub = self.create_publisher(
-            MarkerArray, '/mapping/lane_estimate_markers', 10)
         self.boundary_debug_pub = self.create_publisher(
             Image, '/mapping/boundary_debug_image', 10)
 
@@ -589,15 +586,12 @@ class LaneFittingNode(Node):
             right_boundary=boundary_result.right_boundary,
         )
 
-        # 5. Publish lane estimate markers (inner boundaries in BLUE, intermediate in BLACK)
-        self._publish_lane_estimate_markers(lane_result, stamp)
+        # 5. Publish estimated lanes message
+        self._publish_estimated_lanes(lane_result, stamp)
 
-        # 6. Publish local lane data message
-        self._publish_local_lane_data(lane_result, stamp)
-
-    def _publish_local_lane_data(self, result, stamp):
-        """Publish LocalLaneData message with structured lane data."""
-        msg = LocalLaneData()
+    def _publish_estimated_lanes(self, result, stamp):
+        """Publish EstimatedLanes message with structured lane data."""
+        msg = EstimatedLanes()
         msg.header.stamp = stamp
         msg.header.frame_id = self.base_frame
         msg.valid = result.valid
@@ -613,7 +607,7 @@ class LaneFittingNode(Node):
 
         # Convert lane results
         for lane_result in result.lanes:
-            lane_msg = Lane()
+            lane_msg = EstimatedLane()
             lane_msg.lane_index = lane_result.lane_index
             lane_msg.width_avg = lane_result.width_avg
             lane_msg.is_valid = lane_result.is_valid
@@ -628,9 +622,9 @@ class LaneFittingNode(Node):
             msg.lanes.append(lane_msg)
 
         self.get_logger().info(
-            f'Publishing LocalLaneData with {len(msg.lanes)} lanes',
+            f'Publishing EstimatedLanes with {len(msg.lanes)} lanes',
             throttle_duration_sec=5.0)
-        self.local_lane_data_pub.publish(msg)
+        self.estimated_lanes_pub.publish(msg)
 
     def _publish_boundary_markers(
         self,
@@ -687,97 +681,6 @@ class LaneFittingNode(Node):
             marker_array.markers.append(right_marker)
 
         self.boundary_markers_pub.publish(marker_array)
-
-    def _publish_lane_estimate_markers(self, result, stamp):
-        """Publish lane estimate markers.
-
-        Colors:
-        - BLUE: Inner lane boundaries (rightmost lane's right edge, leftmost lane's left edge)
-        - BLACK: Intermediate lane boundaries (between lanes)
-        """
-        marker_array = MarkerArray()
-
-        # Clear previous markers
-        clear_marker = Marker()
-        clear_marker.header.stamp = stamp
-        clear_marker.header.frame_id = self.base_frame
-        clear_marker.ns = 'lane_estimates'
-        clear_marker.id = 0
-        clear_marker.action = Marker.DELETEALL
-        marker_array.markers.append(clear_marker)
-
-        if not result.valid or len(result.lanes) == 0:
-            self.lane_estimate_markers_pub.publish(marker_array)
-            return
-
-        marker_id = 1
-
-        # Inner right boundary (rightmost lane's right edge) - BLUE
-        rightmost_lane = result.lanes[0]
-        if rightmost_lane.right_boundary is not None and len(rightmost_lane.right_boundary) > 1:
-            marker = Marker()
-            marker.header.stamp = stamp
-            marker.header.frame_id = self.base_frame
-            marker.ns = 'lane_estimates'
-            marker.id = marker_id
-            marker_id += 1
-            marker.type = Marker.LINE_STRIP
-            marker.action = Marker.ADD
-            marker.scale.x = 0.12
-            marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=1.0)  # BLUE
-            marker.pose.orientation.w = 1.0
-
-            for x, y in rightmost_lane.right_boundary:
-                marker.points.append(Point(x=float(x), y=float(y), z=0.15))
-
-            marker_array.markers.append(marker)
-
-        # Inner left boundary (leftmost lane's left edge) - BLUE
-        leftmost_lane = result.lanes[-1]
-        if leftmost_lane.left_boundary is not None and len(leftmost_lane.left_boundary) > 1:
-            marker = Marker()
-            marker.header.stamp = stamp
-            marker.header.frame_id = self.base_frame
-            marker.ns = 'lane_estimates'
-            marker.id = marker_id
-            marker_id += 1
-            marker.type = Marker.LINE_STRIP
-            marker.action = Marker.ADD
-            marker.scale.x = 0.12
-            marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=1.0)  # BLUE
-            marker.pose.orientation.w = 1.0
-
-            for x, y in leftmost_lane.left_boundary:
-                marker.points.append(Point(x=float(x), y=float(y), z=0.15))
-
-            marker_array.markers.append(marker)
-
-        # Intermediate lane boundaries - BLACK
-        # These are the boundaries between lanes (shared between adjacent lanes)
-        for i, lane in enumerate(result.lanes):
-            # Skip the rightmost lane's right boundary (already added as BLUE)
-            # Skip the leftmost lane's left boundary (already added as BLUE)
-            # Add left boundary of each lane (except leftmost which is blue)
-            if i < len(result.lanes) - 1:  # Not the leftmost lane
-                if lane.left_boundary is not None and len(lane.left_boundary) > 1:
-                    marker = Marker()
-                    marker.header.stamp = stamp
-                    marker.header.frame_id = self.base_frame
-                    marker.ns = 'lane_estimates'
-                    marker.id = marker_id
-                    marker_id += 1
-                    marker.type = Marker.LINE_STRIP
-                    marker.action = Marker.ADD
-                    marker.scale.x = 0.08
-                    marker.color = ColorRGBA(r=0.0, g=0.0, b=0.0, a=1.0)  # BLACK
-                    marker.pose.orientation.w = 1.0
-
-                    for x, y in lane.left_boundary:
-                        marker.points.append(Point(x=float(x), y=float(y), z=0.12))
-
-                    marker_array.markers.append(marker)
-
-        self.lane_estimate_markers_pub.publish(marker_array)
 
 
 def main(args=None):

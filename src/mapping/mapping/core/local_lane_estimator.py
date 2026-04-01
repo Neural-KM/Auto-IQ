@@ -16,7 +16,7 @@ Right-hand drive lane numbering (lane_index):
   0 = rightmost (closest to wall/kerb)
   1, 2, ... = toward centre
 
-NOTE: The "local_lane_data" lanes are NOT detected - they are estimated/guessed
+NOTE: The "estimated_lanes" are NOT detected - they are estimated/guessed
 by dividing the detected road width using configured lane_count and road_width
 parameters. This uses a priori knowledge about expected road structure.
 
@@ -62,7 +62,7 @@ class LaneResult:
 
 
 @dataclass
-class LocalLaneDataResult:
+class EstimatedLanesResult:
     """Complete local lane data with all lanes."""
     valid: bool
     status_code: int
@@ -150,7 +150,7 @@ class LocalLaneEstimator:
         self,
         left_boundary: Optional[np.ndarray],
         right_boundary: Optional[np.ndarray],
-    ) -> LocalLaneDataResult:
+    ) -> EstimatedLanesResult:
         """
         Estimate lane structure from road boundaries.
 
@@ -159,7 +159,7 @@ class LocalLaneEstimator:
             right_boundary: (N, 2) array of right boundary points (x, y) in base_link
 
         Returns:
-            LocalLaneDataResult with lane structure and status
+            EstimatedLanesResult with lane structure and status
         """
         # Convert to numpy arrays
         if left_boundary is not None:
@@ -173,7 +173,7 @@ class LocalLaneEstimator:
 
         # No boundaries at all
         if left_boundary is None and right_boundary is None:
-            return LocalLaneDataResult(
+            return EstimatedLanesResult(
                 valid=False,
                 status_code=STATUS_NO_BOUNDARIES,
                 left_boundary=np.empty((0, 2)),
@@ -194,7 +194,7 @@ class LocalLaneEstimator:
             result = self._lanes_from_single_boundary(left_boundary, is_right=False)
 
         if result is None:
-            return LocalLaneDataResult(
+            return EstimatedLanesResult(
                 valid=False,
                 status_code=STATUS_INSUFFICIENT_POINTS,
                 left_boundary=left_boundary if left_boundary is not None else np.empty((0, 2)),
@@ -211,7 +211,7 @@ class LocalLaneEstimator:
         self,
         left_pts: np.ndarray,
         right_pts: np.ndarray,
-    ) -> Optional[LocalLaneDataResult]:
+    ) -> Optional[EstimatedLanesResult]:
         """
         Compute lane structure when both boundaries are available.
 
@@ -285,7 +285,7 @@ class LocalLaneEstimator:
             )
             lanes.append(lane_result)
 
-        return LocalLaneDataResult(
+        return EstimatedLanesResult(
             valid=True,
             status_code=STATUS_OK,
             left_boundary=np.column_stack([x_grid, left_y]),
@@ -299,7 +299,7 @@ class LocalLaneEstimator:
         self,
         pts: np.ndarray,
         is_right: bool,
-    ) -> Optional[LocalLaneDataResult]:
+    ) -> Optional[EstimatedLanesResult]:
         """
         Compute lane structure from a single boundary using nominal lane width.
 
@@ -368,7 +368,7 @@ class LocalLaneEstimator:
             )
             lanes.append(lane_result)
 
-        return LocalLaneDataResult(
+        return EstimatedLanesResult(
             valid=True,
             status_code=STATUS_OK,
             left_boundary=left_boundary,

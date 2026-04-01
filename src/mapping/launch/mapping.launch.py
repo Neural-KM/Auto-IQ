@@ -11,7 +11,7 @@ Launches the mapping nodes:
    - Multi-lane polynomial fitting from road_line pixels
    - Boundary-based local lane estimation from occupancy grid
    - RViz lane markers for visualization
-   - LocalLaneData with estimated lane structure
+   - EstimatedLanes with estimated lane structure
 """
 
 from launch import LaunchDescription
@@ -71,8 +71,8 @@ def generate_launch_description():
         #   /mapping/lane_detection (LaneDetection with polynomial fits)
         #   /mapping/lanes (MarkerArray for RViz)
         #   /mapping/debug/lane_bev (Image, debug visualization)
-        #   /mapping/local_lane_data (LocalLaneData with lane structure)
-        #   /mapping/boundary/left, /mapping/boundary/right (Path)
+        #   /mapping/estimated_lanes (EstimatedLanes with lane structure)
+        #   /mapping/boundary_markers (MarkerArray for drivable boundary viz)
         #   /mapping/boundary_debug_image (Image)
         Node(
             package='mapping',

@@ -129,14 +129,15 @@ class CarlaVizNode(Node):
         self.cv_bridge = CvBridge()
         
         # ==================== Publishers for RViz ====================
+        # Pattern: <source_topic>/visualization
         self.gt_obstacles_marker_pub = self.create_publisher(
-            MarkerArray, '/visualization/ground_truth_obstacles', 10)
+            MarkerArray, '/perception/ground_truth/obstacles/visualization', 10)
         self.detected_obstacles_marker_pub = self.create_publisher(
-            MarkerArray, '/visualization/detected_obstacles', 10)
+            MarkerArray, '/perception/obstacles/visualization', 10)
         self.trajectory_viz_pub = self.create_publisher(
-            Path, '/visualization/trajectory', 10)
+            Path, '/planning/trajectory/visualization', 10)
         self.current_waypoint_marker_pub = self.create_publisher(
-            Marker, '/visualization/current_waypoint', 10)
+            Marker, '/planning/current_waypoint/visualization', 10)
         # Publish colored semantic image
         self.semantic_image_pub = self.create_publisher(
             Image, semantic_output_topic, 10)

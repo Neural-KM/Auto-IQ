@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Local Lane Data Visualizer Node
-=============================
+Estimated Lanes Visualizer Node
+===============================
 
-ROS2 node for visualizing LocalLaneData messages in RViz.
+ROS2 node for visualizing EstimatedLanes messages in RViz.
 
 Subscribes to:
-- /mapping/local_lane_data (autoiq_msgs/LocalLaneData)
+- /mapping/estimated_lanes (autoiq_msgs/EstimatedLanes)
 
 Publishes:
-- /visualization/local_lane_data (visualization_msgs/MarkerArray)
+- /mapping/estimated_lanes/visualization (visualization_msgs/MarkerArray)
 
 Visualizes:
 - Road boundaries (red)
 - Lane centerlines (green)
-- Lane boundaries (black)
+- Lane boundaries (blue for inner, black for intermediate)
 """
 
 import rclpy
@@ -25,83 +25,85 @@ from visualization_msgs.msg import MarkerArray, Marker
 from std_msgs.msg import ColorRGBA
 from geometry_msgs.msg import Point
 
-from autoiq_msgs.msg import LocalLaneData
+from autoiq_msgs.msg import EstimatedLanes
 
 
 # Colors (RGBA)
-ROAD_BOUNDARY_COLOR = (1.0, 0.0, 0.0, 1.0)    # Red
-LANE_CENTERLINE_COLOR = (0.0, 1.0, 0.0, 1.0)  # Green
-LANE_BOUNDARY_COLOR = (0.0, 0.0, 0.0, 0.8)    # Black
+ROAD_BOUNDARY_COLOR = (1.0, 0.0, 0.0, 1.0)       # Red - drivable area edges
+INNER_LANE_BOUNDARY_COLOR = (0.0, 0.0, 1.0, 1.0) # Blue - inner lane boundaries
+LANE_BOUNDARY_COLOR = (0.0, 0.0, 0.0, 0.8)       # Black - intermediate lane boundaries
+LANE_CENTERLINE_COLOR = (0.0, 1.0, 0.0, 1.0)     # Green - lane centerlines
 
 
-class LocalLaneDataVisualizerNode(Node):
+class EstimatedLanesVisualizerNode(Node):
     """
-    ROS2 Node for visualizing LocalLaneData in RViz.
+    ROS2 Node for visualizing EstimatedLanes in RViz.
     """
 
     def __init__(self):
-        super().__init__('local_lane_data_visualizer_node')
+        super().__init__('estimated_lanes_visualizer_node')
 
         # Parameters
         self.declare_parameter('marker_lifetime', 0.2)  # seconds
         self.declare_parameter('centerline_width', 0.15)  # meters
         self.declare_parameter('boundary_width', 0.1)  # meters
-        self.declare_parameter('road_boundary_width', 0.2)  # meters
+        self.declare_parameter('inner_boundary_width', 0.12)  # meters
+        self.declare_parameter('road_boundary_width', 0.15)  # meters
 
         self.marker_lifetime = self.get_parameter('marker_lifetime').value
         self.centerline_width = self.get_parameter('centerline_width').value
         self.boundary_width = self.get_parameter('boundary_width').value
+        self.inner_boundary_width = self.get_parameter('inner_boundary_width').value
         self.road_boundary_width = self.get_parameter('road_boundary_width').value
 
-        # QoS for local lane data subscription
-        drivable_qos = QoSProfile(
+        # QoS for estimated lanes subscription
+        qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
 
-        # Subscriber
-        self.local_lane_data_sub = self.create_subscription(
-            LocalLaneData,
-            '/mapping/local_lane_data',
-            self._local_lane_data_cb,
-            drivable_qos
+        # Subscriber - follows pattern: subscribe to source topic
+        self.estimated_lanes_sub = self.create_subscription(
+            EstimatedLanes,
+            '/mapping/estimated_lanes',
+            self._estimated_lanes_cb,
+            qos
         )
 
-        # Publisher
+        # Publisher - follows pattern: <source_topic>/visualization
         self.marker_pub = self.create_publisher(
             MarkerArray,
-            '/visualization/local_lane_data',
+            '/mapping/estimated_lanes/visualization',
             10
         )
 
-        self.get_logger().info('Local Lane Data Visualizer Node started')
+        self.get_logger().info('Estimated Lanes Visualizer Node started')
 
-    def _local_lane_data_cb(self, msg: LocalLaneData):
-        """Handle incoming LocalLaneData message and publish markers."""
+    def _estimated_lanes_cb(self, msg: EstimatedLanes):
+        """Handle incoming EstimatedLanes message and publish markers."""
         marker_array = MarkerArray()
         stamp = msg.header.stamp
-        frame_id = msg.header.frame_id  # Should be base_link or ego_vehicle
+        frame_id = msg.header.frame_id
 
         # Clear previous markers
         clear_marker = Marker()
         clear_marker.header.frame_id = frame_id
         clear_marker.header.stamp = stamp
-        clear_marker.ns = 'local_lane_data'
+        clear_marker.ns = 'estimated_lanes'
         clear_marker.id = 0
         clear_marker.action = Marker.DELETEALL
         marker_array.markers.append(clear_marker)
 
         if not msg.valid:
-            # Publish just the clear marker
             self.marker_pub.publish(marker_array)
             return
 
         marker_id = 1
         lifetime_ns = int(self.marker_lifetime * 1e9)
 
-        # 1. Draw road boundaries (red)
+        # 1. Draw road boundaries (RED - drivable area edges)
         if len(msg.left_boundary) >= 2:
             left_marker = self._create_line_strip(
                 points=msg.left_boundary,
@@ -132,11 +134,56 @@ class LocalLaneDataVisualizerNode(Node):
             marker_array.markers.append(right_marker)
             marker_id += 1
 
-        # 2. Draw lane centerlines (green) and boundaries (black)
-        for lane in msg.lanes:
+        # 2. Draw lane boundaries and centerlines
+        num_lanes = len(msg.lanes)
+        for i, lane in enumerate(msg.lanes):
             lane_idx = lane.lane_index
 
-            # Lane centerline (green)
+            # Determine if this is an inner boundary (BLUE) or intermediate (BLACK)
+            # Inner right = rightmost lane's right edge (i=0, right boundary)
+            # Inner left = leftmost lane's left edge (i=num_lanes-1, left boundary)
+
+            # Right boundary
+            if len(lane.right_boundary) >= 2:
+                is_inner_right = (i == 0)
+                color = INNER_LANE_BOUNDARY_COLOR if is_inner_right else LANE_BOUNDARY_COLOR
+                width = self.inner_boundary_width if is_inner_right else self.boundary_width
+
+                right_marker = self._create_line_strip(
+                    points=lane.right_boundary,
+                    frame_id=frame_id,
+                    stamp=stamp,
+                    ns=f'lane_{lane_idx}_boundary',
+                    marker_id=marker_id,
+                    color=color,
+                    width=width,
+                    lifetime_ns=lifetime_ns,
+                    z_offset=0.08 if is_inner_right else 0.02
+                )
+                marker_array.markers.append(right_marker)
+                marker_id += 1
+
+            # Left boundary
+            if len(lane.left_boundary) >= 2:
+                is_inner_left = (i == num_lanes - 1)
+                color = INNER_LANE_BOUNDARY_COLOR if is_inner_left else LANE_BOUNDARY_COLOR
+                width = self.inner_boundary_width if is_inner_left else self.boundary_width
+
+                left_marker = self._create_line_strip(
+                    points=lane.left_boundary,
+                    frame_id=frame_id,
+                    stamp=stamp,
+                    ns=f'lane_{lane_idx}_boundary',
+                    marker_id=marker_id,
+                    color=color,
+                    width=width,
+                    lifetime_ns=lifetime_ns,
+                    z_offset=0.08 if is_inner_left else 0.02
+                )
+                marker_array.markers.append(left_marker)
+                marker_id += 1
+
+            # Lane centerline (GREEN)
             if len(lane.centerline) >= 2:
                 centerline_marker = self._create_line_strip(
                     points=lane.centerline,
@@ -152,40 +199,8 @@ class LocalLaneDataVisualizerNode(Node):
                 marker_array.markers.append(centerline_marker)
                 marker_id += 1
 
-            # Lane boundaries (black)
-            if len(lane.left_boundary) >= 2:
-                left_lane_marker = self._create_line_strip(
-                    points=lane.left_boundary,
-                    frame_id=frame_id,
-                    stamp=stamp,
-                    ns=f'lane_{lane_idx}_boundary',
-                    marker_id=marker_id,
-                    color=LANE_BOUNDARY_COLOR,
-                    width=self.boundary_width,
-                    lifetime_ns=lifetime_ns,
-                    z_offset=0.02
-                )
-                marker_array.markers.append(left_lane_marker)
-                marker_id += 1
-
-            if len(lane.right_boundary) >= 2:
-                right_lane_marker = self._create_line_strip(
-                    points=lane.right_boundary,
-                    frame_id=frame_id,
-                    stamp=stamp,
-                    ns=f'lane_{lane_idx}_boundary',
-                    marker_id=marker_id,
-                    color=LANE_BOUNDARY_COLOR,
-                    width=self.boundary_width,
-                    lifetime_ns=lifetime_ns,
-                    z_offset=0.02
-                )
-                marker_array.markers.append(right_lane_marker)
-                marker_id += 1
-
             # Lane label (text marker)
             if len(lane.centerline) > 0:
-                # Place label at middle of centerline
                 mid_idx = len(lane.centerline) // 2
                 mid_pt = lane.centerline[mid_idx]
 
@@ -250,7 +265,7 @@ class LocalLaneDataVisualizerNode(Node):
         marker.type = Marker.LINE_STRIP
         marker.action = Marker.ADD
         marker.pose.orientation.w = 1.0
-        marker.scale.x = width  # Line width
+        marker.scale.x = width
 
         marker.color = ColorRGBA(
             r=float(color[0]),
@@ -273,7 +288,7 @@ class LocalLaneDataVisualizerNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = LocalLaneDataVisualizerNode()
+    node = EstimatedLanesVisualizerNode()
 
     try:
         rclpy.spin(node)
