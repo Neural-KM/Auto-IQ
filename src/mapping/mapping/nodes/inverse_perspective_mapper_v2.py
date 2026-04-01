@@ -155,7 +155,7 @@ class InversePerspectiveMapperNode2(Node):
 
         # ==================== Publishers ====================
         self.costmap_pub = self.create_publisher(OccupancyGrid, costmap_topic, 1)
-        self.debug_image_pub = self.create_publisher(Image, '/mapping/ipm_debug_image', 1)
+        self.debug_image_pub = self.create_publisher(Image, '/mapping/debug/drop_skirt', sensor_qos)
 
         self.get_logger().info('Inverse Perspective Mapper V2 (Reverse Projection) started')
         self.get_logger().info(f'  Semantic Image: {semantic_topic}')

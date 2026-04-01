@@ -200,7 +200,7 @@ class LaneFittingNode(Node):
             MarkerArray, '/mapping/lanes', 10)
         if self.enable_debug_viz:
             self.debug_bev_pub = self.create_publisher(
-                Image, '/mapping/debug/lane_bev', 10)
+                Image, '/mapping/debug/lane_bev', sensor_qos)
 
         # Lane estimation publishers (boundary-based estimation)
         self.estimated_lanes_pub = self.create_publisher(
@@ -208,7 +208,7 @@ class LaneFittingNode(Node):
         self.boundary_markers_pub = self.create_publisher(
             MarkerArray, '/mapping/boundary_markers', 10)
         self.boundary_debug_pub = self.create_publisher(
-            Image, '/mapping/boundary_debug_image', 10)
+            Image, '/mapping/debug/boundary', sensor_qos)
 
         # Timer to periodically attempt lane detector initialization
         self._init_timer = self.create_timer(0.5, self._try_init_lane_detector)

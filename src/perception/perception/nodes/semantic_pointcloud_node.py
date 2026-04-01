@@ -161,10 +161,10 @@ class SemanticPointCloudNode(Node):
         # ==================== Publishers ====================
         self.pointcloud_pub = self.create_publisher(
             PointCloud2, output_topic, 10)
-        
+
         # Debug visualization publisher
         self.debug_image_pub = self.create_publisher(
-            Image, '/perception/semantic_pointcloud_debug', 10)
+            Image, '/perception/semantic_pointcloud_debug', sensor_qos)
         
         # ==================== Initialization Timer ====================
         self.init_timer = self.create_timer(0.5, self._check_initialization)

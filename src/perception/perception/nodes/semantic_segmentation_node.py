@@ -154,17 +154,17 @@ class SemanticSegmentationNode(Node):
         # Raw semantic map
         self.semantic_pub = self.create_publisher(Image, output_topic, 10)
         if self.publish_colored:
-            self.colored_pub = self.create_publisher(Image, f'{output_topic}/colored', 10)
+            self.colored_pub = self.create_publisher(Image, f'{output_topic}/colored', sensor_qos)
 
         # Road lane extraction semantic map (with lane markings injected)
         if self.enable_road_lane_extraction:
             self.road_lane_extraction_pub = self.create_publisher(Image, road_lane_extraction_topic, 10)
             if self.publish_colored:
                 self.road_lane_extraction_colored_pub = self.create_publisher(
-                    Image, f'{road_lane_extraction_topic}/colored', 10)
+                    Image, f'{road_lane_extraction_topic}/colored', sensor_qos)
             # Debug publishers
-            self.road_mask_pub = self.create_publisher(Image, '/perception/road_mask', 10)
-            self.lane_mask_pub = self.create_publisher(Image, '/perception/lane_markings', 10)
+            self.road_mask_pub = self.create_publisher(Image, '/perception/road_mask', sensor_qos)
+            self.lane_mask_pub = self.create_publisher(Image, '/perception/lane_markings', sensor_qos)
 
         # ==================== State ====================
         self._frame_count = 0
