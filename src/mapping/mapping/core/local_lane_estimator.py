@@ -2,12 +2,10 @@
 Local Lane Estimator
 ====================
 
-Estimates local road structure from semantic segmentation images.
+Estimates lane structure from road boundaries using a priori knowledge.
 
-Uses a single IPM (Inverse Perspective Mapping) transform to create a BEV
-(Bird's Eye View) representation, then extracts:
-1. Road boundaries (left/right edges from drivable area)
-2. Estimated lane structure (using a priori knowledge about lane count/width)
+Uses detected road boundaries (left/right edges) and divides the road into
+lanes based on configured lane_count and total_road_width parameters.
 
 Frame convention (base_link):
   x = forward,  y = lateral  (+left, -right)
@@ -24,6 +22,8 @@ parameters. This uses a priori knowledge about expected road structure.
 
 Changelog:
 ---------
+2026-04-01: Refactored to receive boundaries directly (boundary extraction moved
+    to BoundaryExtractor in lane_fitting_node). Removed estimate_from_semantic().
 2026-03-25: Improved curve handling via updated boundary_extractor constraints.
     Boundary extraction now uses wider search windows and allows more lateral
     movement per step for better tracking on turns.
@@ -32,22 +32,10 @@ Changelog:
 from __future__ import annotations
 
 import numpy as np
-import cv2
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Dict, Any
 from scipy.ndimage import uniform_filter1d
 
-from mapping.core.boundary_extractor import (
-    extract_boundaries,
-    draw_boundary_overlay,
-    boundary_to_base_link,
-)
-from mapping.utils.ipm_transform import convert_to_ipm
-from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME
-
-
-ROAD_ID = SEMANTIC_BY_NAME['road']
-ROAD_LINE_ID = SEMANTIC_BY_NAME['road_line']
 
 # Status codes for lane estimation
 STATUS_OK = 0
@@ -85,29 +73,6 @@ class LocalLaneDataResult:
     lane_count: int = 0
 
 
-@dataclass
-class LocalRoadEstimate:
-    """
-    Complete local road structure estimate.
-
-    Contains estimated lane structure from road boundaries using a priori knowledge.
-    The lanes are NOT detected - they are computed by dividing the detected road
-    width equally based on configured lane_count parameter.
-    """
-    # Validity
-    valid: bool = False
-
-    # Road boundaries in base_link coordinates
-    left_boundary: Optional[np.ndarray] = None   # (N, 2) x, y in base_link
-    right_boundary: Optional[np.ndarray] = None  # (N, 2) x, y in base_link
-
-    # Estimated lane structure (guessed from boundaries using a priori knowledge)
-    local_lane_data: Optional[LocalLaneDataResult] = None
-
-    # Debug images
-    debug_images: Dict[str, np.ndarray] = field(default_factory=dict)
-
-
 # ============================================================================
 # Local Lane Estimator
 # ============================================================================
@@ -115,9 +80,9 @@ class LocalRoadEstimate:
 
 class LocalLaneEstimator:
     """
-    Estimates lane structure from semantic segmentation images.
+    Estimates lane structure from road boundaries.
 
-    Uses IPM to create a BEV road mask, extracts boundaries, and estimates
+    Takes pre-extracted left and right road boundaries and estimates
     lane positions using configured lane_count and total_road_width parameters.
 
     This is NOT actual lane detection - it's geometric estimation using
@@ -125,7 +90,7 @@ class LocalLaneEstimator:
 
     Usage:
         estimator = LocalLaneEstimator(lane_count=4, total_road_width=14.0)
-        result = estimator.estimate_from_semantic(semantic_img, fov, pitch, height)
+        result = estimator.estimate_from_boundaries(left_pts, right_pts)
     """
 
     def __init__(
@@ -137,10 +102,6 @@ class LocalLaneEstimator:
         clearance_from_divider: float = 0.3,
         min_road_width: float = 10.0,
         max_road_width: float = 20.0,
-        # BEV transform parameters
-        bev_x_range: Tuple[float, float] = (5.0, 35.0),
-        bev_y_range: Tuple[float, float] = (-15.0, 15.0),
-        pixels_per_meter: float = 10.0,
         # Lane generation parameters
         resample_spacing: float = 0.5,
         min_forward_range: float = 3.0,
@@ -157,25 +118,11 @@ class LocalLaneEstimator:
             clearance_from_divider: Safety margin from left edge (meters)
             min_road_width: Minimum valid road width (meters)
             max_road_width: Maximum valid road width (meters)
-            bev_x_range: Forward range for BEV transform (meters)
-            bev_y_range: Lateral range for BEV transform (meters)
-            pixels_per_meter: BEV resolution
             resample_spacing: Distance between resampled points (meters)
             min_forward_range: Minimum forward span required (meters)
             near_field_skip: Skip points closer than this (meters)
             smoothing_window: Moving average window size (samples)
         """
-        # BEV parameters
-        self.bev_x_range = bev_x_range
-        self.bev_y_range = bev_y_range
-        self.pixels_per_meter = pixels_per_meter
-
-        # Compute BEV dimensions
-        x_span = bev_x_range[1] - bev_x_range[0]
-        y_span = bev_y_range[1] - bev_y_range[0]
-        self.bev_height = int(x_span * pixels_per_meter)
-        self.bev_width = int(y_span * pixels_per_meter)
-
         # Lane structure parameters
         self.lane_count = lane_count
         self.total_road_width = total_road_width
@@ -194,110 +141,13 @@ class LocalLaneEstimator:
         self.min_path_points = 8
         self.min_forward_span_m = 3.0
 
-    def estimate_from_semantic(
-        self,
-        semantic_img: np.ndarray,
-        camera_fov: float,
-        camera_pitch: float,
-        camera_height: float,
-    ) -> LocalRoadEstimate:
-        """
-        Estimate local road structure from semantic segmentation image.
-
-        Creates an IPM (Bird's Eye View) from the semantic image, extracts
-        road boundaries, and estimates lane structure using a priori knowledge.
-
-        Args:
-            semantic_img: Mono8 semantic segmentation image
-            camera_fov: Camera horizontal FOV in degrees
-            camera_pitch: Camera pitch angle in degrees
-            camera_height: Camera height above ground in meters
-
-        Returns:
-            LocalRoadEstimate with boundaries and estimated lane data
-        """
-        result = LocalRoadEstimate()
-
-        # 1. Create IPM from semantic image (drivable area = road + road_line)
-        drivable_mask = ((semantic_img == ROAD_ID) | (semantic_img == ROAD_LINE_ID)).astype(np.uint8) * 255
-
-        bev_drivable, _, _ = convert_to_ipm(
-            image=drivable_mask,
-            fov=camera_fov,
-            pitch=camera_pitch,
-            camera_height=camera_height,
-            bev_x_range=self.bev_x_range,
-            bev_y_range=self.bev_y_range,
-            pixels_per_meter=self.pixels_per_meter,
-            interpolation=cv2.INTER_NEAREST,
-        )
-
-        # 2. Transform BEV to match boundary_extractor convention
-        # convert_to_ipm output: rows=X (far at top), cols=Y (left at col 0)
-        # boundary_extractor expects: rows=Y (right at top), cols=X (behind at col 0)
-        # Transform: transpose, flip both axes
-        bev_for_extractor = bev_drivable.T[::-1, ::-1]
-
-        # Grid dimensions after transform
-        grid_height, grid_width = bev_for_extractor.shape[:2]
-
-        # Grid origin for boundary_to_base_link (in extractor convention)
-        # After transform: row 0 = Y_min (right), col 0 = X_min (behind)
-        grid_origin_x = self.bev_x_range[0]  # X at col 0
-        grid_origin_y = self.bev_y_range[0]  # Y at row 0
-
-        # 3. Extract road boundaries from transformed BEV mask
-        binary_mask = (bev_for_extractor > 127).astype(np.uint8)
-        observed_mask = np.ones_like(binary_mask, dtype=np.uint8)
-
-        left, right, edge_img, l_diag, r_diag = extract_boundaries(binary_mask, observed_mask)
-
-        # 4. Convert pixel boundaries to base_link using boundary_extractor's function
-        left_pts = boundary_to_base_link(
-            left,
-            grid_cells=max(grid_height, grid_width),
-            origin_x=grid_origin_x,
-            origin_y=grid_origin_y,
-            resolution=1.0 / self.pixels_per_meter,
-            sample_step=3,
-        )
-        right_pts = boundary_to_base_link(
-            right,
-            grid_cells=max(grid_height, grid_width),
-            origin_x=grid_origin_x,
-            origin_y=grid_origin_y,
-            resolution=1.0 / self.pixels_per_meter,
-            sample_step=3,
-        )
-
-        result.left_boundary = left_pts
-        result.right_boundary = right_pts
-
-        # Store boundary debug image
-        result.debug_images['boundary_overlay'] = draw_boundary_overlay(
-            bev_for_extractor, left, right, l_diag, r_diag, edge_img
-        )
-
-        # 5. Estimate lane structure from boundaries (using a priori knowledge)
-        local_lane_result = self._generate_lanes(left_pts, right_pts)
-        result.local_lane_data = local_lane_result
-
-        # Set validity
-        result.valid = local_lane_result.valid
-
-        return result
-
-    # ========================================================================
-    # Lane Generation (from boundaries)
-    # ========================================================================
-
-    def _generate_lanes(
+    def estimate_from_boundaries(
         self,
         left_boundary: Optional[np.ndarray],
         right_boundary: Optional[np.ndarray],
     ) -> LocalLaneDataResult:
         """
-        Generate structured local lane data from road boundaries.
+        Estimate lane structure from road boundaries.
 
         Args:
             left_boundary: (N, 2) array of left boundary points (x, y) in base_link
@@ -309,8 +159,12 @@ class LocalLaneEstimator:
         # Convert to numpy arrays
         if left_boundary is not None:
             left_boundary = np.asarray(left_boundary)
+            if left_boundary.size == 0:
+                left_boundary = None
         if right_boundary is not None:
             right_boundary = np.asarray(right_boundary)
+            if right_boundary.size == 0:
+                right_boundary = None
 
         # No boundaries at all
         if left_boundary is None and right_boundary is None:
@@ -343,6 +197,10 @@ class LocalLaneEstimator:
             )
 
         return result
+
+    # ========================================================================
+    # Lane Generation (from boundaries)
+    # ========================================================================
 
     def _lanes_from_both_boundaries(
         self,

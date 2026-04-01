@@ -14,6 +14,13 @@ Lane Fitting Pipeline (from BEV):
 5. 2nd-order polynomials fitted to each detected lane
 6. Results published as LaneDetection msg and RViz markers
 
+Boundary-Based Lane Estimation Pipeline:
+----------------------------------------
+1. BoundaryExtractor creates BEV from semantic image (road + road_line)
+2. Sliding window extracts left/right road boundaries
+3. LocalLaneEstimator divides road into lanes using a priori knowledge
+4. Results published as LocalLaneData msg and boundary Paths
+
 Debug Visualization:
 --------------------
 Set enable_debug_viz:=true to enable the BEV debug image.
@@ -22,9 +29,6 @@ The '/mapping/debug/lane_bev' topic shows:
 - Colored filled rectangles: Sliding window search regions (one color per lane)
 - Colored polylines: Fitted polynomial curves
 - White line: Vehicle centerline
-
-Note: This node also runs boundary-based lane estimation (separate pipeline).
-See local_lane_estimator.py for that logic.
 
 Parameters:
 -----------
@@ -51,14 +55,21 @@ Publishes:
 
 Changelog:
 ----------
+2026-04-01: Refactored boundary extraction:
+    - Added BoundaryExtractor class (IPM + sliding window extraction)
+    - LocalLaneEstimator now receives boundaries directly
+    - Cleaner separation of concerns
 2026-03-25: Fixed curve handling:
     - Increased max_quadratic from 0.002 to 0.015 (allows tighter curves)
     - Semi-transparent filled windows in debug visualization
 """
 
 import numpy as np
+import cv2
+from dataclasses import dataclass
 from pathlib import Path as FilePath
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
+
 import yaml
 
 import rclpy
@@ -78,9 +89,190 @@ from autoiq_msgs.msg import LaneDetection as LaneDetectionMsg
 from autoiq_msgs.msg import LocalLaneData, Lane
 
 from mapping.core.lane_fitting import LaneDetector
-from mapping.core.local_lane_estimator import LocalLaneEstimator, LocalRoadEstimate
+from mapping.core.local_lane_estimator import LocalLaneEstimator
+from mapping.core.boundary_extractor import (
+    extract_boundaries,
+    draw_boundary_overlay,
+    boundary_to_base_link,
+)
+from mapping.utils.ipm_transform import convert_to_ipm
+from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME
 
 from cv_bridge import CvBridge
+
+
+# Semantic class IDs
+ROAD_ID = SEMANTIC_BY_NAME['road']
+ROAD_LINE_ID = SEMANTIC_BY_NAME['road_line']
+
+
+# ============================================================================
+# Boundary Extractor
+# ============================================================================
+
+
+@dataclass
+class BoundaryExtractionResult:
+    """Result from boundary extraction."""
+    left_boundary: Optional[np.ndarray] = None   # (N, 2) x, y in base_link
+    right_boundary: Optional[np.ndarray] = None  # (N, 2) x, y in base_link
+    debug_image: Optional[np.ndarray] = None     # BGR debug visualization
+    valid: bool = False
+
+
+class BoundaryExtractor:
+    """
+    Extracts road boundaries from semantic segmentation images.
+
+    Creates a Bird's Eye View (BEV) using IPM transform, then uses sliding
+    window algorithm to extract left and right road boundaries.
+
+    Usage:
+        extractor = BoundaryExtractor()
+        extractor.set_camera_params(fov=90, pitch=5, height=1.5)
+        result = extractor.extract(semantic_img)
+    """
+
+    def __init__(
+        self,
+        bev_x_range: Tuple[float, float] = (5.0, 35.0),
+        bev_y_range: Tuple[float, float] = (-15.0, 15.0),
+        pixels_per_meter: float = 10.0,
+    ):
+        """
+        Initialize the boundary extractor.
+
+        Args:
+            bev_x_range: Forward range for BEV transform (meters)
+            bev_y_range: Lateral range for BEV transform (meters)
+            pixels_per_meter: BEV resolution
+        """
+        self.bev_x_range = bev_x_range
+        self.bev_y_range = bev_y_range
+        self.pixels_per_meter = pixels_per_meter
+
+        # Compute BEV dimensions
+        x_span = bev_x_range[1] - bev_x_range[0]
+        y_span = bev_y_range[1] - bev_y_range[0]
+        self.bev_height = int(x_span * pixels_per_meter)
+        self.bev_width = int(y_span * pixels_per_meter)
+
+        # Camera parameters (set via set_camera_params)
+        self.camera_fov: Optional[float] = None
+        self.camera_pitch: Optional[float] = None
+        self.camera_height: Optional[float] = None
+
+    def set_camera_params(
+        self,
+        fov: float,
+        pitch: float,
+        camera_height: float,
+    ):
+        """Set camera extrinsics for IPM transform."""
+        self.camera_fov = fov
+        self.camera_pitch = pitch
+        self.camera_height = camera_height
+
+    def extract(self, semantic_img: np.ndarray) -> BoundaryExtractionResult:
+        """
+        Extract road boundaries from semantic segmentation image.
+
+        Args:
+            semantic_img: Mono8 semantic segmentation image
+
+        Returns:
+            BoundaryExtractionResult with left/right boundaries in base_link
+        """
+        result = BoundaryExtractionResult()
+
+        if self.camera_fov is None:
+            return result
+
+        # 1. Create masks from semantic image
+        # Drivable area = road + road_line
+        drivable_mask = ((semantic_img == ROAD_ID) | (semantic_img == ROAD_LINE_ID)).astype(np.uint8) * 255
+
+        # Observed area = any pixel that has a semantic label (not unlabeled/0)
+        # This prevents FOV edges from being detected as road boundaries
+        observed_mask_raw = (semantic_img != 0).astype(np.uint8) * 255
+
+        # 2. Transform both masks to BEV using IPM
+        bev_drivable, _, _ = convert_to_ipm(
+            image=drivable_mask,
+            fov=self.camera_fov,
+            pitch=self.camera_pitch,
+            camera_height=self.camera_height,
+            bev_x_range=self.bev_x_range,
+            bev_y_range=self.bev_y_range,
+            pixels_per_meter=self.pixels_per_meter,
+            interpolation=cv2.INTER_NEAREST,
+        )
+
+        bev_observed, _, _ = convert_to_ipm(
+            image=observed_mask_raw,
+            fov=self.camera_fov,
+            pitch=self.camera_pitch,
+            camera_height=self.camera_height,
+            bev_x_range=self.bev_x_range,
+            bev_y_range=self.bev_y_range,
+            pixels_per_meter=self.pixels_per_meter,
+            interpolation=cv2.INTER_NEAREST,
+        )
+
+        # 3. Transform BEV to match boundary_extractor convention
+        # convert_to_ipm output: rows=X (far at top), cols=Y (left at col 0)
+        # boundary_extractor expects: rows=Y (right at top), cols=X (behind at col 0)
+        # Transform: transpose, flip both axes
+        bev_for_extractor = bev_drivable.T[::-1, ::-1]
+        observed_for_extractor = bev_observed.T[::-1, ::-1]
+
+        # Grid dimensions after transform
+        grid_height, grid_width = bev_for_extractor.shape[:2]
+
+        # Grid origin for boundary_to_base_link (in extractor convention)
+        # After transform: row 0 = Y_min (right), col 0 = X_min (near)
+        grid_origin_x = self.bev_x_range[0]  # X at col 0
+        grid_origin_y = self.bev_y_range[0]  # Y at row 0
+
+        # 4. Extract road boundaries from transformed BEV mask
+        binary_mask = (bev_for_extractor > 127).astype(np.uint8)
+        observed_mask = (observed_for_extractor > 127).astype(np.uint8)
+
+        left, right, edge_img, l_diag, r_diag = extract_boundaries(binary_mask, observed_mask)
+
+        # 4. Convert pixel boundaries to base_link
+        left_pts = boundary_to_base_link(
+            left,
+            grid_cells=max(grid_height, grid_width),
+            origin_x=grid_origin_x,
+            origin_y=grid_origin_y,
+            resolution=1.0 / self.pixels_per_meter,
+            sample_step=3,
+        )
+        right_pts = boundary_to_base_link(
+            right,
+            grid_cells=max(grid_height, grid_width),
+            origin_x=grid_origin_x,
+            origin_y=grid_origin_y,
+            resolution=1.0 / self.pixels_per_meter,
+            sample_step=3,
+        )
+
+        result.left_boundary = left_pts
+        result.right_boundary = right_pts
+        result.valid = left_pts is not None or right_pts is not None
+
+        # 5. Generate debug image
+        result.debug_image = draw_boundary_overlay(
+            bev_for_extractor, left, right, l_diag, r_diag, edge_img
+        )
+
+        return result
+
+
+# ============================================================================
+# Lane Fitting Node
+# ============================================================================
 
 
 class LaneFittingNode(Node):
@@ -153,6 +345,10 @@ class LaneFittingNode(Node):
         # LaneDetector is created once CameraInfo + camera TF are available.
         self.lane_detector: Optional[LaneDetector] = None
         self._lane_detector_initialized = False
+
+        # ==================== Boundary Extractor ====================
+        # Extracts road boundaries from semantic image using IPM + sliding window
+        self.boundary_extractor = BoundaryExtractor()
 
         # ==================== Lane Estimator (from boundaries) ====================
         # Uses config from YAML file - estimates lanes from road boundaries
@@ -263,6 +459,12 @@ class LaneFittingNode(Node):
                 image_height=cam['height'],
             )
             self.lane_detector.set_camera_params(
+                fov=cam['fov_deg'],
+                pitch=cam['pitch_deg'],
+                camera_height=cam['height_m'],
+            )
+            # Also initialize boundary extractor with camera params
+            self.boundary_extractor.set_camera_params(
                 fov=cam['fov_deg'],
                 pitch=cam['pitch_deg'],
                 camera_height=cam['height_m'],
@@ -534,41 +736,37 @@ class LaneFittingNode(Node):
         camera_pitch: float,
         camera_height: float,
     ):
-        """Estimate lanes from road boundaries in the IPM image.
+        """Estimate lanes from road boundaries.
 
-        Uses the semantic image to create an IPM, extracts road boundaries,
-        and estimates lane positions using a priori knowledge about lane structure.
+        Pipeline:
+        1. BoundaryExtractor extracts left/right boundaries from semantic image
+        2. LocalLaneEstimator divides road into lanes using a priori knowledge
         """
-        # Run unified estimator (creates IPM internally from semantic image)
-        road_estimate = self.lane_estimator.estimate_from_semantic(
-            semantic_img=semantic_img,
-            camera_fov=camera_fov,
-            camera_pitch=camera_pitch,
-            camera_height=camera_height,
-        )
+        # 1. Extract boundaries using BoundaryExtractor
+        boundary_result = self.boundary_extractor.extract(semantic_img)
 
-        # Publish all road structure data
-        self._publish_road_estimate(road_estimate, stamp)
+        # 2. Publish boundaries as Path messages
+        if boundary_result.left_boundary is not None:
+            self._publish_boundary_path(boundary_result.left_boundary, stamp, self.left_boundary_pub)
+        if boundary_result.right_boundary is not None:
+            self._publish_boundary_path(boundary_result.right_boundary, stamp, self.right_boundary_pub)
 
-    def _publish_road_estimate(self, estimate: LocalRoadEstimate, stamp):
-        """Publish all components of the road estimate."""
-        # Publish boundaries as Path messages
-        if estimate.left_boundary is not None:
-            self._publish_boundary_path(estimate.left_boundary, stamp, self.left_boundary_pub)
-        if estimate.right_boundary is not None:
-            self._publish_boundary_path(estimate.right_boundary, stamp, self.right_boundary_pub)
-
-        # Publish boundary debug image
-        if 'boundary_overlay' in estimate.debug_images:
+        # 3. Publish boundary debug image
+        if boundary_result.debug_image is not None:
             debug_msg = self.cv_bridge.cv2_to_imgmsg(
-                estimate.debug_images['boundary_overlay'], encoding='bgr8')
+                boundary_result.debug_image, encoding='bgr8')
             debug_msg.header.stamp = stamp
             debug_msg.header.frame_id = self.base_frame
             self.boundary_debug_pub.publish(debug_msg)
 
-        # Publish local lane data
-        if estimate.local_lane_data is not None:
-            self._publish_local_lane_data(estimate.local_lane_data, stamp)
+        # 4. Estimate lanes from boundaries
+        lane_result = self.lane_estimator.estimate_from_boundaries(
+            left_boundary=boundary_result.left_boundary,
+            right_boundary=boundary_result.right_boundary,
+        )
+
+        # 5. Publish local lane data
+        self._publish_local_lane_data(lane_result, stamp)
 
     def _publish_local_lane_data(self, result, stamp):
         """Publish LocalLaneData message with structured lane data."""

@@ -25,6 +25,9 @@ boundary stability is safety-critical.
 
 Changelog:
 ---------
+2026-04-01: Fixed sweep range bug:
+    - Changed sweep_start from w//2 to 5% of width (was missing near-field boundaries)
+    - BEV col 0 = X_min (near edge), not vehicle center, so full sweep is needed
 2026-03-25: Improved curve handling:
     - Increased MAX_LATERAL_SHIFT from 25 to 45 pixels for better turn tracking
     - Increased MARGIN from 40 to 60 for wider search windows
@@ -152,8 +155,10 @@ def extract_boundaries(
         expected_width = h // 2
 
     # ── 3. Sliding window setup ─────────────────────────────────
-    # Sweep along columns from centre of grid (vehicle) to far edge.
-    sweep_start = w // 2
+    # Sweep along columns from near edge to far edge.
+    # NOTE: The BEV covers X_min to X_max (e.g., 5m to 35m), with col 0 = X_min.
+    # We start from a small offset to avoid noisy data at the very near edge.
+    sweep_start = max(10, int(w * 0.05))  # Start 5% into the BEV (avoids near-field noise)
     sweep_range = w - sweep_start
     window_w = max(1, sweep_range // NWINDOWS)
     margin = MARGIN
