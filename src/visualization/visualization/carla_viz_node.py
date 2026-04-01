@@ -76,7 +76,7 @@ class CarlaVizNode(Node):
         # Options: trajectory, global_route, predicted_traj, ground_truth_obstacles, detected_obstacles, speed, control
         self.declare_parameter('carla_debug_draw', 'trajectory,global_route,predicted_traj,speed,control')
         self.declare_parameter('semantic_topic', '/carla/ego_vehicle/ground_truth/camera/semantic/front/image')
-        self.declare_parameter('semantic_output_topic', '/visualization/semantic_image')
+        self.declare_parameter('semantic_output_topic', '/carla/ego_vehicle/ground_truth/camera/semantic/front/image/visualization')
         
         carla_host = self.get_parameter('carla_host').value
         carla_port = self.get_parameter('carla_port').value
