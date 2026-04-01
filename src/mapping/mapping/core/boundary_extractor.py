@@ -426,3 +426,242 @@ def boundary_to_base_link(
     y_base = origin_y + rows * resolution
 
     return np.column_stack([x_base, y_base])
+
+
+# ───────────────────── BoundaryExtractor class ─────────────────────
+
+
+@dataclass
+class BoundaryExtractionResult:
+    """Result from boundary extraction pipeline."""
+    left_boundary: Optional[np.ndarray] = None   # (N, 2) x, y in base_link
+    right_boundary: Optional[np.ndarray] = None  # (N, 2) x, y in base_link
+    debug_image: Optional[np.ndarray] = None     # BGR debug visualization
+    valid: bool = False
+
+
+class BoundaryExtractor:
+    """
+    Extracts road boundaries from semantic segmentation images.
+
+    Creates a Bird's Eye View (BEV) using IPM transform, then uses sliding
+    window algorithm to extract left and right road boundaries.
+
+    The extracted boundaries represent the OUTER edge of the drivable area
+    (road + road_line), NOT the lane markings themselves. The lane estimator
+    must account for the buffer area between drivable edge and actual lanes.
+
+    Usage:
+        extractor = BoundaryExtractor()
+        extractor.set_camera_params(fov=90, pitch=5, height=1.5)
+        result = extractor.extract(semantic_img)
+    """
+
+    # Semantic class IDs (must match perception/data_classes/semantic_labels.py)
+    ROAD_ID = 1
+    ROAD_LINE_ID = 24
+
+    def __init__(
+        self,
+        bev_x_range: Tuple[float, float] = (5.0, 35.0),
+        bev_y_range: Tuple[float, float] = (-15.0, 15.0),
+        pixels_per_meter: float = 10.0,
+    ):
+        """
+        Initialize the boundary extractor.
+
+        Args:
+            bev_x_range: Forward range for BEV transform (meters)
+            bev_y_range: Lateral range for BEV transform (meters)
+            pixels_per_meter: BEV resolution
+        """
+        self.bev_x_range = bev_x_range
+        self.bev_y_range = bev_y_range
+        self.pixels_per_meter = pixels_per_meter
+
+        # Compute BEV dimensions
+        x_span = bev_x_range[1] - bev_x_range[0]
+        y_span = bev_y_range[1] - bev_y_range[0]
+        self.bev_height = int(x_span * pixels_per_meter)
+        self.bev_width = int(y_span * pixels_per_meter)
+
+        # Camera parameters (set via set_camera_params)
+        self.camera_fov: Optional[float] = None
+        self.camera_pitch: Optional[float] = None
+        self.camera_height: Optional[float] = None
+
+    def set_camera_params(
+        self,
+        fov: float,
+        pitch: float,
+        camera_height: float,
+    ):
+        """Set camera extrinsics for IPM transform."""
+        self.camera_fov = fov
+        self.camera_pitch = pitch
+        self.camera_height = camera_height
+
+    def _is_boundary_at_fov_edge(
+        self,
+        boundary: BoundaryResult,
+        observed_mask: np.ndarray,
+        is_left: bool,
+        margin: int = 15,
+    ) -> bool:
+        """
+        Check if a detected boundary is at the edge of the observed (FOV) region.
+
+        A boundary at the FOV edge is not a real road boundary - it's just where
+        our camera view ends. Such boundaries should be invalidated.
+
+        Args:
+            boundary: BoundaryResult from extract_boundaries
+            observed_mask: Binary mask of observed area (1=observed, 0=outside FOV)
+            is_left: True for left boundary (high row values)
+            margin: Pixels from edge to consider as "at FOV edge"
+
+        Returns:
+            True if boundary is at FOV edge (should be invalidated)
+        """
+        if not boundary.detected or boundary.fitted_x is None:
+            return False
+
+        # Find the extent of the observed region
+        # Sum observed pixels per row to find which rows have observations
+        row_sums = np.sum(observed_mask, axis=1)
+        observed_rows = np.where(row_sums > 0)[0]
+
+        if len(observed_rows) == 0:
+            return True  # No observed area
+
+        min_observed_row = observed_rows.min()
+        max_observed_row = observed_rows.max()
+
+        # Get average boundary row position
+        avg_boundary_row = np.mean(boundary.fitted_x)
+
+        if is_left:
+            # Left boundary has high row values (toward max_observed_row)
+            # If boundary is within margin of top observed edge, it's at FOV edge
+            return avg_boundary_row >= (max_observed_row - margin)
+        else:
+            # Right boundary has low row values (toward min_observed_row)
+            # If boundary is within margin of bottom observed edge, it's at FOV edge
+            return avg_boundary_row <= (min_observed_row + margin)
+
+    def extract(self, semantic_img: np.ndarray) -> BoundaryExtractionResult:
+        """
+        Extract road boundaries from semantic segmentation image.
+
+        Args:
+            semantic_img: Mono8 semantic segmentation image
+
+        Returns:
+            BoundaryExtractionResult with left/right boundaries in base_link
+        """
+        # Import here to avoid circular dependency
+        from mapping.utils.ipm_transform import convert_to_ipm
+
+        result = BoundaryExtractionResult()
+
+        if self.camera_fov is None:
+            return result
+
+        # 1. Create masks from semantic image
+        # Drivable area = road + road_line
+        drivable_mask = (
+            (semantic_img == self.ROAD_ID) | (semantic_img == self.ROAD_LINE_ID)
+        ).astype(np.uint8) * 255
+
+        # Observed area = any pixel that has a semantic label (not unlabeled/0)
+        # This prevents FOV edges from being detected as road boundaries
+        observed_mask_raw = (semantic_img != 0).astype(np.uint8) * 255
+
+        # 2. Transform both masks to BEV using IPM
+        bev_drivable, _, _ = convert_to_ipm(
+            image=drivable_mask,
+            fov=self.camera_fov,
+            pitch=self.camera_pitch,
+            camera_height=self.camera_height,
+            bev_x_range=self.bev_x_range,
+            bev_y_range=self.bev_y_range,
+            pixels_per_meter=self.pixels_per_meter,
+            interpolation=cv2.INTER_NEAREST,
+        )
+
+        bev_observed, _, _ = convert_to_ipm(
+            image=observed_mask_raw,
+            fov=self.camera_fov,
+            pitch=self.camera_pitch,
+            camera_height=self.camera_height,
+            bev_x_range=self.bev_x_range,
+            bev_y_range=self.bev_y_range,
+            pixels_per_meter=self.pixels_per_meter,
+            interpolation=cv2.INTER_NEAREST,
+        )
+
+        # 3. Transform BEV to match boundary_extractor convention
+        # convert_to_ipm output: rows=X (far at top), cols=Y (left at col 0)
+        # boundary_extractor expects: rows=Y (right at top), cols=X (behind at col 0)
+        # Transform: transpose, flip both axes
+        bev_for_extractor = bev_drivable.T[::-1, ::-1]
+        observed_for_extractor = bev_observed.T[::-1, ::-1]
+
+        # Grid dimensions after transform
+        grid_height, grid_width = bev_for_extractor.shape[:2]
+
+        # Grid origin for boundary_to_base_link (in extractor convention)
+        # After transform: row 0 = Y_min (right), col 0 = X_min (near)
+        grid_origin_x = self.bev_x_range[0]  # X at col 0
+        grid_origin_y = self.bev_y_range[0]  # Y at row 0
+
+        # 4. Extract road boundaries from transformed BEV mask
+        binary_mask = (bev_for_extractor > 127).astype(np.uint8)
+        observed_mask = (observed_for_extractor > 127).astype(np.uint8)
+
+        left, right, edge_img, l_diag, r_diag = extract_boundaries(binary_mask, observed_mask)
+
+        # 5. Check if boundaries are at FOV edge (not real road boundaries)
+        # A boundary at FOV edge should be invalidated so we fall back to prior knowledge
+        fov_edge_margin = 15  # pixels from edge to consider as "at FOV edge"
+
+        left_at_fov_edge = self._is_boundary_at_fov_edge(
+            left, observed_mask, is_left=True, margin=fov_edge_margin
+        )
+        right_at_fov_edge = self._is_boundary_at_fov_edge(
+            right, observed_mask, is_left=False, margin=fov_edge_margin
+        )
+
+        # 6. Convert pixel boundaries to base_link (skip if at FOV edge)
+        left_pts = None
+        if left.detected and not left_at_fov_edge:
+            left_pts = boundary_to_base_link(
+                left,
+                grid_cells=max(grid_height, grid_width),
+                origin_x=grid_origin_x,
+                origin_y=grid_origin_y,
+                resolution=1.0 / self.pixels_per_meter,
+                sample_step=3,
+            )
+
+        right_pts = None
+        if right.detected and not right_at_fov_edge:
+            right_pts = boundary_to_base_link(
+                right,
+                grid_cells=max(grid_height, grid_width),
+                origin_x=grid_origin_x,
+                origin_y=grid_origin_y,
+                resolution=1.0 / self.pixels_per_meter,
+                sample_step=3,
+            )
+
+        result.left_boundary = left_pts
+        result.right_boundary = right_pts
+        result.valid = left_pts is not None or right_pts is not None
+
+        # 7. Generate debug image
+        result.debug_image = draw_boundary_overlay(
+            bev_for_extractor, left, right, l_diag, r_diag, edge_img
+        )
+
+        return result

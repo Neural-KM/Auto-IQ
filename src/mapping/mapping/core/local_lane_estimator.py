@@ -98,8 +98,8 @@ class LocalLaneEstimator:
         # Lane structure parameters (a priori knowledge for estimation)
         lane_count: int = 4,
         total_road_width: float = 14.0,
-        clearance_from_wall: float = 0.3,
-        clearance_from_divider: float = 0.3,
+        clearance_from_wall: float = 1.0,
+        clearance_from_divider: float = 1.0,
         min_road_width: float = 10.0,
         max_road_width: float = 20.0,
         # Lane generation parameters
@@ -113,9 +113,14 @@ class LocalLaneEstimator:
 
         Args:
             lane_count: Expected number of lanes (a priori knowledge)
-            total_road_width: Expected total road width in meters (a priori)
-            clearance_from_wall: Safety margin from right edge (meters)
-            clearance_from_divider: Safety margin from left edge (meters)
+            total_road_width: Expected total road width in meters (a priori).
+                Used when only one boundary is detected to estimate the other.
+            clearance_from_wall: Buffer from right drivable edge to rightmost lane (meters).
+                The extracted boundary is the OUTER edge of the drivable area, not the
+                lane marking. This accounts for the shoulder/buffer area between the
+                drivable edge and the actual rightmost lane boundary.
+            clearance_from_divider: Buffer from left drivable edge to leftmost lane (meters).
+                Same concept as clearance_from_wall but for the left side (center divider).
             min_road_width: Minimum valid road width (meters)
             max_road_width: Maximum valid road width (meters)
             resample_spacing: Distance between resampled points (meters)
@@ -248,11 +253,13 @@ class LocalLaneEstimator:
             left_y = uniform_filter1d(left_y, size=self.smoothing_window, mode='nearest')
             right_y = uniform_filter1d(right_y, size=self.smoothing_window, mode='nearest')
 
-        # Inset edges by clearances to get usable lane area
-        inner_right = right_y + self.clearance_from_wall
-        inner_left = left_y - self.clearance_from_divider
+        # Inset edges by buffer distances to get actual lane area
+        # The detected boundaries are the OUTER drivable area edge, not lane markings.
+        # There's a buffer (shoulder, etc.) between drivable edge and lane boundary.
+        inner_right = right_y + self.clearance_from_wall      # Right lane boundary
+        inner_left = left_y - self.clearance_from_divider     # Left lane boundary
 
-        # Compute actual usable width from detected boundaries (after clearances)
+        # Compute actual usable width for lanes (drivable width minus both buffers)
         usable_width = inner_left - inner_right
 
         # Compute lane width from actual detected road width

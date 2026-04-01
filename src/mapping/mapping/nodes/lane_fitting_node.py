@@ -65,10 +65,9 @@ Changelog:
 """
 
 import numpy as np
-import cv2
 from dataclasses import dataclass
 from pathlib import Path as FilePath
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any
 
 import yaml
 
@@ -79,10 +78,9 @@ import tf2_ros
 from ament_index_python.packages import get_package_share_directory
 
 from sensor_msgs.msg import Image, CameraInfo
-from nav_msgs.msg import Path
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
-from geometry_msgs.msg import Point, PoseStamped
+from geometry_msgs.msg import Point
 from builtin_interfaces.msg import Time
 
 from autoiq_msgs.msg import LaneDetection as LaneDetectionMsg
@@ -90,184 +88,9 @@ from autoiq_msgs.msg import LocalLaneData, Lane
 
 from mapping.core.lane_fitting import LaneDetector
 from mapping.core.local_lane_estimator import LocalLaneEstimator
-from mapping.core.boundary_extractor import (
-    extract_boundaries,
-    draw_boundary_overlay,
-    boundary_to_base_link,
-)
-from mapping.utils.ipm_transform import convert_to_ipm
-from perception.data_classes.semantic_labels import SEMANTIC_BY_NAME
+from mapping.core.boundary_extractor import BoundaryExtractor, BoundaryExtractionResult
 
 from cv_bridge import CvBridge
-
-
-# Semantic class IDs
-ROAD_ID = SEMANTIC_BY_NAME['road']
-ROAD_LINE_ID = SEMANTIC_BY_NAME['road_line']
-
-
-# ============================================================================
-# Boundary Extractor
-# ============================================================================
-
-
-@dataclass
-class BoundaryExtractionResult:
-    """Result from boundary extraction."""
-    left_boundary: Optional[np.ndarray] = None   # (N, 2) x, y in base_link
-    right_boundary: Optional[np.ndarray] = None  # (N, 2) x, y in base_link
-    debug_image: Optional[np.ndarray] = None     # BGR debug visualization
-    valid: bool = False
-
-
-class BoundaryExtractor:
-    """
-    Extracts road boundaries from semantic segmentation images.
-
-    Creates a Bird's Eye View (BEV) using IPM transform, then uses sliding
-    window algorithm to extract left and right road boundaries.
-
-    Usage:
-        extractor = BoundaryExtractor()
-        extractor.set_camera_params(fov=90, pitch=5, height=1.5)
-        result = extractor.extract(semantic_img)
-    """
-
-    def __init__(
-        self,
-        bev_x_range: Tuple[float, float] = (5.0, 35.0),
-        bev_y_range: Tuple[float, float] = (-15.0, 15.0),
-        pixels_per_meter: float = 10.0,
-    ):
-        """
-        Initialize the boundary extractor.
-
-        Args:
-            bev_x_range: Forward range for BEV transform (meters)
-            bev_y_range: Lateral range for BEV transform (meters)
-            pixels_per_meter: BEV resolution
-        """
-        self.bev_x_range = bev_x_range
-        self.bev_y_range = bev_y_range
-        self.pixels_per_meter = pixels_per_meter
-
-        # Compute BEV dimensions
-        x_span = bev_x_range[1] - bev_x_range[0]
-        y_span = bev_y_range[1] - bev_y_range[0]
-        self.bev_height = int(x_span * pixels_per_meter)
-        self.bev_width = int(y_span * pixels_per_meter)
-
-        # Camera parameters (set via set_camera_params)
-        self.camera_fov: Optional[float] = None
-        self.camera_pitch: Optional[float] = None
-        self.camera_height: Optional[float] = None
-
-    def set_camera_params(
-        self,
-        fov: float,
-        pitch: float,
-        camera_height: float,
-    ):
-        """Set camera extrinsics for IPM transform."""
-        self.camera_fov = fov
-        self.camera_pitch = pitch
-        self.camera_height = camera_height
-
-    def extract(self, semantic_img: np.ndarray) -> BoundaryExtractionResult:
-        """
-        Extract road boundaries from semantic segmentation image.
-
-        Args:
-            semantic_img: Mono8 semantic segmentation image
-
-        Returns:
-            BoundaryExtractionResult with left/right boundaries in base_link
-        """
-        result = BoundaryExtractionResult()
-
-        if self.camera_fov is None:
-            return result
-
-        # 1. Create masks from semantic image
-        # Drivable area = road + road_line
-        drivable_mask = ((semantic_img == ROAD_ID) | (semantic_img == ROAD_LINE_ID)).astype(np.uint8) * 255
-
-        # Observed area = any pixel that has a semantic label (not unlabeled/0)
-        # This prevents FOV edges from being detected as road boundaries
-        observed_mask_raw = (semantic_img != 0).astype(np.uint8) * 255
-
-        # 2. Transform both masks to BEV using IPM
-        bev_drivable, _, _ = convert_to_ipm(
-            image=drivable_mask,
-            fov=self.camera_fov,
-            pitch=self.camera_pitch,
-            camera_height=self.camera_height,
-            bev_x_range=self.bev_x_range,
-            bev_y_range=self.bev_y_range,
-            pixels_per_meter=self.pixels_per_meter,
-            interpolation=cv2.INTER_NEAREST,
-        )
-
-        bev_observed, _, _ = convert_to_ipm(
-            image=observed_mask_raw,
-            fov=self.camera_fov,
-            pitch=self.camera_pitch,
-            camera_height=self.camera_height,
-            bev_x_range=self.bev_x_range,
-            bev_y_range=self.bev_y_range,
-            pixels_per_meter=self.pixels_per_meter,
-            interpolation=cv2.INTER_NEAREST,
-        )
-
-        # 3. Transform BEV to match boundary_extractor convention
-        # convert_to_ipm output: rows=X (far at top), cols=Y (left at col 0)
-        # boundary_extractor expects: rows=Y (right at top), cols=X (behind at col 0)
-        # Transform: transpose, flip both axes
-        bev_for_extractor = bev_drivable.T[::-1, ::-1]
-        observed_for_extractor = bev_observed.T[::-1, ::-1]
-
-        # Grid dimensions after transform
-        grid_height, grid_width = bev_for_extractor.shape[:2]
-
-        # Grid origin for boundary_to_base_link (in extractor convention)
-        # After transform: row 0 = Y_min (right), col 0 = X_min (near)
-        grid_origin_x = self.bev_x_range[0]  # X at col 0
-        grid_origin_y = self.bev_y_range[0]  # Y at row 0
-
-        # 4. Extract road boundaries from transformed BEV mask
-        binary_mask = (bev_for_extractor > 127).astype(np.uint8)
-        observed_mask = (observed_for_extractor > 127).astype(np.uint8)
-
-        left, right, edge_img, l_diag, r_diag = extract_boundaries(binary_mask, observed_mask)
-
-        # 4. Convert pixel boundaries to base_link
-        left_pts = boundary_to_base_link(
-            left,
-            grid_cells=max(grid_height, grid_width),
-            origin_x=grid_origin_x,
-            origin_y=grid_origin_y,
-            resolution=1.0 / self.pixels_per_meter,
-            sample_step=3,
-        )
-        right_pts = boundary_to_base_link(
-            right,
-            grid_cells=max(grid_height, grid_width),
-            origin_x=grid_origin_x,
-            origin_y=grid_origin_y,
-            resolution=1.0 / self.pixels_per_meter,
-            sample_step=3,
-        )
-
-        result.left_boundary = left_pts
-        result.right_boundary = right_pts
-        result.valid = left_pts is not None or right_pts is not None
-
-        # 5. Generate debug image
-        result.debug_image = draw_boundary_overlay(
-            bev_for_extractor, left, right, l_diag, r_diag, edge_img
-        )
-
-        return result
 
 
 # ============================================================================
@@ -383,10 +206,10 @@ class LaneFittingNode(Node):
         # Lane estimation publishers (boundary-based estimation)
         self.local_lane_data_pub = self.create_publisher(
             LocalLaneData, '/mapping/local_lane_data', 10)
-        self.left_boundary_pub = self.create_publisher(
-            Path, '/mapping/boundary/left', 10)
-        self.right_boundary_pub = self.create_publisher(
-            Path, '/mapping/boundary/right', 10)
+        self.boundary_markers_pub = self.create_publisher(
+            MarkerArray, '/mapping/boundary_markers', 10)
+        self.lane_estimate_markers_pub = self.create_publisher(
+            MarkerArray, '/mapping/lane_estimate_markers', 10)
         self.boundary_debug_pub = self.create_publisher(
             Image, '/mapping/boundary_debug_image', 10)
 
@@ -745,11 +568,12 @@ class LaneFittingNode(Node):
         # 1. Extract boundaries using BoundaryExtractor
         boundary_result = self.boundary_extractor.extract(semantic_img)
 
-        # 2. Publish boundaries as Path messages
-        if boundary_result.left_boundary is not None:
-            self._publish_boundary_path(boundary_result.left_boundary, stamp, self.left_boundary_pub)
-        if boundary_result.right_boundary is not None:
-            self._publish_boundary_path(boundary_result.right_boundary, stamp, self.right_boundary_pub)
+        # 2. Publish boundaries as MarkerArray
+        self._publish_boundary_markers(
+            boundary_result.left_boundary,
+            boundary_result.right_boundary,
+            stamp,
+        )
 
         # 3. Publish boundary debug image
         if boundary_result.debug_image is not None:
@@ -765,7 +589,10 @@ class LaneFittingNode(Node):
             right_boundary=boundary_result.right_boundary,
         )
 
-        # 5. Publish local lane data
+        # 5. Publish lane estimate markers (inner boundaries in BLUE, intermediate in BLACK)
+        self._publish_lane_estimate_markers(lane_result, stamp)
+
+        # 6. Publish local lane data message
         self._publish_local_lane_data(lane_result, stamp)
 
     def _publish_local_lane_data(self, result, stamp):
@@ -805,22 +632,152 @@ class LaneFittingNode(Node):
             throttle_duration_sec=5.0)
         self.local_lane_data_pub.publish(msg)
 
-    def _publish_boundary_path(self, points: np.ndarray, stamp, publisher):
-        """Publish an Nx2 array of (x, y) base_link points as a Path."""
-        path_msg = Path()
-        path_msg.header.stamp = stamp
-        path_msg.header.frame_id = self.base_frame
+    def _publish_boundary_markers(
+        self,
+        left_pts: Optional[np.ndarray],
+        right_pts: Optional[np.ndarray],
+        stamp,
+    ):
+        """Publish drivable area boundaries as MarkerArray (RED color)."""
+        marker_array = MarkerArray()
 
-        for x, y in points:
-            ps = PoseStamped()
-            ps.header = path_msg.header
-            ps.pose.position.x = float(x)
-            ps.pose.position.y = float(y)
-            ps.pose.position.z = 0.0
-            ps.pose.orientation.w = 1.0
-            path_msg.poses.append(ps)
+        # Clear previous markers
+        clear_marker = Marker()
+        clear_marker.header.stamp = stamp
+        clear_marker.header.frame_id = self.base_frame
+        clear_marker.ns = 'drivable_boundaries'
+        clear_marker.id = 0
+        clear_marker.action = Marker.DELETEALL
+        marker_array.markers.append(clear_marker)
 
-        publisher.publish(path_msg)
+        # Left drivable boundary (RED)
+        if left_pts is not None and len(left_pts) > 1:
+            left_marker = Marker()
+            left_marker.header.stamp = stamp
+            left_marker.header.frame_id = self.base_frame
+            left_marker.ns = 'drivable_boundaries'
+            left_marker.id = 1
+            left_marker.type = Marker.LINE_STRIP
+            left_marker.action = Marker.ADD
+            left_marker.scale.x = 0.15  # Line width
+            left_marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)  # RED
+            left_marker.pose.orientation.w = 1.0
+
+            for x, y in left_pts:
+                left_marker.points.append(Point(x=float(x), y=float(y), z=0.1))
+
+            marker_array.markers.append(left_marker)
+
+        # Right drivable boundary (RED)
+        if right_pts is not None and len(right_pts) > 1:
+            right_marker = Marker()
+            right_marker.header.stamp = stamp
+            right_marker.header.frame_id = self.base_frame
+            right_marker.ns = 'drivable_boundaries'
+            right_marker.id = 2
+            right_marker.type = Marker.LINE_STRIP
+            right_marker.action = Marker.ADD
+            right_marker.scale.x = 0.15  # Line width
+            right_marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)  # RED
+            right_marker.pose.orientation.w = 1.0
+
+            for x, y in right_pts:
+                right_marker.points.append(Point(x=float(x), y=float(y), z=0.1))
+
+            marker_array.markers.append(right_marker)
+
+        self.boundary_markers_pub.publish(marker_array)
+
+    def _publish_lane_estimate_markers(self, result, stamp):
+        """Publish lane estimate markers.
+
+        Colors:
+        - BLUE: Inner lane boundaries (rightmost lane's right edge, leftmost lane's left edge)
+        - BLACK: Intermediate lane boundaries (between lanes)
+        """
+        marker_array = MarkerArray()
+
+        # Clear previous markers
+        clear_marker = Marker()
+        clear_marker.header.stamp = stamp
+        clear_marker.header.frame_id = self.base_frame
+        clear_marker.ns = 'lane_estimates'
+        clear_marker.id = 0
+        clear_marker.action = Marker.DELETEALL
+        marker_array.markers.append(clear_marker)
+
+        if not result.valid or len(result.lanes) == 0:
+            self.lane_estimate_markers_pub.publish(marker_array)
+            return
+
+        marker_id = 1
+
+        # Inner right boundary (rightmost lane's right edge) - BLUE
+        rightmost_lane = result.lanes[0]
+        if rightmost_lane.right_boundary is not None and len(rightmost_lane.right_boundary) > 1:
+            marker = Marker()
+            marker.header.stamp = stamp
+            marker.header.frame_id = self.base_frame
+            marker.ns = 'lane_estimates'
+            marker.id = marker_id
+            marker_id += 1
+            marker.type = Marker.LINE_STRIP
+            marker.action = Marker.ADD
+            marker.scale.x = 0.12
+            marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=1.0)  # BLUE
+            marker.pose.orientation.w = 1.0
+
+            for x, y in rightmost_lane.right_boundary:
+                marker.points.append(Point(x=float(x), y=float(y), z=0.15))
+
+            marker_array.markers.append(marker)
+
+        # Inner left boundary (leftmost lane's left edge) - BLUE
+        leftmost_lane = result.lanes[-1]
+        if leftmost_lane.left_boundary is not None and len(leftmost_lane.left_boundary) > 1:
+            marker = Marker()
+            marker.header.stamp = stamp
+            marker.header.frame_id = self.base_frame
+            marker.ns = 'lane_estimates'
+            marker.id = marker_id
+            marker_id += 1
+            marker.type = Marker.LINE_STRIP
+            marker.action = Marker.ADD
+            marker.scale.x = 0.12
+            marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=1.0)  # BLUE
+            marker.pose.orientation.w = 1.0
+
+            for x, y in leftmost_lane.left_boundary:
+                marker.points.append(Point(x=float(x), y=float(y), z=0.15))
+
+            marker_array.markers.append(marker)
+
+        # Intermediate lane boundaries - BLACK
+        # These are the boundaries between lanes (shared between adjacent lanes)
+        for i, lane in enumerate(result.lanes):
+            # Skip the rightmost lane's right boundary (already added as BLUE)
+            # Skip the leftmost lane's left boundary (already added as BLUE)
+            # Add left boundary of each lane (except leftmost which is blue)
+            if i < len(result.lanes) - 1:  # Not the leftmost lane
+                if lane.left_boundary is not None and len(lane.left_boundary) > 1:
+                    marker = Marker()
+                    marker.header.stamp = stamp
+                    marker.header.frame_id = self.base_frame
+                    marker.ns = 'lane_estimates'
+                    marker.id = marker_id
+                    marker_id += 1
+                    marker.type = Marker.LINE_STRIP
+                    marker.action = Marker.ADD
+                    marker.scale.x = 0.08
+                    marker.color = ColorRGBA(r=0.0, g=0.0, b=0.0, a=1.0)  # BLACK
+                    marker.pose.orientation.w = 1.0
+
+                    for x, y in lane.left_boundary:
+                        marker.points.append(Point(x=float(x), y=float(y), z=0.12))
+
+                    marker_array.markers.append(marker)
+
+        self.lane_estimate_markers_pub.publish(marker_array)
 
 
 def main(args=None):

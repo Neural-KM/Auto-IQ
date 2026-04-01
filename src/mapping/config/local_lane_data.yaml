@@ -1,15 +1,21 @@
 # Local Lane Data Generator Configuration
 # =====================================
 # These parameters define lane structure for the mapping package.
-# Used by LocalLaneDataGenerator to compute lane centerlines.
+# Used by LocalLaneEstimator to compute lane centerlines from detected boundaries.
 
 # Road geometry
 lane_count: 4                   # Number of lanes to divide road into
-total_road_width: 14.0          # Expected total road width (meters)
+total_road_width: 14.0          # Expected total road width (meters) - used when only one boundary visible
 
-# Safety clearances (meters)
-clearance_from_wall: 0.3        # Margin from right edge (kerb/wall)
-clearance_from_divider: 0.3     # Margin from left edge (center divider)
+# Drivable-to-lane buffer distances (meters)
+# The extracted boundary is the OUTER edge of the drivable area (road + road_line).
+# The actual lane boundaries are INSIDE this - there's buffer area (shoulder, etc.)
+# between the drivable edge and the first/last lane boundary.
+#
+# Right side (wall/kerb): drivable edge -> rightmost lane boundary
+# Left side (divider): drivable edge -> leftmost lane boundary
+clearance_from_wall: 3.3        # Buffer from right drivable edge to rightmost lane (meters)
+clearance_from_divider: 1.0     # Buffer from left drivable edge to leftmost lane (meters)
 
 # Validation thresholds
 min_road_width: 10.0            # Minimum valid road width (meters)
