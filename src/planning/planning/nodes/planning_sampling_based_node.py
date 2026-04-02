@@ -72,8 +72,7 @@ class PlanningNode(Node):
         self.traj_pub = self.create_publisher(Trajectory, '/planning/trajectory', 1)
         self.global_route_pub = self.create_publisher(Path, '/planning/global_route', 1)
         self.cspace_pub = self.create_publisher(OccupancyGrid, '/planning/cspace_costmap', 1)
-        self.skeleton_pub = self.create_publisher(OccupancyGrid, '/planning/skeleton', 1)
-        
+
         # --- Timer Loop (10 Hz) ---
         self.create_timer(0.1, self.planning_loop)
         self.get_logger().info('Discrete sampling Planner Ready.')

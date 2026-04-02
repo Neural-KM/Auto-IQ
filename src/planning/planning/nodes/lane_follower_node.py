@@ -20,11 +20,13 @@ Topics published:
 """
 
 import math
+import os
 import numpy as np
+import yaml
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from nav_msgs.msg import Path, Odometry
 from geometry_msgs.msg import PoseStamped
@@ -34,16 +36,15 @@ from autoiq_common.types import VehicleState
 from autoiq_common.types import TrajectoryPoint as TrajectoryPointDC
 from autoiq_common.converters import vehicle_state_from_odometry
 
-from planning.core.road_knowledge import RoadKnowledge
-
 
 class LaneFollowerNode(Node):
     def __init__(self):
         super().__init__('lane_follower_node')
 
         # --- Road knowledge (from YAML) - for speed profile and lane selection ---
-        self.road_knowledge = RoadKnowledge.from_yaml(RoadKnowledge.default_path())
-        self.get_logger().info(f'Road knowledge: {self.road_knowledge}')
+        self.road_knowledge = self._load_road_knowledge()
+        self.get_logger().info(f"Road knowledge: preferred_lane={self.road_knowledge['preferred_lane']}, "
+                               f"local_follow_speed={self.road_knowledge['local_follow_speed']} km/h")
 
         # --- State ---
         self.vehicle_state = VehicleState()
@@ -75,6 +76,25 @@ class LaneFollowerNode(Node):
         # --- Timer (10 Hz) ---
         self.create_timer(0.1, self._loop)
         self.get_logger().info('Lane Follower Node ready (using EstimatedLanes message)')
+
+    def _load_road_knowledge(self) -> Dict[str, Any]:
+        """Load road knowledge config from YAML file."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(here, os.pardir, os.pardir, 'config', 'road_knowledge.yaml')
+
+        defaults = {
+            'preferred_lane': 1,
+            'local_follow_speed': 25.0,
+            'curvature_speed_factor': 2.0,
+        }
+
+        try:
+            with open(config_path, 'r') as f:
+                data = yaml.safe_load(f) or {}
+            return {**defaults, **data}
+        except Exception as e:
+            self.get_logger().warn(f'Failed to load road_knowledge.yaml: {e}. Using defaults.')
+            return defaults
 
     # ==================== Callbacks ============================
 
@@ -142,7 +162,7 @@ class LaneFollowerNode(Node):
             return None
 
         # Get preferred lane index from road knowledge
-        preferred_idx = self.road_knowledge.preferred_lane
+        preferred_idx = self.road_knowledge['preferred_lane']
 
         # Clamp to available lanes
         if preferred_idx >= len(self._estimated_lanes.lanes):
@@ -186,8 +206,8 @@ class LaneFollowerNode(Node):
         if n < 2:
             return []
 
-        target_v = self.road_knowledge.local_follow_speed / 3.6
-        curv_factor = self.road_knowledge.curvature_speed_factor
+        target_v = self.road_knowledge['local_follow_speed'] / 3.6
+        curv_factor = self.road_knowledge['curvature_speed_factor']
 
         dx = np.diff(midline_map[:, 0])
         dy = np.diff(midline_map[:, 1])

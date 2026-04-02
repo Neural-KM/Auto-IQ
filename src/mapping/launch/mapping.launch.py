@@ -39,15 +39,6 @@ def generate_launch_description():
             'enable_lane_debug_viz', default_value='true',
             description='Enable lane fitting debug BEV image publishing'
         ),
-        # Lane estimation parameters (for boundary-based estimation)
-        DeclareLaunchArgument(
-            'lane_count', default_value='4',
-            description='Expected number of lanes for boundary-based estimation'
-        ),
-        DeclareLaunchArgument(
-            'total_road_width', default_value='22.0',
-            description='Expected total road width in meters'
-        ),
 
         # ==================== IPM Node (Occupancy Grid) ====================
         # Publishes:
@@ -86,9 +77,6 @@ def generate_launch_description():
                 # Grid params must match IPM node
                 'grid_size': LaunchConfiguration('grid_size'),
                 'resolution': LaunchConfiguration('resolution'),
-                # Lane estimation params
-                'lane_count': LaunchConfiguration('lane_count'),
-                'total_road_width': LaunchConfiguration('total_road_width'),
             }],
         ),
     ])

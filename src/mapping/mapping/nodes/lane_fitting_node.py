@@ -74,7 +74,6 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 import tf2_ros
-from ament_index_python.packages import get_package_share_directory
 
 from sensor_msgs.msg import Image, CameraInfo
 from visualization_msgs.msg import Marker, MarkerArray
@@ -222,39 +221,12 @@ class LaneFittingNode(Node):
     def _load_lane_config(self) -> Dict[str, Any]:
         """Load lane structure configuration from YAML file."""
         config_file = self.get_parameter('lane_config_file').value
+        config_path = FilePath(__file__).resolve().parents[2] / config_file
 
-        # Try to find config file relative to package share directory
-        try:
-            pkg_share = get_package_share_directory('mapping')
-            config_path = FilePath(pkg_share) / config_file
-        except Exception:
-            # Fallback to relative path from source
-            config_path = FilePath(__file__).resolve().parents[2] / config_file
-
-        # Default config if file not found
-        default_config = {
-            'lane_count': 4,
-            'total_road_width': 14.0,
-            'clearance_from_wall': 0.3,
-            'clearance_from_divider': 0.3,
-            'min_road_width': 10.0,
-            'max_road_width': 20.0,
-        }
-
-        if not config_path.exists():
-            self.get_logger().warn(
-                f'Lane config file not found: {config_path}. Using defaults.')
-            return default_config
-
-        try:
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f)
-            self.get_logger().info(f'Loaded lane config from: {config_path}')
-            # Merge with defaults for any missing keys
-            return {**default_config, **config}
-        except Exception as e:
-            self.get_logger().error(f'Failed to load lane config: {e}. Using defaults.')
-            return default_config
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        self.get_logger().info(f'Loaded lane config from: {config_path}')
+        return config
 
     # ------------------------------------------------------------------ #
     #  Lane Detector Initialization                                       #
@@ -430,11 +402,9 @@ class LaneFittingNode(Node):
         det_msg.lane_count = len(lane_fits)
         det_msg.poly_coeffs_flat = []
         det_msg.lane_confidences = []
-        det_msg.lane_pixel_counts = []
         for coeffs in lane_fits:
             det_msg.poly_coeffs_flat.extend(coeffs.tolist())
             det_msg.lane_confidences.append(float(result.confidence))
-            det_msg.lane_pixel_counts.append(0)
 
         bev = result.bev_params
         det_msg.bev_width = bev['width']

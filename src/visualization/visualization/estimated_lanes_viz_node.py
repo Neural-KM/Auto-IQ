@@ -101,7 +101,8 @@ class EstimatedLanesVisualizerNode(Node):
             return
 
         marker_id = 1
-        lifetime_ns = int(self.marker_lifetime * 1e9)
+        lifetime_sec = int(self.marker_lifetime)
+        lifetime_nsec = int((self.marker_lifetime - lifetime_sec) * 1e9)
 
         # 1. Draw road boundaries (RED - drivable area edges)
         if len(msg.left_boundary) >= 2:
@@ -113,7 +114,8 @@ class EstimatedLanesVisualizerNode(Node):
                 marker_id=marker_id,
                 color=ROAD_BOUNDARY_COLOR,
                 width=self.road_boundary_width,
-                lifetime_ns=lifetime_ns,
+                lifetime_sec=lifetime_sec,
+                lifetime_nsec=lifetime_nsec,
                 z_offset=0.05
             )
             marker_array.markers.append(left_marker)
@@ -128,7 +130,8 @@ class EstimatedLanesVisualizerNode(Node):
                 marker_id=marker_id,
                 color=ROAD_BOUNDARY_COLOR,
                 width=self.road_boundary_width,
-                lifetime_ns=lifetime_ns,
+                lifetime_sec=lifetime_sec,
+                lifetime_nsec=lifetime_nsec,
                 z_offset=0.05
             )
             marker_array.markers.append(right_marker)
@@ -157,7 +160,8 @@ class EstimatedLanesVisualizerNode(Node):
                     marker_id=marker_id,
                     color=color,
                     width=width,
-                    lifetime_ns=lifetime_ns,
+                    lifetime_sec=lifetime_sec,
+                    lifetime_nsec=lifetime_nsec,
                     z_offset=0.08 if is_inner_right else 0.02
                 )
                 marker_array.markers.append(right_marker)
@@ -177,7 +181,8 @@ class EstimatedLanesVisualizerNode(Node):
                     marker_id=marker_id,
                     color=color,
                     width=width,
-                    lifetime_ns=lifetime_ns,
+                    lifetime_sec=lifetime_sec,
+                    lifetime_nsec=lifetime_nsec,
                     z_offset=0.08 if is_inner_left else 0.02
                 )
                 marker_array.markers.append(left_marker)
@@ -193,7 +198,8 @@ class EstimatedLanesVisualizerNode(Node):
                     marker_id=marker_id,
                     color=LANE_CENTERLINE_COLOR,
                     width=self.centerline_width,
-                    lifetime_ns=lifetime_ns,
+                    lifetime_sec=lifetime_sec,
+                    lifetime_nsec=lifetime_nsec,
                     z_offset=0.1
                 )
                 marker_array.markers.append(centerline_marker)
@@ -220,7 +226,8 @@ class EstimatedLanesVisualizerNode(Node):
                 text_marker.text = f'L{lane_idx}'
                 if lane.is_partial:
                     text_marker.text += ' (P)'
-                text_marker.lifetime.nanosec = lifetime_ns
+                text_marker.lifetime.sec = lifetime_sec
+                text_marker.lifetime.nanosec = lifetime_nsec
                 marker_array.markers.append(text_marker)
                 marker_id += 1
 
@@ -239,7 +246,8 @@ class EstimatedLanesVisualizerNode(Node):
         status_marker.scale.z = 0.5
         status_marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=0.8)
         status_marker.text = f'Lanes: {msg.lane_count} | Width: {msg.road_width_avg:.1f}m'
-        status_marker.lifetime.nanosec = lifetime_ns
+        status_marker.lifetime.sec = lifetime_sec
+        status_marker.lifetime.nanosec = lifetime_nsec
         marker_array.markers.append(status_marker)
 
         self.marker_pub.publish(marker_array)
@@ -253,7 +261,8 @@ class EstimatedLanesVisualizerNode(Node):
         marker_id: int,
         color: tuple,
         width: float,
-        lifetime_ns: int,
+        lifetime_sec: int,
+        lifetime_nsec: int,
         z_offset: float = 0.0
     ) -> Marker:
         """Create a LINE_STRIP marker from a list of Points."""
@@ -274,7 +283,8 @@ class EstimatedLanesVisualizerNode(Node):
             a=float(color[3])
         )
 
-        marker.lifetime.nanosec = lifetime_ns
+        marker.lifetime.sec = lifetime_sec
+        marker.lifetime.nanosec = lifetime_nsec
 
         for pt in points:
             p = Point()
