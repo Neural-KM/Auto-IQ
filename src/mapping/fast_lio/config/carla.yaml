@@ -1,0 +1,47 @@
+/**:
+    ros__parameters:
+        feature_extract_enable: false
+        point_filter_num: 3
+        max_iteration: 3
+        filter_size_surf: 0.5
+        filter_size_map: 0.5
+        cube_side_length: 1000.0
+        runtime_pos_log_enable: false
+        map_file_path: "./carla_map.pcd"
+
+        common:
+            lid_topic: "/carla/ego_vehicle/sensor/lidar/at128_front/point_cloud"
+            imu_topic: "/carla/ego_vehicle/sensor/imu/imu/data"
+            time_sync_en: false
+
+        preprocess:
+            lidar_type: 2                # 2 for Velodyne-like LiDAR
+            scan_line: 128               # AT128 has 128 lines
+            blind: 0.5
+            timestamp_unit: 0            # 0: second
+            scan_rate: 10
+
+        mapping:
+            acc_cov: 0.1
+            gyr_cov: 0.1
+            b_acc_cov: 0.0001
+            b_gyr_cov: 0.0001
+            fov_degree: 360.0
+            det_range: 100.0
+            extrinsic_est_en: true
+            extrinsic_T: [ 0.0, 0.0, 0.0 ]
+            extrinsic_R: [ 1., 0., 0.,
+                           0., 1., 0.,
+                           0., 0., 1. ]
+
+        publish:
+            path_en: true
+            effect_map_en: false
+            map_en: true
+            scan_publish_en: true
+            dense_publish_en: false
+            scan_bodyframe_pub_en: true
+
+        pcd_save:
+            pcd_save_en: true
+            interval: -1
