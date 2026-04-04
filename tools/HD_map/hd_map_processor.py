@@ -44,6 +44,10 @@ Output:
     - global_lane_map.png   : Global lane map with trajectory (if --visualize)
     - lane_splines.png      : Fitted lane splines visualization (if --visualize)
 """
+"""
+Ref:
+Carla lidar: x y z and intensity and fast-lio expected ring and time format
+"""
 
 import argparse
 import json
