@@ -72,6 +72,7 @@ import yaml
 
 import rclpy
 from rclpy.node import Node
+from ament_index_python.packages import get_package_share_directory
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 import tf2_ros
 
@@ -221,7 +222,11 @@ class LaneFittingNode(Node):
     def _load_lane_config(self) -> Dict[str, Any]:
         """Load lane structure configuration from YAML file."""
         config_file = self.get_parameter('lane_config_file').value
-        config_path = FilePath(__file__).resolve().parents[2] / config_file
+        config_path = FilePath(get_package_share_directory('mapping')) / config_file
+
+        if not config_path.exists():
+            self.get_logger().error(f'Lane config not found: {config_path}')
+            raise FileNotFoundError(f'Lane config not found: {config_path}')
 
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
