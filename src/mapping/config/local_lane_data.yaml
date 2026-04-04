@@ -21,8 +21,7 @@ clearance_from_divider: 1.0     # Buffer from left drivable edge to leftmost lan
 min_road_width: 10.0            # Minimum valid road width (meters)
 max_road_width: 20.0            # Maximum valid road width (meters)
 
-# Processing parameters
-resample_spacing: 0.5           # Distance between resampled points (meters)
-min_forward_range: 3.0          # Minimum useful forward span (meters)
-near_field_skip: 1.0            # Skip points closer than this (meters)
-smoothing_window: 7             # Moving average window size (samples)
+# BEV (Bird's Eye View) transform parameters
+bev_x_range: [5.0, 35.0]        # Forward range for BEV transform (meters)
+bev_y_range: [-15.0, 15.0]      # Lateral range for BEV transform (meters)
+pixels_per_meter: 10.0          # BEV resolution

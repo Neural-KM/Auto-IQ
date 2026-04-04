@@ -64,7 +64,6 @@ Changelog:
 """
 
 import numpy as np
-from dataclasses import dataclass
 from pathlib import Path as FilePath
 from typing import Optional, Dict, Any
 
@@ -87,7 +86,7 @@ from autoiq_msgs.msg import EstimatedLanes, EstimatedLane
 
 from mapping.core.lane_fitting import LaneDetector
 from mapping.core.local_lane_estimator import LocalLaneEstimator
-from mapping.core.boundary_extractor import BoundaryExtractor, BoundaryExtractionResult
+from mapping.core.boundary_extractor import BoundaryExtractor
 
 from cv_bridge import CvBridge
 
@@ -170,17 +169,21 @@ class LaneFittingNode(Node):
 
         # ==================== Boundary Extractor ====================
         # Extracts road boundaries from semantic image using IPM + sliding window
-        self.boundary_extractor = BoundaryExtractor()
+        self.boundary_extractor = BoundaryExtractor(
+            bev_x_range=tuple(lane_config['bev_x_range']),
+            bev_y_range=tuple(lane_config['bev_y_range']),
+            pixels_per_meter=lane_config['pixels_per_meter'],
+        )
 
         # ==================== Lane Estimator (from boundaries) ====================
         # Uses config from YAML file - estimates lanes from road boundaries
         self.lane_estimator = LocalLaneEstimator(
             lane_count=lane_config['lane_count'],
             total_road_width=lane_config['total_road_width'],
-            clearance_from_wall=lane_config.get('clearance_from_wall', 0.3),
-            clearance_from_divider=lane_config.get('clearance_from_divider', 0.3),
-            min_road_width=lane_config.get('min_road_width', 10.0),
-            max_road_width=lane_config.get('max_road_width', 20.0),
+            clearance_from_wall=lane_config['clearance_from_wall'],
+            clearance_from_divider=lane_config['clearance_from_divider'],
+            min_road_width=lane_config['min_road_width'],
+            max_road_width=lane_config['max_road_width'],
         )
 
         # ==================== Subscribers ====================
@@ -351,8 +354,6 @@ class LaneFittingNode(Node):
         if not self._camera_info_received or not self._camera_tf_received:
             return
 
-        cam = self._camera_params
-
         # Run lane fitting (polynomial detection from road_line markings)
         if self._lane_detector_initialized:
             self._run_lane_fitting(semantic_img, msg.header)
@@ -361,9 +362,6 @@ class LaneFittingNode(Node):
         self._estimate_lanes_from_boundaries(
             semantic_img=semantic_img,
             stamp=msg.header.stamp,
-            camera_fov=cam['fov_deg'],
-            camera_pitch=cam['pitch_deg'],
-            camera_height=cam['height_m'],
         )
 
     # ------------------------------------------------------------------ #
@@ -527,9 +525,6 @@ class LaneFittingNode(Node):
         self,
         semantic_img: np.ndarray,
         stamp,
-        camera_fov: float,
-        camera_pitch: float,
-        camera_height: float,
     ):
         """Estimate lanes from road boundaries.
 

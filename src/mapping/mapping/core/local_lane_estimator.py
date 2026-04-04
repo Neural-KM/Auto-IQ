@@ -89,20 +89,27 @@ class LocalLaneEstimator:
     a priori knowledge about expected road structure.
 
     Usage:
-        estimator = LocalLaneEstimator(lane_count=4, total_road_width=14.0)
+        estimator = LocalLaneEstimator(
+            lane_count=4,
+            total_road_width=14.0,
+            clearance_from_wall=1.0,
+            clearance_from_divider=1.0,
+            min_road_width=10.0,
+            max_road_width=20.0,
+        )
         result = estimator.estimate_from_boundaries(left_pts, right_pts)
     """
 
     def __init__(
         self,
-        # Lane structure parameters (a priori knowledge for estimation)
-        lane_count: int = 4,
-        total_road_width: float = 14.0,
-        clearance_from_wall: float = 1.0,
-        clearance_from_divider: float = 1.0,
-        min_road_width: float = 10.0,
-        max_road_width: float = 20.0,
-        # Lane generation parameters
+        # Lane structure parameters (required - a priori knowledge)
+        lane_count: int,
+        total_road_width: float,
+        clearance_from_wall: float,
+        clearance_from_divider: float,
+        min_road_width: float,
+        max_road_width: float,
+        # Lane generation parameters (algorithm tuning)
         resample_spacing: float = 0.5,
         min_forward_range: float = 3.0,
         near_field_skip: float = 1.0,

@@ -452,7 +452,11 @@ class BoundaryExtractor:
     must account for the buffer area between drivable edge and actual lanes.
 
     Usage:
-        extractor = BoundaryExtractor()
+        extractor = BoundaryExtractor(
+            bev_x_range=(5.0, 35.0),
+            bev_y_range=(-15.0, 15.0),
+            pixels_per_meter=10.0,
+        )
         extractor.set_camera_params(fov=90, pitch=5, height=1.5)
         result = extractor.extract(semantic_img)
     """
@@ -463,9 +467,9 @@ class BoundaryExtractor:
 
     def __init__(
         self,
-        bev_x_range: Tuple[float, float] = (5.0, 35.0),
-        bev_y_range: Tuple[float, float] = (-15.0, 15.0),
-        pixels_per_meter: float = 10.0,
+        bev_x_range: Tuple[float, float],
+        bev_y_range: Tuple[float, float],
+        pixels_per_meter: float,
     ):
         """
         Initialize the boundary extractor.
