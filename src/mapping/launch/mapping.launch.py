@@ -74,9 +74,6 @@ def generate_launch_description():
                 'use_sim_time': True,
                 'semantic_source': LaunchConfiguration('semantic_source'),
                 'enable_debug_viz': LaunchConfiguration('enable_lane_debug_viz'),
-                # Grid params must match IPM node
-                'grid_size': LaunchConfiguration('grid_size'),
-                'resolution': LaunchConfiguration('resolution'),
             }],
         ),
     ])
