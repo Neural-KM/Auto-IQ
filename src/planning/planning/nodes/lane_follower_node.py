@@ -20,12 +20,12 @@ Topics published:
 """
 
 import math
-import os
 import numpy as np
 import yaml
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from ament_index_python.packages import get_package_share_directory
 from typing import List, Optional, Dict, Any
 
 from nav_msgs.msg import Path, Odometry
@@ -79,8 +79,7 @@ class LaneFollowerNode(Node):
 
     def _load_road_knowledge(self) -> Dict[str, Any]:
         """Load road knowledge config from YAML file."""
-        here = os.path.dirname(os.path.abspath(__file__))
-        config_path = os.path.join(here, os.pardir, os.pardir, 'config', 'road_knowledge.yaml')
+        config_path = f"{get_package_share_directory('planning')}/config/road_knowledge.yaml"
 
         defaults = {
             'preferred_lane': 1,
@@ -92,6 +91,9 @@ class LaneFollowerNode(Node):
             with open(config_path, 'r') as f:
                 data = yaml.safe_load(f) or {}
             return {**defaults, **data}
+        except FileNotFoundError:
+            self.get_logger().warn(f'road_knowledge.yaml not found at {config_path}. Using defaults.')
+            return defaults
         except Exception as e:
             self.get_logger().warn(f'Failed to load road_knowledge.yaml: {e}. Using defaults.')
             return defaults
