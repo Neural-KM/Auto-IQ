@@ -380,7 +380,8 @@ def draw_boundary_overlay(
 
 def boundary_to_base_link(
     result: BoundaryResult,
-    grid_cells: int,
+    grid_height: int,
+    grid_width: int,
     origin_x: float,
     origin_y: float,
     resolution: float,
@@ -412,8 +413,8 @@ def boundary_to_base_link(
 
     # Clip to valid grid range
     valid = (
-        (cols >= 0) & (cols < grid_cells) &
-        (rows >= 0) & (rows < grid_cells)
+        (cols >= 0) & (cols < grid_width) &
+        (rows >= 0) & (rows < grid_height)
     )
     cols = cols[valid]
     rows = rows[valid]
@@ -641,7 +642,8 @@ class BoundaryExtractor:
         if left.detected and not left_at_fov_edge:
             left_pts = boundary_to_base_link(
                 left,
-                grid_cells=max(grid_height, grid_width),
+                grid_height=grid_height,
+                grid_width=grid_width,
                 origin_x=grid_origin_x,
                 origin_y=grid_origin_y,
                 resolution=1.0 / self.pixels_per_meter,
@@ -652,7 +654,8 @@ class BoundaryExtractor:
         if right.detected and not right_at_fov_edge:
             right_pts = boundary_to_base_link(
                 right,
-                grid_cells=max(grid_height, grid_width),
+                grid_height=grid_height,
+                grid_width=grid_width,
                 origin_x=grid_origin_x,
                 origin_y=grid_origin_y,
                 resolution=1.0 / self.pixels_per_meter,
