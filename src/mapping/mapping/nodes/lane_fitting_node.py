@@ -404,10 +404,8 @@ class LaneFittingNode(Node):
 
         det_msg.lane_count = len(lane_fits)
         det_msg.poly_coeffs_flat = []
-        det_msg.lane_confidences = []
         for coeffs in lane_fits:
             det_msg.poly_coeffs_flat.extend(coeffs.tolist())
-            det_msg.lane_confidences.append(float(result.confidence))
 
         bev = result.bev_params
         det_msg.bev_width = bev['width']

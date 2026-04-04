@@ -15,10 +15,6 @@ float32 confidence
 int32 lane_count
 float64[] poly_coeffs_flat
 
-# Optional per-lane quality metadata; each array length should equal lane_count.
-float32[] lane_confidences
-int32[] lane_pixel_counts
-
 # BEV parameters for interpreting polynomial coefficients.
 # In BEV image coordinates: image X is lateral (vehicle Y), image Y is forward (vehicle X).
 int32 bev_width
