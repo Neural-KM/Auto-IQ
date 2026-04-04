@@ -99,7 +99,7 @@ def generate_launch_description():
     # Mapping
     mapping_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(mapping_pkg, 'launch', 'local_costmap.launch.py')
+            os.path.join(mapping_pkg, 'launch', 'mapping.launch.py')
         ),
         launch_arguments={'semantic_source': LaunchConfiguration('semantic_source')}.items(),
         condition=IfCondition(LaunchConfiguration('enable_mapping')),
