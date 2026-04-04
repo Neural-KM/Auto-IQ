@@ -43,7 +43,7 @@ def generate_launch_description():
         # ==================== IPM Node (Occupancy Grid) ====================
         # Publishes:
         #   /mapping/ipm_costmap (OccupancyGrid)
-        #   /mapping/ipm_debug_image (Image)
+        #   /mapping/debug/drop_skirt (Image)
         Node(
             package='mapping',
             executable='inverse_perspective_mapper_node_v2',
