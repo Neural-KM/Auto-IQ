@@ -32,8 +32,10 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
-from sensor_msgs.msg import Image, PointCloud2, PointField, CameraInfo
+from sensor_msgs.msg import Image, PointCloud2, PointField
 from std_msgs.msg import Header
+
+from autoiq_common import CameraParams, CameraParamsProvider
 
 import tf2_ros
 from tf2_ros import TransformException
@@ -103,24 +105,9 @@ class SemanticPointCloudNode(Node):
         self.hood_z_max = self.get_parameter('hood_z_max').value
         
         # ==================== State ====================
-        self.camera_info_received = False
-        self.camera_tf_received = False
         self.lidar_tf_received = False
         self.initialized = False
-        
-        # Camera intrinsics
-        self.fx = None
-        self.fy = None
-        self.cx = None
-        self.cy = None
-        self.img_width = None
-        self.img_height = None
-        
-        # Camera pose (from TF)
-        self.camera_x = None
-        self.camera_y = None
-        self.camera_z = None
-        
+
         # LiDAR pose (from TF)
         self.lidar_x = None
         self.lidar_y = None
@@ -132,11 +119,11 @@ class SemanticPointCloudNode(Node):
         
         # ==================== CV Bridge ====================
         self.cv_bridge = CvBridge()
-        
-        # ==================== TF2 ====================
+
+        # ==================== TF2 (for LiDAR only - camera handled by CameraParamsProvider) ====================
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-        
+
         # ==================== QoS ====================
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -144,16 +131,22 @@ class SemanticPointCloudNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
-        
+
+        # ==================== Camera Parameters (intrinsics + extrinsics) ====================
+        self.camera = CameraParamsProvider(
+            node=self,
+            camera_info_topic=camera_info_topic,
+            base_frame='ego_vehicle',
+            camera_frame=self.camera_frame,
+            on_ready=self._on_camera_ready,
+            qos=sensor_qos,
+        )
+
         # ==================== Subscribers ====================
-        self.camera_info_sub = self.create_subscription(
-            CameraInfo, camera_info_topic,
-            self.camera_info_callback, sensor_qos)
-        
         self.semantic_sub = self.create_subscription(
             Image, semantic_topic,
             self.semantic_callback, sensor_qos)
-        
+
         self.lidar_sub = self.create_subscription(
             PointCloud2, lidar_topic,
             self.lidar_callback, sensor_qos)
@@ -175,79 +168,62 @@ class SemanticPointCloudNode(Node):
         self.get_logger().info(f'  Output: {output_topic}')
     
     # ==================== Initialization ====================
-    
+
+    def _on_camera_ready(self, params: CameraParams):
+        """Called when camera intrinsics and extrinsics are available."""
+        self.get_logger().info(
+            f'Camera ready: {params.width}x{params.height}, '
+            f'fx={params.fx:.1f}, pos=({params.x_m:.2f}, {params.y_m:.2f}, {params.height_m:.2f})')
+        self._try_complete_initialization()
+
     def _check_initialization(self):
         """Check if all required data is available."""
         if self.initialized:
             return
-        
-        # Try to get TF transforms
-        if not self.camera_tf_received:
-            self._try_get_camera_tf()
-        
+
+        # Try to get camera extrinsics (if intrinsics already received)
+        if self.camera.intrinsics_received and not self.camera.extrinsics_received:
+            self.camera.try_get_extrinsics()
+
         if not self.lidar_tf_received:
             self._try_get_lidar_tf()
-        
-        # Check if ready
-        if self.camera_info_received and self.camera_tf_received and self.lidar_tf_received:
-            self.initialized = True
-            self.init_timer.cancel()
-            self.get_logger().info('Semantic PointCloud Node fully initialized!')
-    
-    def _try_get_camera_tf(self) -> bool:
-        """Try to get camera transform from TF."""
-        try:
-            transform = self.tf_buffer.lookup_transform(
-                'ego_vehicle', self.camera_frame, rclpy.time.Time(),
-                timeout=rclpy.duration.Duration(seconds=0.05))
-            
-            self.camera_x = transform.transform.translation.x
-            self.camera_y = transform.transform.translation.y
-            self.camera_z = transform.transform.translation.z
-            
-            self.camera_tf_received = True
-            self.get_logger().info(
-                f'Camera TF: x={self.camera_x:.2f}, y={self.camera_y:.2f}, z={self.camera_z:.2f}')
-            return True
-        except TransformException:
-            return False
-    
+
+        self._try_complete_initialization()
+
     def _try_get_lidar_tf(self) -> bool:
         """Try to get LiDAR transform from TF."""
         try:
             transform = self.tf_buffer.lookup_transform(
                 'ego_vehicle', self.lidar_frame, rclpy.time.Time(),
                 timeout=rclpy.duration.Duration(seconds=0.05))
-            
+
             self.lidar_x = transform.transform.translation.x
             self.lidar_y = transform.transform.translation.y
             self.lidar_z = transform.transform.translation.z
-            
+
             self.lidar_tf_received = True
             self.get_logger().info(
                 f'LiDAR TF: x={self.lidar_x:.2f}, y={self.lidar_y:.2f}, z={self.lidar_z:.2f}')
             return True
         except TransformException:
             return False
-    
-    # ==================== Callbacks ====================
-    
-    def camera_info_callback(self, msg: CameraInfo):
-        """Store camera intrinsics."""
-        if self.camera_info_received:
+
+    def _try_complete_initialization(self):
+        """Complete initialization once all data is available."""
+        if self.initialized:
             return
-        
-        self.img_width = msg.width
-        self.img_height = msg.height
-        self.fx = msg.k[0]
-        self.fy = msg.k[4]
-        self.cx = msg.k[2]
-        self.cy = msg.k[5]
-        
-        self.camera_info_received = True
-        self.get_logger().info(
-            f'CameraInfo: {self.img_width}x{self.img_height}, fx={self.fx:.1f}')
-    
+
+        if not self.camera.ready:
+            return
+        if not self.lidar_tf_received:
+            return
+
+        self.initialized = True
+        self.init_timer.cancel()
+        self.get_logger().info('Semantic PointCloud Node fully initialized!')
+
+    # ==================== Callbacks ====================
+
     def semantic_callback(self, msg: Image):
         """Store latest semantic segmentation image."""
         # Convert to numpy array via cv_bridge
@@ -278,54 +254,55 @@ class SemanticPointCloudNode(Node):
             self._process_and_publish()
     
     # ==================== Processing ====================
-    
+
     def _process_and_publish(self):
         """Project LiDAR points, label with semantic classes, and publish."""
         if self.latest_lidar is None or self.latest_semantic is None:
             return
-        
+
         lidar_points = self.latest_lidar
         semantic_img = self.latest_semantic
-        
+        params = self.camera.params
+
         if len(lidar_points) == 0:
             return
-        
+
         # Take only x, y, z
         points_xyz = lidar_points[:, :3] if lidar_points.shape[1] >= 3 else lidar_points
-        
+
         # 1. Transform LiDAR points to Vehicle Frame
         lidar_offset = np.array([self.lidar_x, self.lidar_y, self.lidar_z])
         points_veh = points_xyz + lidar_offset
-        
+
         # 2. Transform to Camera Frame
-        camera_offset = np.array([self.camera_x, self.camera_y, self.camera_z])
+        camera_offset = np.array([params.x_m, params.y_m, params.height_m])
         pts_rel = points_veh - camera_offset
-        
+
         # Rotate: Vehicle (X-forward, Y-left, Z-up) -> Camera (X-right, Y-down, Z-forward)
         points_cam = np.zeros_like(pts_rel)
         points_cam[:, 0] = -pts_rel[:, 1]  # cam_x = -veh_y
         points_cam[:, 1] = -pts_rel[:, 2]  # cam_y = -veh_z
         points_cam[:, 2] = pts_rel[:, 0]   # cam_z = veh_x
-        
+
         # 3. Filter points in front of camera
         front_mask = points_cam[:, 2] > 0.5  # At least 0.5m in front
         points_cam_front = points_cam[front_mask]
         points_veh_front = points_veh[front_mask]
-        
+
         if len(points_cam_front) == 0:
             return
-        
+
         # 4. Project to image plane (keep float for sub-pixel accuracy)
         z = points_cam_front[:, 2]
-        u_float = (points_cam_front[:, 0] * self.fx / z) + self.cx
-        v_float = (points_cam_front[:, 1] * self.fy / z) + self.cy
-        
+        u_float = (points_cam_front[:, 0] * params.fx / z) + params.cx
+        v_float = (points_cam_front[:, 1] * params.fy / z) + params.cy
+
         # 5. Filter points within image bounds (with margin for neighborhood sampling)
         # Add +1 to margin to account for rounding (e.g., 1277.6 rounds to 1278)
         margin = self.sample_radius + 1
         in_image_mask = (
-            (u_float >= margin) & (u_float < self.img_width - margin) &
-            (v_float >= margin) & (v_float < self.img_height - margin)
+            (u_float >= margin) & (u_float < params.width - margin) &
+            (v_float >= margin) & (v_float < params.height - margin)
         )
         
         u_valid_float = u_float[in_image_mask]
@@ -474,9 +451,6 @@ class SemanticPointCloudNode(Node):
     
     def _parse_pointcloud2(self, msg: PointCloud2) -> np.ndarray:
         """Parse PointCloud2 message to numpy array."""
-        # Get field offsets
-        field_names = [f.name for f in msg.fields]
-        
         # Standard field offsets for XYZI point cloud
         x_offset = 0
         y_offset = 4

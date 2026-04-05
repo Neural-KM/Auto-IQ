@@ -7,6 +7,7 @@ Shared types and converters for the Auto-IQ stack.
 This package provides:
 - Pure Python dataclasses for internal logic (types.py)
 - Conversion functions between Python types and ROS messages (converters.py)
+- Camera parameter utilities (camera_params.py)
 """
 
 from autoiq_common.types import (
@@ -35,6 +36,11 @@ from autoiq_common.utils import (
     yaw_to_quaternion,
 )
 
+from autoiq_common.camera_params import (
+    CameraParams,
+    CameraParamsProvider,
+)
+
 __all__ = [
     # Types
     'VehicleState',
@@ -55,4 +61,7 @@ __all__ = [
     'obstacle_array_to_ros',
     'quaternion_to_yaw',
     'yaw_to_quaternion',
+    # Camera params
+    'CameraParams',
+    'CameraParamsProvider',
 ]

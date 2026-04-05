@@ -7,10 +7,9 @@ ROS2 node for perception (Object Detection).
 Uses the Perception class directly (same as original PerceptionManager).
 
 Initialization Requirements (must all be received before processing starts):
-1. TF transform: ego_vehicle -> camera_frame
+1. Camera intrinsics (CameraInfo) + extrinsics (TF) via CameraParamsProvider
 2. TF transform: ego_vehicle -> lidar_frame
-3. CameraInfo message (intrinsics)
-4. CARLA connection (for ground truth obstacles)
+3. CARLA connection (for ground truth obstacles)
 
 Publishes:
 - /perception/obstacles (ObstacleArray) - detected obstacles from YOLO + LiDAR
@@ -25,9 +24,10 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 import struct
 
 
-from sensor_msgs.msg import Image, CameraInfo, PointCloud2
+from sensor_msgs.msg import Image, PointCloud2
 
 from autoiq_msgs.msg import ObstacleArray
+from autoiq_common import CameraParams, CameraParamsProvider
 
 from cv_bridge import CvBridge
 import tf2_ros
@@ -42,13 +42,12 @@ import carla
 class PerceptionNode(Node):
     """
     ROS2 Perception Node.
-    
+
     Uses the Perception class directly (same as original PerceptionManager).
-    
+
     Initialization is gated - no processing occurs until:
-    - Camera TF transform is received
+    - Camera params are ready (intrinsics + extrinsics via CameraParamsProvider)
     - LiDAR TF transform is received (if using frustum filtering)
-    - CameraInfo is received
     """
     
     def __init__(self):
@@ -90,26 +89,9 @@ class PerceptionNode(Node):
         
         # ==================== Initialization State ====================
         # All must be True before processing starts
-        self.camera_info_received = False
-        self.camera_tf_received = False
         self.lidar_tf_received = False
         self.initialized = False
-        
-        # Camera intrinsics (from CameraInfo - standard ROS2 approach)
-        self.fx = None
-        self.fy = None
-        self.cx = None
-        self.cy = None
-        self.img_width = None
-        self.img_height = None
-        self.fov_deg = None
-        
-        # Camera pose (from TF - standard ROS2 approach)
-        self.camera_x = None
-        self.camera_y = None
-        self.camera_height = None
-        self.camera_pitch = None
-        
+
         # LiDAR pose (from TF)
         self.lidar_x = None
         self.lidar_y = None
@@ -127,7 +109,7 @@ class PerceptionNode(Node):
             self.get_logger().warn(f'Ground truth obstacles will not be available. ERROR:{e}')
 
         
-        # ==================== TF2 ====================
+        # ==================== TF2 (for LiDAR only - camera handled by CameraParamsProvider) ====================
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         
@@ -149,14 +131,18 @@ class PerceptionNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
-        
+
+        # ==================== Camera Parameters (intrinsics + extrinsics) ====================
+        self.camera = CameraParamsProvider(
+            node=self,
+            camera_info_topic='/carla/ego_vehicle/sensor/camera/rgb/front/camera_info',
+            base_frame='ego_vehicle',
+            camera_frame=self.camera_frame,
+            on_ready=self._on_camera_ready,
+            qos=sensor_qos,
+        )
+
         # ==================== Subscribers ====================
-        # CameraInfo (standard ROS2 for intrinsics)
-        self.camera_info_sub = self.create_subscription(
-            CameraInfo, '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info',
-            self.camera_info_callback, sensor_qos)
-        
-        # Real perception mode (YOLO + LiDAR)
         if self.enable_object_detection:
             self.get_logger().info('Using Real Perception mode (YOLO + LiDAR)')
             self.rgb_sub = self.create_subscription(
@@ -188,86 +174,64 @@ class PerceptionNode(Node):
         self.init_timer = self.create_timer(0.5, self._try_initialize)
     
     # ==================== Initialization ====================
-    
+
+    def _on_camera_ready(self, params: CameraParams):
+        """Called when camera intrinsics and extrinsics are available."""
+        self.get_logger().info(
+            f'Camera ready: {params.width}x{params.height}, '
+            f'FOV={params.fov_deg:.1f}deg, height={params.height_m:.2f}m')
+        # Try to complete full initialization
+        self._try_complete_initialization()
+
     def _try_initialize(self):
         """Try to complete initialization by checking for required data."""
         if self.initialized:
             return
-        
-        # Try to get camera TF
-        if not self.camera_tf_received:
-            self._try_get_camera_tf()
-        
+
+        # Try to get camera extrinsics (if intrinsics already received)
+        if self.camera.intrinsics_received and not self.camera.extrinsics_received:
+            self.camera.try_get_extrinsics()
+
         # Try to get LiDAR TF (always needed for method 0 or ground truth)
         if not self.lidar_tf_received:
             self._try_get_lidar_tf()
-        
+
         # Check if ready to initialize
-        if self._check_ready():
-            self._complete_initialization()
-        else:
-            self.get_logger().info('Waiting for initialization data...')
-    
-    def _try_get_camera_tf(self) -> bool:
-        """Try to get camera transform from TF."""
-        try:
-            transform = self.tf_buffer.lookup_transform(
-                'ego_vehicle', self.camera_frame, rclpy.time.Time(),
-                timeout=rclpy.duration.Duration(seconds=0.1))
-            
-            self.camera_x = transform.transform.translation.x
-            self.camera_y = transform.transform.translation.y
-            self.camera_height = transform.transform.translation.z
-            
-            # Extract pitch from quaternion
-            q = transform.transform.rotation
-            sinp = 2.0 * (q.w * q.y - q.z * q.x)
-            self.camera_pitch = np.degrees(np.arcsin(np.clip(sinp, -1.0, 1.0)))
-            
-            self.camera_tf_received = True
-            self.get_logger().info(
-                f'Camera TF received: x={self.camera_x:.2f}, y={self.camera_y:.2f}, '
-                f'z={self.camera_height:.2f}m, pitch={self.camera_pitch:.1f}°')
-            return True
-        except TransformException as e:
-            self.get_logger().warn(f'Camera TF lookup failed: {e}')
-            return False
-    
+        self._try_complete_initialization()
+
     def _try_get_lidar_tf(self) -> bool:
         """Try to get LiDAR transform from TF."""
         try:
             transform = self.tf_buffer.lookup_transform(
                 'ego_vehicle', self.lidar_frame, rclpy.time.Time(),
                 timeout=rclpy.duration.Duration(seconds=0.05))
-            
+
             self.lidar_x = transform.transform.translation.x
             self.lidar_y = transform.transform.translation.y
             self.lidar_z = transform.transform.translation.z
-            
+
             self.lidar_tf_received = True
             self.get_logger().info(
                 f'LiDAR TF received: x={self.lidar_x:.2f}, y={self.lidar_y:.2f}, z={self.lidar_z:.2f}m')
             return True
         except TransformException:
             return False
-    
-    def _check_ready(self) -> bool:
-        """Check if all required initialization data has been received."""
-        if not self.camera_info_received:
-            self.get_logger().warn('CameraInfo not yet received')
-            return False
-        if not self.camera_tf_received:
-            self.get_logger().warn('Camera TF not yet received')
-            return False
-        if not self.lidar_tf_received:
-            self.get_logger().warn('LiDAR TF not yet received')
-            return False
-        return True
-    
-    def _complete_initialization(self):
+
+    def _try_complete_initialization(self):
         """Complete initialization once all data is available."""
+        if self.initialized:
+            return
+
+        if not self.camera.ready:
+            self.get_logger().info('Waiting for camera params...', throttle_duration_sec=2.0)
+            return
+        if not self.lidar_tf_received:
+            self.get_logger().info('Waiting for LiDAR TF...', throttle_duration_sec=2.0)
+            return
+
         self.get_logger().info('All initialization data received, completing setup...')
-        
+        params = self.camera.params
+
         # Initialize Perception class for object detection
         if self.enable_object_detection:
             self.perception = Perception(
@@ -276,49 +240,23 @@ class PerceptionNode(Node):
                 method=self.perception_method,
                 hood_mask_config=self.hood_mask_config
             )
-            self.perception.set_intrinsics(self.fx, self.fy, self.cx, self.cy)
+            self.perception.set_intrinsics(params.fx, params.fy, params.cx, params.cy)
             self.perception.set_camera_position(
-                x=self.camera_x, y=self.camera_y, z=self.camera_height,
-                pitch=self.camera_pitch
+                x=params.x_m, y=params.y_m, z=params.height_m,
+                pitch=params.pitch_deg
             )
             # Always set LiDAR position for method 0
             self.perception.set_lidar_position(
                 x=self.lidar_x, y=self.lidar_y, z=self.lidar_z
             )
             self.get_logger().info(f'Perception initialized: {self.model_path}, method={self.perception_method}')
-        
+
         # Cancel init timer
         self.init_timer.cancel()
-        
+
         self.initialized = True
         self.get_logger().info('Perception Node fully initialized and ready!')
-    
-    # ==================== CameraInfo Callback ====================
-    
-    def camera_info_callback(self, msg: CameraInfo):
-        """Store camera intrinsics from CameraInfo (standard ROS2 approach)."""
-        if self.camera_info_received:
-            return
-        
-        self.img_width = msg.width
-        self.img_height = msg.height
-        self.fx = msg.k[0]
-        self.fy = msg.k[4]
-        self.cx = msg.k[2]
-        self.cy = msg.k[5]
-        
-        # Compute FOV from intrinsics
-        if self.fx > 0:
-            fov_rad = 2 * np.arctan(self.img_width / (2 * self.fx))
-            self.fov_deg = np.degrees(fov_rad)
-        else:
-            self.fov_deg = 90.0
-        
-        self.camera_info_received = True
-        self.get_logger().info(
-            f'CameraInfo received: {self.img_width}x{self.img_height}, '
-            f'fx={self.fx:.1f}, fy={self.fy:.1f}, FOV={self.fov_deg:.1f}°')
-    
+
     # ==================== Sensor Callbacks ====================
     
     def rgb_callback(self, msg: Image):
