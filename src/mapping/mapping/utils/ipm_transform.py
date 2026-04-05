@@ -45,7 +45,7 @@ def convert_to_ipm(
 
     Example:
         # Basic usage
-        bev_img, bev_size, _ = convert_to_bev(image, fov=110, pitch=5, camera_height=1.2)
+        bev_img, bev_size, _ = convert_to_ipm(image, fov=110, pitch=5, camera_height=1.2)
 
         # With custom ranges at 30 px/m: bev_x_range=(-15, 15), bev_y_range=(3, 30)
         # X span = 30m -> bev_width = 900 pixels

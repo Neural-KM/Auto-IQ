@@ -17,7 +17,7 @@ Launches the mapping nodes:
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 
 
 def generate_launch_description():
@@ -64,7 +64,7 @@ def generate_launch_description():
         #   /mapping/debug/lane_bev (Image, debug visualization)
         #   /mapping/estimated_lanes (EstimatedLanes with lane structure)
         #   /mapping/boundary_markers (MarkerArray for drivable boundary viz)
-        #   /mapping/boundary_debug_image (Image)
+        #   /mapping/debug/boundary (Image)
         Node(
             package='mapping',
             executable='lane_fitting_node',
@@ -73,7 +73,7 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': True,
                 'semantic_source': LaunchConfiguration('semantic_source'),
-                'enable_debug_viz': LaunchConfiguration('enable_lane_debug_viz'),
+                'enable_debug_viz': PythonExpression(["'", LaunchConfiguration('enable_lane_debug_viz'), "'.lower() == 'true'"]),
             }],
         ),
     ])
