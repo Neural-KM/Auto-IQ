@@ -509,29 +509,35 @@ class BoundaryExtractor:
         self,
         boundary: BoundaryResult,
         observed_mask: np.ndarray,
+        drivable_mask: np.ndarray,
         is_left: bool,
         margin: int = 15,
     ) -> bool:
         """
-        Check if a detected boundary is at the edge of the observed (FOV) region.
+        Check if a detected boundary is at the edge of the observed (FOV) region
+        AND drivable area extends to that edge (meaning road continues beyond view).
 
-        A boundary at the FOV edge is not a real road boundary - it's just where
-        our camera view ends. Such boundaries should be invalidated.
+        A boundary should only be invalidated if:
+        1. It's near the FOV edge, AND
+        2. Drivable area extends all the way to the FOV edge (road continues beyond)
+
+        If the road actually ends before the FOV edge (non-drivable area exists
+        between boundary and FOV edge), the boundary is REAL and should be kept.
 
         Args:
             boundary: BoundaryResult from extract_boundaries
             observed_mask: Binary mask of observed area (1=observed, 0=outside FOV)
+            drivable_mask: Binary mask of drivable area (1=road, 0=not road)
             is_left: True for left boundary (low col values)
             margin: Pixels from edge to consider as "at FOV edge"
 
         Returns:
-            True if boundary is at FOV edge (should be invalidated)
+            True if boundary is at FOV edge AND road continues beyond (should be invalidated)
         """
         if not boundary.detected or boundary.fitted_x is None:
             return False
 
         # Find the extent of the observed region
-        # Sum observed pixels per col to find which cols have observations
         col_sums = np.sum(observed_mask, axis=0)
         observed_cols = np.where(col_sums > 0)[0]
 
@@ -544,12 +550,38 @@ class BoundaryExtractor:
         # Get average boundary col position
         avg_boundary_col = np.mean(boundary.fitted_x)
 
+        # Check if boundary is near FOV edge
+        near_fov_edge = False
         if is_left:
-            # Left boundary has low col values (toward min_observed_col)
-            return avg_boundary_col <= (min_observed_col + margin)
+            near_fov_edge = avg_boundary_col <= (min_observed_col + margin)
         else:
-            # Right boundary has high col values (toward max_observed_col)
-            return avg_boundary_col >= (max_observed_col - margin)
+            near_fov_edge = avg_boundary_col >= (max_observed_col - margin)
+
+        if not near_fov_edge:
+            return False  # Boundary not near FOV edge, definitely real
+
+        # Boundary IS near FOV edge. Now check if drivable area extends to FOV edge.
+        # If there's non-drivable area between boundary and FOV edge, it's a real boundary.
+        drivable_col_sums = np.sum(drivable_mask, axis=0)
+
+        if is_left:
+            # Check columns between FOV edge and boundary
+            edge_cols = range(min_observed_col, int(avg_boundary_col))
+            if len(edge_cols) > 0:
+                drivable_at_edge = drivable_col_sums[min_observed_col:int(avg_boundary_col)]
+                # If there's significant drivable area at the FOV edge, road continues beyond
+                # If minimal/no drivable area at edge, this is a real road boundary
+                if len(drivable_at_edge) > 0 and np.max(drivable_at_edge) < observed_mask.shape[0] * 0.1:
+                    return False  # Little drivable area at edge = real boundary
+        else:
+            # Check columns between boundary and FOV edge
+            edge_cols = range(int(avg_boundary_col), max_observed_col + 1)
+            if len(edge_cols) > 0:
+                drivable_at_edge = drivable_col_sums[int(avg_boundary_col):max_observed_col + 1]
+                if len(drivable_at_edge) > 0 and np.max(drivable_at_edge) < observed_mask.shape[0] * 0.1:
+                    return False  # Little drivable area at edge = real boundary
+
+        return True  # Drivable area extends to FOV edge, likely false boundary
 
     def extract(self, semantic_img: np.ndarray) -> BoundaryExtractionResult:
         """
@@ -609,13 +641,14 @@ class BoundaryExtractor:
         left, right, edge_img, l_diag, r_diag = extract_boundaries(binary_mask, observed_mask)
 
         # 4. Check if boundaries are at FOV edge (not real road boundaries)
-        fov_edge_margin = 15
+        # Use 5 meters as margin (scaled to pixels)
+        fov_edge_margin = int(5.0 * self.pixels_per_meter)
 
         left_at_fov_edge = self._is_boundary_at_fov_edge(
-            left, observed_mask, is_left=True, margin=fov_edge_margin
+            left, observed_mask, binary_mask, is_left=True, margin=fov_edge_margin
         )
         right_at_fov_edge = self._is_boundary_at_fov_edge(
-            right, observed_mask, is_left=False, margin=fov_edge_margin
+            right, observed_mask, binary_mask, is_left=False, margin=fov_edge_margin
         )
 
         # 5. Convert pixel boundaries to base_link (skip if at FOV edge)
