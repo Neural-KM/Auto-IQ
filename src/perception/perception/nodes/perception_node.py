@@ -177,7 +177,7 @@ class PerceptionNode(Node):
         self.obstacles_pub = self.create_publisher(ObstacleArray, '/perception/obstacles', 10)
         
         if self.enable_debug_viz:
-            self.debug_rgb_pub = self.create_publisher(Image, '/perception/debug/rgb', 10)
+            self.debug_rgb_pub = self.create_publisher(Image, '/perception/debug/rgb', sensor_qos)
         
         # ==================== Ground Truth Timer ====================
         # Always publish ground truth at a fixed rate

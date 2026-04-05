@@ -10,7 +10,7 @@ distance using an OpenCV JET colormap (near=blue, far=red).
 This gives an intuitive understanding of the LiDAR's vertical and horizontal
 FOV relative to what the camera sees.
 
-Published on: /visualization/lidar_camera_overlay
+Published on: /carla/ego_vehicle/sensor/camera/rgb/front/image/lidar_overlay
 
 Usage:
     ros2 run visualization lidar_camera_overlay_node
@@ -66,7 +66,7 @@ class LidarCameraOverlayNode(Node):
         # Topics
         self.declare_parameter('camera_topic', '/carla/ego_vehicle/sensor/camera/rgb/front/image')
         self.declare_parameter('lidar_topic', '/carla/ego_vehicle/sensor/lidar/at128_front/point_cloud')
-        self.declare_parameter('output_topic', '/visualization/lidar_camera_overlay')
+        self.declare_parameter('output_topic', '/carla/ego_vehicle/sensor/camera/rgb/front/image/lidar_overlay')
 
         self.point_size = self.get_parameter('point_size').value
         self.max_range = self.get_parameter('max_range').value

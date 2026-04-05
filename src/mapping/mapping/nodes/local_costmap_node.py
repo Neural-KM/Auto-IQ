@@ -72,7 +72,7 @@ class LocalCostmapNode(Node):
     Problems to address here:
     1) np.unique(deduplication) for hits is expensive. Convert to JIT
     2) Log updates is also time taking, fix that
-    3) The information is which might be relevant is also being thrown away by
+    3) The information that might be relevant is also being thrown away by
         only the first hit in bins. Need a better way to generate showdows for obstacles.
         either calculate shadow explicitly and don't let rays passing over the obstcles to update
     """

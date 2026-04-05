@@ -2,11 +2,12 @@
 Perception Launch File
 =======================
 
-Launches the full perception stack:
+Launches the perception stack for pixel-level labeling:
   1. YOLO-based object detection + ground truth obstacles (perception_node)
   2. Semantic Segmentation (SegFormer or CARLA Ground Truth)
-  3. Lane Detection (polynomial fits on semantic segmentation)
-  4. Semantic PointCloud projection
+  3. Semantic PointCloud projection
+
+Note: Lane polynomial fitting is handled by the mapping package's lane_fitting_node.
 
 Usage:
     ros2 launch perception perception.launch.py segmentation_source:=segformer
@@ -34,6 +35,14 @@ def generate_launch_description():
             description='Path to perception parameters YAML file'
         ),
         DeclareLaunchArgument(
+            'carla_host', default_value='localhost',
+            description='CARLA simulator host'
+        ),
+        DeclareLaunchArgument(
+            'carla_port', default_value='2000',
+            description='CARLA simulator port'
+        ),
+        DeclareLaunchArgument(
             'segmentation_source', default_value='segformer',
             description="'segformer' (camera-based) or 'ground_truth' (CARLA sim)"
         ),
@@ -54,7 +63,11 @@ def generate_launch_description():
             output='screen',
             parameters=[
                 LaunchConfiguration('params_file'),
-                {'use_sim_time': True}
+                {
+                    'use_sim_time': True,
+                    'carla_host': LaunchConfiguration('carla_host'),
+                    'carla_port': LaunchConfiguration('carla_port'),
+                }
             ]
         ),
 
@@ -76,8 +89,6 @@ def generate_launch_description():
                 'segmentation_source': LaunchConfiguration('segmentation_source'),
                 'model_name': LaunchConfiguration('model_name'),
                 'device': LaunchConfiguration('device'),
-                'camera_info_topic': '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info',
-                'enable_debug_viz': False,
             }],
         ),
 
