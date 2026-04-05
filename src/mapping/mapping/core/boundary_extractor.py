@@ -9,30 +9,28 @@ The algorithm uses a highly constrained Sliding Window approach designed to
 explicitly reject sudden road cutouts such as U-turns, intersections, and
 missing mask data.
 
-The grid convention (from IPM) is:
-    grid[r, c]  —  rows = Y / lateral,  cols = X / forward
-    x_base = origin_x + c * resolution
-    y_base = origin_y + r * resolution
-    Row 0  = most-negative Y (right side of vehicle)
-    Col 0  = most-negative X (behind vehicle)
+BEV coordinate convention (direct from IPM, no transforms):
+    Image shape: (bev_height, bev_width)
+    - rows = X / forward:  row 0 = far (X_max), row max = near (X_min)
+    - cols = Y / lateral:  col 0 = left (Y_max), col max = right (Y_min)
 
-The sliding window sweeps along the **column** (forward) axis and tracks
-boundary **row** (lateral) positions.  No transposition or flipping is
-performed at any stage.
+    To convert to base_link:
+        x_base = X_max - row * resolution  (forward distance)
+        y_base = Y_max - col * resolution  (lateral position, +left)
+
+The sliding window sweeps along **rows** (forward axis, from near to far)
+and tracks boundary **column** positions (lateral).
 
 Designed for Level 4 autonomous driving on heavy-duty trucks where lane
 boundary stability is safety-critical.
 
 Changelog:
 ---------
-2026-04-01: Fixed sweep range bug:
-    - Changed sweep_start from w//2 to 5% of width (was missing near-field boundaries)
-    - BEV col 0 = X_min (near edge), not vehicle center, so full sweep is needed
-2026-03-25: Improved curve handling:
-    - Increased MAX_LATERAL_SHIFT from 25 to 45 pixels for better turn tracking
-    - Increased MARGIN from 40 to 60 for wider search windows
-    - Enhanced visualization with thicker window borders and alpha blending
-    - Windows now more visible with semi-transparent fill
+2026-04-05: Refactored to work directly with IPM output convention:
+    - No transpose or flip operations
+    - Sweep along rows (forward), track column positions (lateral)
+2026-04-01: Fixed sweep range bug
+2026-03-25: Improved curve handling
 
 Author : Auto-IQ Mapping Stack
 """
@@ -51,18 +49,18 @@ from typing import Optional, Tuple, List
 class BoundaryResult:
     """Container for a single road-boundary extraction result.
 
-    In this module's convention:
-        xs  = collected **row** positions   (lateral / Y — the dependent var)
-        ys  = collected **column** positions (forward / X — the independent var)
-        fitted_x = polynomial-evaluated row values
-        fitted_y = column values used for evaluation
+    Convention (matching IPM output):
+        xs  = collected **column** positions (lateral / Y)
+        ys  = collected **row** positions    (forward / X)
+        fitted_x = polynomial-evaluated column values (lateral)
+        fitted_y = row values used for evaluation (forward)
     """
 
     poly_coeffs: Optional[np.ndarray] = None  # 2nd-order [a, b, c]
     xs: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
     ys: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
-    fitted_x: Optional[np.ndarray] = None     # row values  (lateral)
-    fitted_y: Optional[np.ndarray] = None     # col values  (forward)
+    fitted_x: Optional[np.ndarray] = None     # col values  (lateral)
+    fitted_y: Optional[np.ndarray] = None     # row values  (forward)
     y_min: Optional[float] = None
     y_max: Optional[float] = None
     detected: bool = False
@@ -74,17 +72,17 @@ def _extract_boundary_edges(binary_mask: np.ndarray) -> np.ndarray:
     """
     Extract road-boundary edges from a binary drivable-area mask.
 
-    Road boundaries run roughly along the column (forward) axis.
-    Transitions happen along the row (lateral) axis, so we use a
-    **vertical** Sobel gradient (dy = 1).
+    Road boundaries run roughly along the row (forward) axis.
+    Transitions happen along the col (lateral) axis, so we use a
+    **horizontal** Sobel gradient (dx = 1).
 
     Returns a binary edge image (uint8, 0 / 255).
     """
     mask_u8 = binary_mask.astype(np.uint8) * 255
 
-    # Vertical gradient — detects edges where intensity changes across rows
-    sobel_y = cv2.Sobel(mask_u8, cv2.CV_64F, 0, 1, ksize=3)
-    edge = np.uint8(np.absolute(sobel_y) > 30) * 255
+    # Horizontal gradient — detects edges where intensity changes across cols
+    sobel_x = cv2.Sobel(mask_u8, cv2.CV_64F, 1, 0, ksize=3)
+    edge = np.uint8(np.absolute(sobel_x) > 30) * 255
     return edge
 
 
@@ -100,29 +98,29 @@ def extract_boundaries(
     Parameters
     ----------
     binary_warped : np.ndarray
-        2-D binary image, shape (rows, cols).  1 = drivable, 0 = background.
-        Rows = Y / lateral.  Cols = X / forward.
+        2-D binary image, shape (bev_height, bev_width).  1 = drivable, 0 = background.
+        Uses IPM convention: rows = X/forward (row 0 = far), cols = Y/lateral (col 0 = left).
     valid_mask : np.ndarray, optional
         Same shape.  1 = observed by camera, 0 = unseen / UNKNOWN.
 
     Returns
     -------
-    left_result  : BoundaryResult   (high-row boundary = left of vehicle)
-    right_result : BoundaryResult   (low-row boundary = right of vehicle)
+    left_result  : BoundaryResult   (low-col boundary = left of vehicle)
+    right_result : BoundaryResult   (high-col boundary = right of vehicle)
     edge_img     : np.ndarray       (intermediate edge image for debug)
-    left_diags   : list[tuple]      (c_lo, c_hi, r_center, margin, frozen)
-    right_diags  : list[tuple]      (c_lo, c_hi, r_center, margin, frozen)
+    left_diags   : list[tuple]      (r_lo, r_hi, c_center, margin, frozen)
+    right_diags  : list[tuple]      (r_lo, r_hi, c_center, margin, frozen)
     """
     # ── Hardcoded parameters ────────────────────────────────────
     NWINDOWS = 15
-    MARGIN = 60                    # half-height of search window (rows) - increased from 40
+    MARGIN = 60                    # half-width of search window (cols)
     MINPIX = 10                    # min edge pixels to recenter
-    MAX_LATERAL_SHIFT = 45         # max row-shift between consecutive windows - increased from 25
-    LANE_WIDTH_TOLERANCE = 60      # allowed row-width deviation - increased from 40
+    MAX_LATERAL_SHIFT = 45         # max col-shift between consecutive windows
+    LANE_WIDTH_TOLERANCE = 60      # allowed col-width deviation
     POLY_ORDER = 2
     VALID_MASK_ERODE = 5
 
-    h, w = binary_warped.shape[:2]          # h = rows (lateral), w = cols (forward)
+    h, w = binary_warped.shape[:2]  # h = rows (forward), w = cols (lateral)
 
     # ── Valid mask ──────────────────────────────────────────────
     if valid_mask is None:
@@ -138,122 +136,124 @@ def extract_boundaries(
     edge_img = _extract_boundary_edges(binary_warped)
     edge_img = (edge_img * valid_mask).astype(np.uint8)
 
-    # ── 2. Histogram initialisation ─────────────────────────────
-    # Sum edge pixels across ALL columns → one value per row.
-    # Peaks indicate the two road boundary rows.
-    histogram = np.sum(edge_img, axis=1).astype(np.float64)
+    # ── 2. Histogram initialization ─────────────────────────────
+    # Sum edge pixels across ALL rows → one value per column.
+    # Peaks indicate the two road boundary columns.
+    histogram = np.sum(edge_img, axis=0).astype(np.float64)
 
-    midpoint = h // 2
-    # Row 0 = right side of vehicle → right boundary has row < midpoint
-    # Row h = left side of vehicle  → left  boundary has row > midpoint
-    right_base = int(np.argmax(histogram[:midpoint]))
-    left_base  = int(np.argmax(histogram[midpoint:])) + midpoint
+    midpoint = w // 2
+    # Col 0 = left side of vehicle → left boundary has col < midpoint
+    # Col w = right side of vehicle → right boundary has col > midpoint
+    left_base = int(np.argmax(histogram[:midpoint]))
+    right_base = int(np.argmax(histogram[midpoint:])) + midpoint
 
-    # Expected lane width in rows
-    expected_width = left_base - right_base
+    # Expected road width in columns
+    expected_width = right_base - left_base
     if expected_width <= 0:
-        expected_width = h // 2
+        expected_width = w // 2
 
     # ── 3. Sliding window setup ─────────────────────────────────
-    # Sweep along columns from near edge to far edge.
-    # NOTE: The BEV covers X_min to X_max (e.g., 5m to 35m), with col 0 = X_min.
-    # We start from a small offset to avoid noisy data at the very near edge.
-    sweep_start = max(10, int(w * 0.05))  # Start 5% into the BEV (avoids near-field noise)
-    sweep_range = w - sweep_start
-    window_w = max(1, sweep_range // NWINDOWS)
+    # Sweep along rows from bottom (near) to top (far).
+    # Row 0 = far, Row h-1 = near.
+    # We start from near (high row indices) and move toward far (low row indices).
+    sweep_start = max(10, int(h * 0.05))  # Skip 5% at far edge (noisy)
+    sweep_end = h - max(10, int(h * 0.05))  # Skip 5% at near edge
+    sweep_range = sweep_end - sweep_start
+    window_h = max(1, sweep_range // NWINDOWS)
     margin = MARGIN
     minpix = MINPIX
 
+    left_current = left_base
     right_current = right_base
-    left_current  = left_base
 
-    # Collectors  (xs = row positions, ys = col positions)
+    # Collectors (xs = col positions/lateral, ys = row positions/forward)
+    left_xs: List[int] = []
+    left_ys: List[int] = []
     right_xs: List[int] = []
     right_ys: List[int] = []
-    left_xs:  List[int] = []
-    left_ys:  List[int] = []
 
+    left_diags: list = []
     right_diags: list = []
-    left_diags:  list = []
 
     nonzero = edge_img.nonzero()
-    nz_row  = np.array(nonzero[0])
-    nz_col  = np.array(nonzero[1])
+    nz_row = np.array(nonzero[0])
+    nz_col = np.array(nonzero[1])
 
-    # ── 4. Core loop — near to far along columns ───────────────
+    # ── 4. Core loop — near to far along rows ───────────────────
     for win_idx in range(NWINDOWS):
-        c_lo = sweep_start + win_idx * window_w
-        c_hi = sweep_start + (win_idx + 1) * window_w
+        # Sweep from near (high row) to far (low row)
+        r_hi = sweep_end - win_idx * window_h
+        r_lo = sweep_end - (win_idx + 1) * window_h
 
-        # Right boundary search window (low rows)
-        r_right_lo = right_current - margin
-        r_right_hi = right_current + margin
+        # Left boundary search window (low cols)
+        c_left_lo = left_current - margin
+        c_left_hi = left_current + margin
 
-        # Left boundary search window (high rows)
-        r_left_lo = left_current - margin
-        r_left_hi = left_current + margin
+        # Right boundary search window (high cols)
+        c_right_lo = right_current - margin
+        c_right_hi = right_current + margin
 
         # Edge pixels inside each window
-        right_inds = (
-            (nz_col >= c_lo) & (nz_col < c_hi) &
-            (nz_row >= r_right_lo) & (nz_row < r_right_hi)
-        )
         left_inds = (
-            (nz_col >= c_lo) & (nz_col < c_hi) &
-            (nz_row >= r_left_lo) & (nz_row < r_left_hi)
+            (nz_row >= r_lo) & (nz_row < r_hi) &
+            (nz_col >= c_left_lo) & (nz_col < c_left_hi)
+        )
+        right_inds = (
+            (nz_row >= r_lo) & (nz_row < r_hi) &
+            (nz_col >= c_right_lo) & (nz_col < c_right_hi)
         )
 
+        left_pix_r = nz_row[left_inds]
+        left_pix_c = nz_col[left_inds]
         right_pix_r = nz_row[right_inds]
         right_pix_c = nz_col[right_inds]
-        left_pix_r  = nz_row[left_inds]
-        left_pix_c  = nz_col[left_inds]
 
-        # Candidate new row-centres
-        right_new = int(np.mean(right_pix_r)) if len(right_pix_r) >= minpix else right_current
-        left_new  = int(np.mean(left_pix_r))  if len(left_pix_r)  >= minpix else left_current
+        # Candidate new column centers
+        left_new = int(np.mean(left_pix_c)) if len(left_pix_c) >= minpix else left_current
+        right_new = int(np.mean(right_pix_c)) if len(right_pix_c) >= minpix else right_current
 
         # ── Constraint checks ──────────────────────────────────
-        right_frozen = len(right_pix_r) < minpix
-        left_frozen  = len(left_pix_r)  < minpix
+        left_frozen = len(left_pix_c) < minpix
+        right_frozen = len(right_pix_c) < minpix
 
-        # (b) Momentum / max lateral shift
-        if not right_frozen and abs(right_new - right_current) > MAX_LATERAL_SHIFT:
-            right_new = right_current
-            right_frozen = True
+        # Momentum / max lateral shift
         if not left_frozen and abs(left_new - left_current) > MAX_LATERAL_SHIFT:
             left_new = left_current
             left_frozen = True
+        if not right_frozen and abs(right_new - right_current) > MAX_LATERAL_SHIFT:
+            right_new = right_current
+            right_frozen = True
 
-        # (c) Constant lane width enforcement
-        proposed_width = left_new - right_new
+        # Constant road width enforcement
+        proposed_width = right_new - left_new
         if proposed_width > expected_width + LANE_WIDTH_TOLERANCE:
+            left_delta = abs(left_new - left_current)
             right_delta = abs(right_new - right_current)
-            left_delta  = abs(left_new  - left_current)
-            if right_delta > left_delta:
-                right_new = left_new - expected_width
-                right_frozen = True
-            else:
-                left_new = right_new + expected_width
+            if left_delta > right_delta:
+                left_new = right_new - expected_width
                 left_frozen = True
+            else:
+                right_new = left_new + expected_width
+                right_frozen = True
 
         # ── Accept updates ──────────────────────────────────────
+        left_current = left_new
         right_current = right_new
-        left_current  = left_new
 
-        if len(right_pix_r) > 0:
-            right_xs.extend(right_pix_r.tolist())
-            right_ys.extend(right_pix_c.tolist())
-        if len(left_pix_r) > 0:
-            left_xs.extend(left_pix_r.tolist())
-            left_ys.extend(left_pix_c.tolist())
+        if len(left_pix_c) > 0:
+            left_xs.extend(left_pix_c.tolist())
+            left_ys.extend(left_pix_r.tolist())
+        if len(right_pix_c) > 0:
+            right_xs.extend(right_pix_c.tolist())
+            right_ys.extend(right_pix_r.tolist())
 
-        # Diagnostics: (c_lo, c_hi, r_center, margin, frozen)
-        right_diags.append((c_lo, c_hi, right_current, margin, right_frozen))
-        left_diags.append((c_lo, c_hi, left_current, margin, left_frozen))
+        # Diagnostics: (r_lo, r_hi, c_center, margin, frozen)
+        left_diags.append((r_lo, r_hi, left_current, margin, left_frozen))
+        right_diags.append((r_lo, r_hi, right_current, margin, right_frozen))
 
-    # ── 5. Polynomial fitting  row = f(col) ────────────────────
-    right_result = _fit_boundary(right_xs, right_ys, w, POLY_ORDER)
-    left_result  = _fit_boundary(left_xs,  left_ys,  w, POLY_ORDER)
+    # ── 5. Polynomial fitting  col = f(row) ────────────────────
+    left_result = _fit_boundary(left_xs, left_ys, h, POLY_ORDER)
+    right_result = _fit_boundary(right_xs, right_ys, h, POLY_ORDER)
 
     return left_result, right_result, edge_img, left_diags, right_diags
 
@@ -263,19 +263,19 @@ def extract_boundaries(
 def _fit_boundary(
     xs: List[int],
     ys: List[int],
-    col_extent: int,
+    row_extent: int,
     order: int = 2,
 ) -> BoundaryResult:
-    """Fit a polynomial  row = f(col)  to collected boundary pixels.
+    """Fit a polynomial  col = f(row)  to collected boundary pixels.
 
-    xs = row positions (dependent), ys = col positions (independent).
+    xs = col positions (dependent), ys = row positions (independent).
     """
     result = BoundaryResult()
     if len(xs) < order + 1:
         return result
 
-    xs_arr = np.array(xs, dtype=np.float64)   # rows
-    ys_arr = np.array(ys, dtype=np.float64)   # cols
+    xs_arr = np.array(xs, dtype=np.float64)   # cols (lateral)
+    ys_arr = np.array(ys, dtype=np.float64)   # rows (forward)
 
     try:
         coeffs = np.polyfit(ys_arr, xs_arr, order)
@@ -289,21 +289,21 @@ def _fit_boundary(
     result.y_min = float(np.min(ys_arr))
     result.y_max = float(np.max(ys_arr))
 
-    # Evaluate only within supported column range
-    c_start = int(max(0, np.floor(result.y_min)))
-    c_end   = int(min(col_extent - 1, np.ceil(result.y_max)))
-    if c_end < c_start:
+    # Evaluate only within supported row range
+    r_start = int(max(0, np.floor(result.y_min)))
+    r_end = int(min(row_extent - 1, np.ceil(result.y_max)))
+    if r_end < r_start:
         return result
 
-    plot_col = np.arange(c_start, c_end + 1, dtype=np.float64)
-    plot_row = np.polyval(coeffs, plot_col)
-    result.fitted_x = plot_row    # row values  (lateral)
-    result.fitted_y = plot_col    # col values  (forward)
+    plot_row = np.arange(r_start, r_end + 1, dtype=np.float64)
+    plot_col = np.polyval(coeffs, plot_row)
+    result.fitted_x = plot_col    # col values  (lateral)
+    result.fitted_y = plot_row    # row values  (forward)
 
     return result
 
 
-# ───────────────────── visualisation ─────────────────────────────
+# ───────────────────── visualization ─────────────────────────────
 
 def draw_boundary_overlay(
     bev_img: np.ndarray,
@@ -316,17 +316,15 @@ def draw_boundary_overlay(
     """
     Draw sliding windows and fitted polynomials on a copy of the BEV image.
 
-    Everything is drawn in **native grid space** (rows = lateral, cols = forward).
-    At the end the image is rotated for human-friendly display:
-        top = ahead,  bottom = behind,  left = left,  right = right.
+    BEV convention: row 0 = far (top), col 0 = left.
+    No transforms applied - visualization matches BEV coordinate system.
 
-    Windows: green = valid (active tracking),  red = frozen / constrained.
-             Windows now drawn with semi-transparent fill for better visibility.
-    Curves:  yellow = left boundary,  cyan = right boundary.
+    Windows: green = valid (active tracking), red = frozen / constrained.
+    Curves: yellow = left boundary, cyan = right boundary.
 
-    Each diag entry is a tuple: (c_lo, c_hi, r_center, margin, is_frozen).
+    Each diag entry is a tuple: (r_lo, r_hi, c_center, margin, is_frozen).
     """
-    # Build 3-channel canvas in native grid space
+    # Build 3-channel canvas
     if bev_img.ndim == 2:
         vis = cv2.cvtColor(bev_img, cv2.COLOR_GRAY2BGR)
     else:
@@ -337,41 +335,33 @@ def draw_boundary_overlay(
         edge_bgr = cv2.cvtColor(edge_img, cv2.COLOR_GRAY2BGR)
         vis = cv2.addWeighted(vis, 0.8, edge_bgr, 0.3, 0)
 
-    GREEN  = (0, 255, 0)
-    RED    = (0, 0, 255)
+    GREEN = (0, 255, 0)
+    RED = (0, 0, 255)
     YELLOW = (0, 255, 255)
-    CYAN   = (255, 255, 0)
+    CYAN = (255, 255, 0)
 
-    # Draw sliding windows with semi-transparent fill for better visibility
+    # Draw sliding windows with semi-transparent fill
     overlay = vis.copy()
-    for c_lo, c_hi, r_center, margin, is_frozen in left_diags + right_diags:
+    for r_lo, r_hi, c_center, margin, is_frozen in left_diags + right_diags:
         colour = RED if is_frozen else GREEN
-        pt1 = (int(c_lo), int(r_center - margin))
-        pt2 = (int(c_hi), int(r_center + margin))
-        # Draw filled rectangle on overlay
+        # Rectangle: (x1, y1) to (x2, y2) where x=col, y=row
+        pt1 = (int(c_center - margin), int(r_lo))
+        pt2 = (int(c_center + margin), int(r_hi))
         cv2.rectangle(overlay, pt1, pt2, colour, -1)
-        # Draw border on main image with thicker line
         cv2.rectangle(vis, pt1, pt2, colour, 3)
 
-    # Blend overlay with main image for semi-transparent windows
     vis = cv2.addWeighted(overlay, 0.3, vis, 0.7, 0)
 
     # Draw fitted curves
     for result, colour in [(left_result, YELLOW), (right_result, CYAN)]:
         if result.detected and result.fitted_x is not None:
             pts = np.column_stack([
-                result.fitted_y.astype(np.int32),   # col → x
-                result.fitted_x.astype(np.int32),   # row → y
+                result.fitted_x.astype(np.int32),   # col → x
+                result.fitted_y.astype(np.int32),   # row → y
             ])
             pts[:, 0] = np.clip(pts[:, 0], 0, vis.shape[1] - 1)
             pts[:, 1] = np.clip(pts[:, 1], 0, vis.shape[0] - 1)
             cv2.polylines(vis, [pts], isClosed=False, color=colour, thickness=3)
-
-    # ── Display rotation ────────────────────────────────────────
-    # Native grid: rows top→bot = right→left,  cols left→right = behind→ahead.
-    # Desired:     top = ahead,  right = right.
-    # 90° CCW then horizontal flip achieves this.
-    vis = cv2.flip(cv2.rotate(vis, cv2.ROTATE_90_COUNTERCLOCKWISE), 1)
 
     return vis
 
@@ -380,24 +370,28 @@ def draw_boundary_overlay(
 
 def boundary_to_base_link(
     result: BoundaryResult,
-    grid_height: int,
-    grid_width: int,
-    origin_x: float,
-    origin_y: float,
+    bev_height: int,
+    bev_width: int,
+    x_max: float,
+    y_max: float,
     resolution: float,
     sample_step: int = 5,
 ) -> Optional[np.ndarray]:
     """
-    Convert a fitted boundary from grid-pixel coordinates to ``base_link``
-    metric coordinates suitable for publishing as a ``nav_msgs/Path``.
+    Convert a fitted boundary from BEV-pixel coordinates to ``base_link``
+    metric coordinates.
 
-    Grid mapping (from IPM):
-        x_base = origin_x + col * resolution
-        y_base = origin_y + row * resolution
+    BEV convention (from IPM):
+        row 0 = far (X_max), row max = near (X_min)
+        col 0 = left (Y_max), col max = right (Y_min)
 
-    In BoundaryResult (no transpose, no flip):
-        fitted_y = column values  (forward / X)
-        fitted_x = row values     (lateral / Y)
+    Conversion:
+        x_base = X_max - row * resolution  (forward)
+        y_base = Y_max - col * resolution  (lateral, +left)
+
+    In BoundaryResult:
+        fitted_y = row values   (forward / X)
+        fitted_x = col values   (lateral / Y)
 
     Returns
     -------
@@ -408,23 +402,28 @@ def boundary_to_base_link(
     if not result.detected or result.fitted_x is None or result.fitted_y is None:
         return None
 
-    cols = result.fitted_y[::sample_step]    # forward
-    rows = result.fitted_x[::sample_step]    # lateral
+    rows = result.fitted_y[::sample_step]    # forward
+    cols = result.fitted_x[::sample_step]    # lateral
 
-    # Clip to valid grid range
+    # Clip to valid BEV range
     valid = (
-        (cols >= 0) & (cols < grid_width) &
-        (rows >= 0) & (rows < grid_height)
+        (rows >= 0) & (rows < bev_height) &
+        (cols >= 0) & (cols < bev_width)
     )
-    cols = cols[valid]
     rows = rows[valid]
+    cols = cols[valid]
 
-    if len(cols) == 0:
+    if len(rows) == 0:
         return None
 
-    # Direct mapping — no transpose to undo
-    x_base = origin_x + cols * resolution
-    y_base = origin_y + rows * resolution
+    # Convert to base_link coordinates
+    x_base = x_max - rows * resolution
+    y_base = y_max - cols * resolution
+
+    # Sort by x (forward distance) ascending (near to far)
+    sorted_idx = np.argsort(x_base)
+    x_base = x_base[sorted_idx]
+    y_base = y_base[sorted_idx]
 
     return np.column_stack([x_base, y_base])
 
@@ -522,7 +521,7 @@ class BoundaryExtractor:
         Args:
             boundary: BoundaryResult from extract_boundaries
             observed_mask: Binary mask of observed area (1=observed, 0=outside FOV)
-            is_left: True for left boundary (high row values)
+            is_left: True for left boundary (low col values)
             margin: Pixels from edge to consider as "at FOV edge"
 
         Returns:
@@ -532,27 +531,25 @@ class BoundaryExtractor:
             return False
 
         # Find the extent of the observed region
-        # Sum observed pixels per row to find which rows have observations
-        row_sums = np.sum(observed_mask, axis=1)
-        observed_rows = np.where(row_sums > 0)[0]
+        # Sum observed pixels per col to find which cols have observations
+        col_sums = np.sum(observed_mask, axis=0)
+        observed_cols = np.where(col_sums > 0)[0]
 
-        if len(observed_rows) == 0:
+        if len(observed_cols) == 0:
             return True  # No observed area
 
-        min_observed_row = observed_rows.min()
-        max_observed_row = observed_rows.max()
+        min_observed_col = observed_cols.min()
+        max_observed_col = observed_cols.max()
 
-        # Get average boundary row position
-        avg_boundary_row = np.mean(boundary.fitted_x)
+        # Get average boundary col position
+        avg_boundary_col = np.mean(boundary.fitted_x)
 
         if is_left:
-            # Left boundary has high row values (toward max_observed_row)
-            # If boundary is within margin of top observed edge, it's at FOV edge
-            return avg_boundary_row >= (max_observed_row - margin)
+            # Left boundary has low col values (toward min_observed_col)
+            return avg_boundary_col <= (min_observed_col + margin)
         else:
-            # Right boundary has low row values (toward min_observed_row)
-            # If boundary is within margin of bottom observed edge, it's at FOV edge
-            return avg_boundary_row <= (min_observed_row + margin)
+            # Right boundary has high col values (toward max_observed_col)
+            return avg_boundary_col >= (max_observed_col - margin)
 
     def extract(self, semantic_img: np.ndarray) -> BoundaryExtractionResult:
         """
@@ -579,10 +576,9 @@ class BoundaryExtractor:
         ).astype(np.uint8) * 255
 
         # Observed area = any pixel that has a semantic label (not unlabeled/0)
-        # This prevents FOV edges from being detected as road boundaries
         observed_mask_raw = (semantic_img != 0).astype(np.uint8) * 255
 
-        # 2. Transform both masks to BEV using IPM
+        # 2. Transform both masks to BEV using IPM (no additional transforms needed)
         bev_drivable, _, _ = convert_to_ipm(
             image=drivable_mask,
             fov=self.camera_fov,
@@ -605,30 +601,15 @@ class BoundaryExtractor:
             interpolation=cv2.INTER_NEAREST,
         )
 
-        # 3. Transform BEV to match boundary_extractor convention
-        # convert_to_ipm output: rows=X (far at top), cols=Y (left at col 0)
-        # boundary_extractor expects: rows=Y (right at top), cols=X (behind at col 0)
-        # Transform: transpose, flip both axes
-        bev_for_extractor = bev_drivable.T[::-1, ::-1]
-        observed_for_extractor = bev_observed.T[::-1, ::-1]
-
-        # Grid dimensions after transform
-        grid_height, grid_width = bev_for_extractor.shape[:2]
-
-        # Grid origin for boundary_to_base_link (in extractor convention)
-        # After transform: row 0 = Y_min (right), col 0 = X_min (near)
-        grid_origin_x = self.bev_x_range[0]  # X at col 0
-        grid_origin_y = self.bev_y_range[0]  # Y at row 0
-
-        # 4. Extract road boundaries from transformed BEV mask
-        binary_mask = (bev_for_extractor > 127).astype(np.uint8)
-        observed_mask = (observed_for_extractor > 127).astype(np.uint8)
+        # 3. Extract road boundaries directly from BEV (no transform needed)
+        bev_height, bev_width = bev_drivable.shape[:2]
+        binary_mask = (bev_drivable > 127).astype(np.uint8)
+        observed_mask = (bev_observed > 127).astype(np.uint8)
 
         left, right, edge_img, l_diag, r_diag = extract_boundaries(binary_mask, observed_mask)
 
-        # 5. Check if boundaries are at FOV edge (not real road boundaries)
-        # A boundary at FOV edge should be invalidated so we fall back to prior knowledge
-        fov_edge_margin = 15  # pixels from edge to consider as "at FOV edge"
+        # 4. Check if boundaries are at FOV edge (not real road boundaries)
+        fov_edge_margin = 15
 
         left_at_fov_edge = self._is_boundary_at_fov_edge(
             left, observed_mask, is_left=True, margin=fov_edge_margin
@@ -637,16 +618,18 @@ class BoundaryExtractor:
             right, observed_mask, is_left=False, margin=fov_edge_margin
         )
 
-        # 6. Convert pixel boundaries to base_link (skip if at FOV edge)
+        # 5. Convert pixel boundaries to base_link (skip if at FOV edge)
+        resolution = 1.0 / self.pixels_per_meter
+
         left_pts = None
         if left.detected and not left_at_fov_edge:
             left_pts = boundary_to_base_link(
                 left,
-                grid_height=grid_height,
-                grid_width=grid_width,
-                origin_x=grid_origin_x,
-                origin_y=grid_origin_y,
-                resolution=1.0 / self.pixels_per_meter,
+                bev_height=bev_height,
+                bev_width=bev_width,
+                x_max=self.bev_x_range[1],
+                y_max=self.bev_y_range[1],
+                resolution=resolution,
                 sample_step=3,
             )
 
@@ -654,11 +637,11 @@ class BoundaryExtractor:
         if right.detected and not right_at_fov_edge:
             right_pts = boundary_to_base_link(
                 right,
-                grid_height=grid_height,
-                grid_width=grid_width,
-                origin_x=grid_origin_x,
-                origin_y=grid_origin_y,
-                resolution=1.0 / self.pixels_per_meter,
+                bev_height=bev_height,
+                bev_width=bev_width,
+                x_max=self.bev_x_range[1],
+                y_max=self.bev_y_range[1],
+                resolution=resolution,
                 sample_step=3,
             )
 
@@ -666,9 +649,9 @@ class BoundaryExtractor:
         result.right_boundary = right_pts
         result.valid = left_pts is not None or right_pts is not None
 
-        # 7. Generate debug image
+        # 6. Generate debug image
         result.debug_image = draw_boundary_overlay(
-            bev_for_extractor, left, right, l_diag, r_diag, edge_img
+            bev_drivable, left, right, l_diag, r_diag, edge_img
         )
 
         return result
