@@ -25,11 +25,11 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'visualization_node = visualization.visualization_node:main',
             'semantic_colorizer_node = visualization.semantic_colorizer_node:main',
             'live_2d_viz_node = visualization.live_2d_viz_node:main',
             'carla_viz_node = visualization.carla_viz_node:main',
             'lidar_camera_overlay_node = visualization.lidar_camera_overlay_node:main',
+            'estimated_lanes_viz_node = visualization.estimated_lanes_viz_node:main',
         ],
     },
 )

@@ -95,18 +95,18 @@ class CarlaBridgeNode(Node):
         super().__init__('carla_bridge_node')
         
         # ==================== Parameters ====================
-        self.declare_parameter('host', 'localhost')
-        self.declare_parameter('port', 2000)
+        self.declare_parameter('carla_host', 'localhost')
+        self.declare_parameter('carla_port', 2000)
         self.declare_parameter('timeout', 10.0)
         self.declare_parameter('fixed_delta_seconds', 0.05)
         self.declare_parameter('objects_file', '')
         self.declare_parameter('spawn_point_index', 50)
         self.declare_parameter('vehicle_type', 'vehicle.tesla.model3')
         self.declare_parameter('sensor_timeout', 2.0)  # Seconds to wait for sensor data
-        
+
         # Get parameters
-        self.host = self.get_parameter('host').value
-        self.port = self.get_parameter('port').value
+        self.host = self.get_parameter('carla_host').value
+        self.port = self.get_parameter('carla_port').value
         self.timeout = self.get_parameter('timeout').value
         self.fixed_delta_seconds = self.get_parameter('fixed_delta_seconds').value
         self.objects_file = self.get_parameter('objects_file').value

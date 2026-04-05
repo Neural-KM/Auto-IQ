@@ -39,9 +39,9 @@ class SemanticColorizerNode(Node):
         
         # ==================== Parameters ====================
         self.declare_parameter('semantic_topic', '/carla/ego_vehicle/ground_truth/camera/semantic/front/image')
-        self.declare_parameter('semantic_output_topic', '/visualization/semantic_image')
+        self.declare_parameter('semantic_output_topic', '/carla/ego_vehicle/ground_truth/camera/semantic/front/image/visualization')
         self.declare_parameter('labeled_pointcloud_topic', '/carla/ego_vehicle/ground_truth/lidar/top_semantic/point_cloud')
-        self.declare_parameter('colored_pointcloud_topic', '/visualization/semantic_pointcloud')
+        self.declare_parameter('colored_pointcloud_topic', '/carla/ego_vehicle/ground_truth/lidar/top_semantic/point_cloud/visualization')
         
         semantic_topic = self.get_parameter('semantic_topic').value
         semantic_output_topic = self.get_parameter('semantic_output_topic').value

@@ -49,7 +49,7 @@ from perception.data_classes.semantic_labels import colorize_mask
 from cv_bridge import CvBridge
 import carla
 from ament_index_python.packages import get_package_share_directory
-
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from visualization.carla_drawer import CarlaDrawer
 
 
@@ -76,7 +76,7 @@ class CarlaVizNode(Node):
         # Options: trajectory, global_route, predicted_traj, ground_truth_obstacles, detected_obstacles, speed, control
         self.declare_parameter('carla_debug_draw', 'trajectory,global_route,predicted_traj,speed,control')
         self.declare_parameter('semantic_topic', '/carla/ego_vehicle/ground_truth/camera/semantic/front/image')
-        self.declare_parameter('semantic_output_topic', '/visualization/semantic_image')
+        self.declare_parameter('semantic_output_topic', '/carla/ego_vehicle/ground_truth/camera/semantic/front/image/visualization')
         
         carla_host = self.get_parameter('carla_host').value
         carla_port = self.get_parameter('carla_port').value
@@ -129,19 +129,27 @@ class CarlaVizNode(Node):
         self.cv_bridge = CvBridge()
         
         # ==================== Publishers for RViz ====================
+        # Pattern: <source_topic>/visualization
         self.gt_obstacles_marker_pub = self.create_publisher(
-            MarkerArray, '/visualization/ground_truth_obstacles', 10)
+            MarkerArray, '/perception/ground_truth/obstacles/visualization', 10)
         self.detected_obstacles_marker_pub = self.create_publisher(
-            MarkerArray, '/visualization/detected_obstacles', 10)
+            MarkerArray, '/perception/obstacles/visualization', 10)
         self.trajectory_viz_pub = self.create_publisher(
-            Path, '/visualization/trajectory', 10)
+            Path, '/planning/trajectory/visualization', 10)
         self.current_waypoint_marker_pub = self.create_publisher(
-            Marker, '/visualization/current_waypoint', 10)
+            Marker, '/planning/current_waypoint/visualization', 10)
         # Publish colored semantic image
         self.semantic_image_pub = self.create_publisher(
             Image, semantic_output_topic, 10)
         
         # ==================== Subscribers ====================
+        self.sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+
         self.odom_sub = self.create_subscription(
             Odometry, '/carla/ego_vehicle/ground_truth/odometry',
             self.odom_callback, 10)
@@ -168,7 +176,7 @@ class CarlaVizNode(Node):
         
         self.semantic_sub = self.create_subscription(
             Image, semantic_topic,
-            self.semantic_callback, 10)
+            self.semantic_callback, self.sensor_qos)
         self.get_logger().info(f'Subscribed to semantic image: {semantic_topic}')
         
         self.current_waypoint_sub = self.create_subscription(

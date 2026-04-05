@@ -3,9 +3,13 @@ Panels:
     Help Height: 70
     Name: Displays
     Property Tree Widget:
-      Expanded: ~
+      Expanded:
+        - /GD Semantics+Lidar Overlay1/Topic1
+        - /Real semantics+Lane Pixels1/Topic1
+        - /Real Semantics1/Topic1
+        - /Mapping - Drop skirt debug1/Topic1
       Splitter Ratio: 0.5
-    Tree Height: 343
+    Tree Height: 316
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -60,9 +64,9 @@ Visualization Manager:
           Value: true
         ego_vehicle/sensor/imu/imu:
           Value: true
-        ego_vehicle/sensor/lidar/top:
-          Value: true
         ego_vehicle/sensor/lidar/at128_front:
+          Value: true
+        ego_vehicle/sensor/lidar/top:
           Value: true
         map:
           Value: true
@@ -92,9 +96,9 @@ Visualization Manager:
               {}
             ego_vehicle/sensor/imu/imu:
               {}
-            ego_vehicle/sensor/lidar/top:
-              {}
             ego_vehicle/sensor/lidar/at128_front:
+              {}
+            ego_vehicle/sensor/lidar/top:
               {}
       Update Interval: 0
       Value: true
@@ -129,34 +133,6 @@ Visualization Manager:
     - Alpha: 1
       Buffer Length: 1
       Class: rviz_default_plugins/Path
-      Color: 255; 0; 255
-      Enabled: true
-      Head Diameter: 0.30000001192092896
-      Head Length: 0.20000000298023224
-      Length: 0.30000001192092896
-      Line Style: Lines
-      Line Width: 0.05000000074505806
-      Name: Corridor Reference
-      Offset:
-        X: 0
-        Y: 0
-        Z: 0.15000000596046448
-      Pose Color: 255; 85; 255
-      Pose Style: None
-      Radius: 0.029999999329447746
-      Shaft Diameter: 0.10000000149011612
-      Shaft Length: 0.10000000149011612
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /planning/corridor_reference
-      Value: true
-    - Alpha: 1
-      Buffer Length: 1
-      Class: rviz_default_plugins/Path
       Color: 0; 255; 255
       Enabled: true
       Head Diameter: 0.30000001192092896
@@ -180,7 +156,7 @@ Visualization Manager:
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /visualization/trajectory
+        Value: /planning/trajectory/visualization
       Value: true
     - Alpha: 1
       Buffer Length: 1
@@ -220,7 +196,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /visualization/ground_truth_obstacles
+        Value: /perception/ground_truth/obstacles/visualization
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
@@ -232,19 +208,19 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /visualization/detected_obstacles
+        Value: /perception/obstacles/visualization
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
-      Name: Lanes
+      Name: Lane Marking Fits
       Namespaces:
-        {}
+        lanes: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /perception/lanes
+        Value: /mapping/lanes
       Value: true
     - Angle Tolerance: 0.10000000149011612
       Class: rviz_default_plugins/Odometry
@@ -314,7 +290,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /visualization/semantic_pointcloud
+        Value: /carla/ego_vehicle/ground_truth/lidar/top_semantic/point_cloud/visualization
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
@@ -356,37 +332,14 @@ Visualization Manager:
       Max Value: 1
       Median window: 5
       Min Value: 0
-      Name: Image
+      Name: GD Semantics+Lidar Overlay
       Normalize Range: true
       Topic:
-        Depth: 5
+        Depth: 1
         Durability Policy: Volatile
         History Policy: Keep Last
-        Reliability Policy: Reliable
+        Reliability Policy: Best Effort
         Value: /perception/semantic_pointcloud_debug
-      Value: true
-    - Alpha: 0.699999988079071
-      Binary representation: false
-      Binary threshold: 100
-      Class: rviz_default_plugins/Map
-      Color Scheme: map
-      Draw Behind: false
-      Enabled: true
-      Name: Map
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /mapping/local_costmap
-      Update Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /mapping/local_costmap_updates
-      Use Timestamp: false
       Value: true
     - Alpha: 0.699999988079071
       Binary representation: false
@@ -395,7 +348,7 @@ Visualization Manager:
       Color Scheme: map
       Draw Behind: true
       Enabled: true
-      Name: Map
+      Name: IPM Costmap
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -411,20 +364,6 @@ Visualization Manager:
         Value: /mapping/ipm_costmap_updates
       Use Timestamp: false
       Value: true
-    - Class: rviz_default_plugins/Image
-      Enabled: true
-      Max Value: 1
-      Median window: 5
-      Min Value: 0
-      Name: Image
-      Normalize Range: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /mapping/ipm_debug_image
-      Value: true
     - Alpha: 0.699999988079071
       Binary representation: false
       Binary threshold: 100
@@ -432,7 +371,7 @@ Visualization Manager:
       Color Scheme: costmap
       Draw Behind: false
       Enabled: true
-      Name: Map
+      Name: C-Space Costmap
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -447,6 +386,124 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /planning/cspace_costmap_updates
       Use Timestamp: false
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Real semantics+Lane Pixels
+      Normalize Range: true
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /perception/semantic_map/road_lane_extraction/colored
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Real Semantics
+      Normalize Range: true
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /perception/semantic_map/colored
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: RGB Camera Front
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /carla/ego_vehicle/sensor/camera/rgb/front/image
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Drivable Boundaries (RED)
+      Namespaces:
+        drivable_boundaries: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /mapping/boundary_markers
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Estimated Lanes Visualization
+      Namespaces:
+        lane_0_boundary: true
+        lane_0_centerline: true
+        lane_1_boundary: true
+        lane_1_centerline: true
+        lane_2_boundary: true
+        lane_2_centerline: true
+        lane_3_boundary: true
+        lane_3_centerline: true
+        lane_labels: true
+        road_boundary: true
+        status: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /mapping/estimated_lanes/visualization
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Mapping - Boundary Debug
+      Normalize Range: true
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /mapping/debug/boundary
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Mapping - Lane Fit BEV
+      Normalize Range: true
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /mapping/debug/lane_bev
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Mapping - Drop skirt debug
+      Normalize Range: true
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /mapping/debug/drop_skirt
       Value: true
   Enabled: true
   Global Options:
@@ -491,7 +548,7 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Scale: 9.776226997375488
+      Scale: 8.214470863342285
       Target Frame: ego_vehicle
       Value: TopDownOrtho (rviz_default_plugins)
       X: 0
@@ -500,12 +557,24 @@ Visualization Manager:
 Window Geometry:
   Displays:
     collapsed: false
+  GD Semantics+Lidar Overlay:
+    collapsed: false
   Height: 1011
   Hide Left Dock: false
   Hide Right Dock: false
-  Image:
+  Mapping - Boundary Debug:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd00000004000000000000019800000395fc020000000afb0000001200530065006c0065006300740069006f006e00000001e10000009b0000000000000000fb0000001e0054006f006f006c002000500072006f007000650072007400690065007300000001df0000009b0000000000000000fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073010000003f000001dd000000cc00fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000000a0049006d0061006700650100000222000000d70000001700fffffffb0000000a0049006d00610067006501000002ff000000d50000001700ffffff000000010000012900000395fc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073010000003f00000395000000a900fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000004420000003efc0100000002fb0000000800540069006d00650100000000000004420000000000000000fb0000000800540069006d00650100000000000004500000000000000000000004710000039500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Mapping - Drop skirt debug:
+    collapsed: false
+  Mapping - Lane Fit BEV:
+    collapsed: false
+  QMainWindow State: 000000ff00000000fd0000000400000000000001980000029ffc0200000009fb0000001200530065006c0065006300740069006f006e00000001e10000009b0000000000000000fb0000001e0054006f006f006c002000500072006f007000650072007400690065007300000001df0000009b0000000000000000fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afc0000003f000001e1000000eb0100001efa000000010100000002fb0000000a005600690065007700730100000000ffffffff0000010000fffffffb000000100044006900730070006c0061007900730100000000000001980000015600fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb00000020005200470042002000430061006d006500720061002000460072006f006e00740100000226000000b80000001700ffffff00000001000001920000029ffc0200000006fb00000034004d0061007000700069006e00670020002d002000440072006f007000200073006b006900720074002000640065006200750067010000003f000000f60000001700fffffffb0000002c004d0061007000700069006e00670020002d0020004c0061006e006500200046006900740020004200450056010000013b000000be0000001700fffffffb00000030004d0061007000700069006e00670020002d00200042006f0075006e006400610072007900200044006500620075006701000001ff000000df0000001700fffffffb0000000a0049006d006100670065010000003f0000029f0000000000000000fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e100000197000000030000073e000000f0fc010000000bfb0000003400470044002000530065006d0061006e0074006900630073002b004c00690064006100720020004f007600650072006c0061007901000000000000023a000000f200fffffffb0000001c005200650061006c002000530065006d0061006e00740069006300730100000240000002670000009900fffffffb00000034005200650061006c002000730065006d0061006e0074006900630073002b004c0061006e006500200050006900780065006c007301000004ad00000291000000eb00fffffffb0000001200490050004d00200044006500620075006701000004cb000002730000000000000000fb0000000a0049006d0061006700650100000000000001960000000000000000fb0000000a0049006d006100670065010000019c000000f00000000000000000fb0000000a0049006d0061006700650100000292000000f50000000000000000fb0000000a0049006d006100670065010000038d000000f20000000000000000fb0000000a0049006d0061006700650100000485000002b90000000000000000fb0000000800540069006d00650100000000000004420000000000000000fb0000000800540069006d00650100000000000004500000000000000000000004080000029f00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  RGB Camera Front:
+    collapsed: false
+  Real Semantics:
+    collapsed: false
+  Real semantics+Lane Pixels:
+    collapsed: false
   Views:
     collapsed: false
   Width: 1854
