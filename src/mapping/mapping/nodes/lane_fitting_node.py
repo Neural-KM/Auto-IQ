@@ -50,7 +50,7 @@ Publishes:
 - /mapping/debug/lane_bev (Image, bgr8) - BEV debug visualization (if enabled)
 - /mapping/estimated_lanes (EstimatedLanes) - estimated lanes from boundaries
 - /mapping/boundary_markers (MarkerArray) - drivable boundary visualization
-- /mapping/boundary_debug_image (Image) - boundary extraction debug
+- /mapping/debug/boundary (Image) - boundary extraction debug
 
 Changelog:
 ----------
