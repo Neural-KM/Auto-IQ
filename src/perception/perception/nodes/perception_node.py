@@ -188,8 +188,8 @@ class PerceptionNode(Node):
         if self.initialized:
             return
 
-        # Try to get camera extrinsics (if intrinsics already received)
-        if self.camera.intrinsics_received and not self.camera.extrinsics_received:
+        # Try to get camera extrinsics
+        if not self.camera.ready:
             self.camera.try_get_extrinsics()
 
         # Try to get LiDAR TF (always needed for method 0 or ground truth)

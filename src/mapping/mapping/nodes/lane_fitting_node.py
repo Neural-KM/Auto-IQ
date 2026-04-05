@@ -270,9 +270,7 @@ class LaneFittingNode(Node):
 
         # Wait for camera params before processing
         if not self.camera.ready:
-            # Try to get extrinsics if intrinsics already received
-            if self.camera.intrinsics_received:
-                self.camera.try_get_extrinsics()
+            self.camera.try_get_extrinsics()
             return
 
         # Run lane fitting (polynomial detection from road_line markings)

@@ -148,16 +148,6 @@ class CameraParamsProvider:
         """Camera parameters (None if not ready)."""
         return self._params
 
-    @property
-    def intrinsics_received(self) -> bool:
-        """True when CameraInfo has been received."""
-        return self._intrinsics_received
-
-    @property
-    def extrinsics_received(self) -> bool:
-        """True when TF extrinsics have been received."""
-        return self._extrinsics_received
-
     def try_get_extrinsics(self) -> bool:
         """
         Attempt to look up camera extrinsics from TF.
