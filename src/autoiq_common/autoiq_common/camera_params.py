@@ -176,7 +176,9 @@ class CameraParamsProvider:
                 f'CameraParamsProvider: invalid camera height from TF: {cam_z}')
             return False
 
-        # Extract pitch from quaternion (rotation around X axis)
+        # Extract pitch from quaternion using Euler angle convention
+        # In vehicle frame (X=forward, Y=left, Z=up), pitch is rotation around Y axis
+        # Formula: sinp = 2*(w*y - z*x) gives pitch angle (positive = nose down)
         q = transform.transform.rotation
         sinp = 2.0 * (q.w * q.y - q.z * q.x)
         cam_pitch = np.degrees(np.arcsin(np.clip(sinp, -1.0, 1.0)))
