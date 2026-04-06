@@ -1,38 +1,26 @@
 """
-Road Boundary Extractor — Sliding Window on BEV Drivable-Area Mask
-==================================================================
+Road Boundary Extractor
+=======================
 
-Extracts left and right continuous road boundaries from a binary Bird's-Eye
-View (BEV) local lane data mask produced by Inverse Perspective Mapping.
+Extracts left and right road boundaries from semantic segmentation images
+using Bird's Eye View (BEV) transform and sliding window tracking.
 
-The algorithm uses a highly constrained Sliding Window approach designed to
-explicitly reject sudden road cutouts such as U-turns, intersections, and
-missing mask data.
+Architecture:
+    semantic_img → IPM → BEV masks → edge detection → sliding window → polynomial fit → base_link coords
 
-BEV coordinate convention (direct from IPM, no transforms):
-    Image shape: (bev_height, bev_width)
+Key concept - three area types in BEV:
+    1. Drivable (white): road + road_line pixels - can drive here
+    2. Obstruction (black): observed non-drivable - buildings, barriers, etc.
+    3. Unmapped (gray): outside camera FOV - unknown, no boundary here
+
+Boundaries only form between drivable and obstruction areas, NOT between
+drivable and unmapped areas. This prevents false boundaries at FOV edges.
+
+BEV coordinate convention (direct from IPM):
     - rows = X / forward:  row 0 = far (X_max), row max = near (X_min)
     - cols = Y / lateral:  col 0 = left (Y_max), col max = right (Y_min)
 
-    To convert to base_link:
-        x_base = X_max - row * resolution  (forward distance)
-        y_base = Y_max - col * resolution  (lateral position, +left)
-
-The sliding window sweeps along **rows** (forward axis, from near to far)
-and tracks boundary **column** positions (lateral).
-
-Designed for Level 4 autonomous driving on heavy-duty trucks where lane
-boundary stability is safety-critical.
-
-Changelog:
----------
-2026-04-05: Refactored to work directly with IPM output convention:
-    - No transpose or flip operations
-    - Sweep along rows (forward), track column positions (lateral)
-2026-04-01: Fixed sweep range bug
-2026-03-25: Improved curve handling
-
-Author : Auto-IQ Mapping Stack
+Author: Auto-IQ Mapping Stack
 """
 
 from __future__ import annotations
@@ -43,397 +31,22 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple, List
 
 
-# ───────────────────────── data classes ──────────────────────────
-
 @dataclass
 class BoundaryResult:
-    """Container for a single road-boundary extraction result.
-
-    Convention (matching IPM output):
-        xs  = collected **column** positions (lateral / Y)
-        ys  = collected **row** positions    (forward / X)
-        fitted_x = polynomial-evaluated column values (lateral)
-        fitted_y = row values used for evaluation (forward)
-    """
-
-    poly_coeffs: Optional[np.ndarray] = None  # 2nd-order [a, b, c]
-    xs: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
-    ys: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
-    fitted_x: Optional[np.ndarray] = None     # col values  (lateral)
-    fitted_y: Optional[np.ndarray] = None     # row values  (forward)
-    y_min: Optional[float] = None
-    y_max: Optional[float] = None
+    """Single road boundary detection result in BEV pixel coordinates."""
     detected: bool = False
-
-
-# ───────────────────── helper: edge extraction ───────────────────
-
-def _extract_boundary_edges(binary_mask: np.ndarray) -> np.ndarray:
-    """
-    Extract road-boundary edges from a binary drivable-area mask.
-
-    Road boundaries run roughly along the row (forward) axis.
-    Transitions happen along the col (lateral) axis, so we use a
-    **horizontal** Sobel gradient (dx = 1).
-
-    Returns a binary edge image (uint8, 0 / 255).
-    """
-    mask_u8 = binary_mask.astype(np.uint8) * 255
-
-    # Horizontal gradient — detects edges where intensity changes across cols
-    sobel_x = cv2.Sobel(mask_u8, cv2.CV_64F, 1, 0, ksize=3)
-    edge = np.uint8(np.absolute(sobel_x) > 30) * 255
-    return edge
-
-
-# ───────────────────── core algorithm ────────────────────────────
-
-def extract_boundaries(
-    binary_warped: np.ndarray,
-    valid_mask: Optional[np.ndarray] = None,
-) -> Tuple[BoundaryResult, BoundaryResult, np.ndarray, list, list]:
-    """
-    Extract left and right road boundaries from a BEV binary mask.
-
-    Parameters
-    ----------
-    binary_warped : np.ndarray
-        2-D binary image, shape (bev_height, bev_width).  1 = drivable, 0 = background.
-        Uses IPM convention: rows = X/forward (row 0 = far), cols = Y/lateral (col 0 = left).
-    valid_mask : np.ndarray, optional
-        Same shape.  1 = observed by camera, 0 = unseen / UNKNOWN.
-
-    Returns
-    -------
-    left_result  : BoundaryResult   (low-col boundary = left of vehicle)
-    right_result : BoundaryResult   (high-col boundary = right of vehicle)
-    edge_img     : np.ndarray       (intermediate edge image for debug)
-    left_diags   : list[tuple]      (r_lo, r_hi, c_center, margin, frozen)
-    right_diags  : list[tuple]      (r_lo, r_hi, c_center, margin, frozen)
-    """
-    # ── Hardcoded parameters ────────────────────────────────────
-    NWINDOWS = 15
-    MARGIN = 60                    # half-width of search window (cols)
-    MINPIX = 10                    # min edge pixels to recenter
-    MAX_LATERAL_SHIFT = 45         # max col-shift between consecutive windows
-    LANE_WIDTH_TOLERANCE = 60      # allowed col-width deviation
-    POLY_ORDER = 2
-    VALID_MASK_ERODE = 5
-
-    h, w = binary_warped.shape[:2]  # h = rows (forward), w = cols (lateral)
-
-    # ── Valid mask ──────────────────────────────────────────────
-    if valid_mask is None:
-        valid_mask = np.ones((h, w), dtype=np.uint8)
-    else:
-        valid_mask = valid_mask.astype(np.uint8)
-
-    if VALID_MASK_ERODE > 0:
-        kern = np.ones((VALID_MASK_ERODE, VALID_MASK_ERODE), dtype=np.uint8)
-        valid_mask = cv2.erode(valid_mask, kern, iterations=1)
-
-    # ── 1. Edge extraction ──────────────────────────────────────
-    edge_img = _extract_boundary_edges(binary_warped)
-    edge_img = (edge_img * valid_mask).astype(np.uint8)
-
-    # ── 2. Histogram initialization ─────────────────────────────
-    # Sum edge pixels across ALL rows → one value per column.
-    # Peaks indicate the two road boundary columns.
-    histogram = np.sum(edge_img, axis=0).astype(np.float64)
-
-    midpoint = w // 2
-    # Col 0 = left side of vehicle → left boundary has col < midpoint
-    # Col w = right side of vehicle → right boundary has col > midpoint
-    left_base = int(np.argmax(histogram[:midpoint]))
-    right_base = int(np.argmax(histogram[midpoint:])) + midpoint
-
-    # Expected road width in columns
-    expected_width = right_base - left_base
-    if expected_width <= 0:
-        expected_width = w // 2
-
-    # ── 3. Sliding window setup ─────────────────────────────────
-    # Sweep along rows from bottom (near) to top (far).
-    # Row 0 = far, Row h-1 = near.
-    # We start from near (high row indices) and move toward far (low row indices).
-    sweep_start = max(10, int(h * 0.05))  # Skip 5% at far edge (noisy)
-    sweep_end = h - max(10, int(h * 0.05))  # Skip 5% at near edge
-    sweep_range = sweep_end - sweep_start
-    window_h = max(1, sweep_range // NWINDOWS)
-    margin = MARGIN
-    minpix = MINPIX
-
-    left_current = left_base
-    right_current = right_base
-
-    # Collectors (xs = col positions/lateral, ys = row positions/forward)
-    left_xs: List[int] = []
-    left_ys: List[int] = []
-    right_xs: List[int] = []
-    right_ys: List[int] = []
-
-    left_diags: list = []
-    right_diags: list = []
-
-    nonzero = edge_img.nonzero()
-    nz_row = np.array(nonzero[0])
-    nz_col = np.array(nonzero[1])
-
-    # ── 4. Core loop — near to far along rows ───────────────────
-    for win_idx in range(NWINDOWS):
-        # Sweep from near (high row) to far (low row)
-        r_hi = sweep_end - win_idx * window_h
-        r_lo = sweep_end - (win_idx + 1) * window_h
-
-        # Left boundary search window (low cols)
-        c_left_lo = left_current - margin
-        c_left_hi = left_current + margin
-
-        # Right boundary search window (high cols)
-        c_right_lo = right_current - margin
-        c_right_hi = right_current + margin
-
-        # Edge pixels inside each window
-        left_inds = (
-            (nz_row >= r_lo) & (nz_row < r_hi) &
-            (nz_col >= c_left_lo) & (nz_col < c_left_hi)
-        )
-        right_inds = (
-            (nz_row >= r_lo) & (nz_row < r_hi) &
-            (nz_col >= c_right_lo) & (nz_col < c_right_hi)
-        )
-
-        left_pix_r = nz_row[left_inds]
-        left_pix_c = nz_col[left_inds]
-        right_pix_r = nz_row[right_inds]
-        right_pix_c = nz_col[right_inds]
-
-        # Candidate new column centers
-        left_new = int(np.mean(left_pix_c)) if len(left_pix_c) >= minpix else left_current
-        right_new = int(np.mean(right_pix_c)) if len(right_pix_c) >= minpix else right_current
-
-        # ── Constraint checks ──────────────────────────────────
-        left_frozen = len(left_pix_c) < minpix
-        right_frozen = len(right_pix_c) < minpix
-
-        # Momentum / max lateral shift
-        if not left_frozen and abs(left_new - left_current) > MAX_LATERAL_SHIFT:
-            left_new = left_current
-            left_frozen = True
-        if not right_frozen and abs(right_new - right_current) > MAX_LATERAL_SHIFT:
-            right_new = right_current
-            right_frozen = True
-
-        # Constant road width enforcement
-        proposed_width = right_new - left_new
-        if proposed_width > expected_width + LANE_WIDTH_TOLERANCE:
-            left_delta = abs(left_new - left_current)
-            right_delta = abs(right_new - right_current)
-            if left_delta > right_delta:
-                left_new = right_new - expected_width
-                left_frozen = True
-            else:
-                right_new = left_new + expected_width
-                right_frozen = True
-
-        # ── Accept updates ──────────────────────────────────────
-        left_current = left_new
-        right_current = right_new
-
-        if len(left_pix_c) > 0:
-            left_xs.extend(left_pix_c.tolist())
-            left_ys.extend(left_pix_r.tolist())
-        if len(right_pix_c) > 0:
-            right_xs.extend(right_pix_c.tolist())
-            right_ys.extend(right_pix_r.tolist())
-
-        # Diagnostics: (r_lo, r_hi, c_center, margin, frozen)
-        left_diags.append((r_lo, r_hi, left_current, margin, left_frozen))
-        right_diags.append((r_lo, r_hi, right_current, margin, right_frozen))
-
-    # ── 5. Polynomial fitting  col = f(row) ────────────────────
-    left_result = _fit_boundary(left_xs, left_ys, h, POLY_ORDER)
-    right_result = _fit_boundary(right_xs, right_ys, h, POLY_ORDER)
-
-    return left_result, right_result, edge_img, left_diags, right_diags
-
-
-# ───────────────────── curve fitting helper ──────────────────────
-
-def _fit_boundary(
-    xs: List[int],
-    ys: List[int],
-    row_extent: int,
-    order: int = 2,
-) -> BoundaryResult:
-    """Fit a polynomial  col = f(row)  to collected boundary pixels.
-
-    xs = col positions (dependent), ys = row positions (independent).
-    """
-    result = BoundaryResult()
-    if len(xs) < order + 1:
-        return result
-
-    xs_arr = np.array(xs, dtype=np.float64)   # cols (lateral)
-    ys_arr = np.array(ys, dtype=np.float64)   # rows (forward)
-
-    try:
-        coeffs = np.polyfit(ys_arr, xs_arr, order)
-    except (np.linalg.LinAlgError, ValueError):
-        return result
-
-    result.poly_coeffs = coeffs
-    result.xs = xs_arr
-    result.ys = ys_arr
-    result.detected = True
-    result.y_min = float(np.min(ys_arr))
-    result.y_max = float(np.max(ys_arr))
-
-    # Evaluate only within supported row range
-    r_start = int(max(0, np.floor(result.y_min)))
-    r_end = int(min(row_extent - 1, np.ceil(result.y_max)))
-    if r_end < r_start:
-        return result
-
-    plot_row = np.arange(r_start, r_end + 1, dtype=np.float64)
-    plot_col = np.polyval(coeffs, plot_row)
-    result.fitted_x = plot_col    # col values  (lateral)
-    result.fitted_y = plot_row    # row values  (forward)
-
-    return result
-
-
-# ───────────────────── visualization ─────────────────────────────
-
-def draw_boundary_overlay(
-    bev_img: np.ndarray,
-    left_result: BoundaryResult,
-    right_result: BoundaryResult,
-    left_diags: list,
-    right_diags: list,
-    edge_img: Optional[np.ndarray] = None,
-) -> np.ndarray:
-    """
-    Draw sliding windows and fitted polynomials on a copy of the BEV image.
-
-    BEV convention: row 0 = far (top), col 0 = left.
-    No transforms applied - visualization matches BEV coordinate system.
-
-    Windows: green = valid (active tracking), red = frozen / constrained.
-    Curves: yellow = left boundary, cyan = right boundary.
-
-    Each diag entry is a tuple: (r_lo, r_hi, c_center, margin, is_frozen).
-    """
-    # Build 3-channel canvas
-    if bev_img.ndim == 2:
-        vis = cv2.cvtColor(bev_img, cv2.COLOR_GRAY2BGR)
-    else:
-        vis = bev_img.copy()
-
-    # Blend edge image (faintly)
-    if edge_img is not None:
-        edge_bgr = cv2.cvtColor(edge_img, cv2.COLOR_GRAY2BGR)
-        vis = cv2.addWeighted(vis, 0.8, edge_bgr, 0.3, 0)
-
-    GREEN = (0, 255, 0)
-    RED = (0, 0, 255)
-    YELLOW = (0, 255, 255)
-    CYAN = (255, 255, 0)
-
-    # Draw sliding windows with semi-transparent fill
-    overlay = vis.copy()
-    for r_lo, r_hi, c_center, margin, is_frozen in left_diags + right_diags:
-        colour = RED if is_frozen else GREEN
-        # Rectangle: (x1, y1) to (x2, y2) where x=col, y=row
-        pt1 = (int(c_center - margin), int(r_lo))
-        pt2 = (int(c_center + margin), int(r_hi))
-        cv2.rectangle(overlay, pt1, pt2, colour, -1)
-        cv2.rectangle(vis, pt1, pt2, colour, 3)
-
-    vis = cv2.addWeighted(overlay, 0.3, vis, 0.7, 0)
-
-    # Draw fitted curves
-    for result, colour in [(left_result, YELLOW), (right_result, CYAN)]:
-        if result.detected and result.fitted_x is not None:
-            pts = np.column_stack([
-                result.fitted_x.astype(np.int32),   # col → x
-                result.fitted_y.astype(np.int32),   # row → y
-            ])
-            pts[:, 0] = np.clip(pts[:, 0], 0, vis.shape[1] - 1)
-            pts[:, 1] = np.clip(pts[:, 1], 0, vis.shape[0] - 1)
-            cv2.polylines(vis, [pts], isClosed=False, color=colour, thickness=3)
-
-    return vis
-
-
-# ───────────────────── BEV-pixel → base_link conversion ─────────
-
-def boundary_to_base_link(
-    result: BoundaryResult,
-    bev_height: int,
-    bev_width: int,
-    x_max: float,
-    y_max: float,
-    resolution: float,
-    sample_step: int = 5,
-) -> Optional[np.ndarray]:
-    """
-    Convert a fitted boundary from BEV-pixel coordinates to ``base_link``
-    metric coordinates.
-
-    BEV convention (from IPM):
-        row 0 = far (X_max), row max = near (X_min)
-        col 0 = left (Y_max), col max = right (Y_min)
-
-    Conversion:
-        x_base = X_max - row * resolution  (forward)
-        y_base = Y_max - col * resolution  (lateral, +left)
-
-    In BoundaryResult:
-        fitted_y = row values   (forward / X)
-        fitted_x = col values   (lateral / Y)
-
-    Returns
-    -------
-    points : np.ndarray, shape (N, 2)
-        (x_base, y_base) in the vehicle frame, ordered near → far.
-        *None* if the boundary was not detected.
-    """
-    if not result.detected or result.fitted_x is None or result.fitted_y is None:
-        return None
-
-    rows = result.fitted_y[::sample_step]    # forward
-    cols = result.fitted_x[::sample_step]    # lateral
-
-    # Clip to valid BEV range
-    valid = (
-        (rows >= 0) & (rows < bev_height) &
-        (cols >= 0) & (cols < bev_width)
-    )
-    rows = rows[valid]
-    cols = cols[valid]
-
-    if len(rows) == 0:
-        return None
-
-    # Convert to base_link coordinates
-    x_base = x_max - rows * resolution
-    y_base = y_max - cols * resolution
-
-    # Sort by x (forward distance) ascending (near to far)
-    sorted_idx = np.argsort(x_base)
-    x_base = x_base[sorted_idx]
-    y_base = y_base[sorted_idx]
-
-    return np.column_stack([x_base, y_base])
-
-
-# ───────────────────── BoundaryExtractor class ─────────────────────
+    poly_coeffs: Optional[np.ndarray] = None
+    points_col: np.ndarray = field(default_factory=lambda: np.array([]))  # lateral (Y)
+    points_row: np.ndarray = field(default_factory=lambda: np.array([]))  # forward (X)
+    fitted_col: Optional[np.ndarray] = None
+    fitted_row: Optional[np.ndarray] = None
+    row_min: Optional[float] = None
+    row_max: Optional[float] = None
 
 
 @dataclass
 class BoundaryExtractionResult:
-    """Result from boundary extraction pipeline."""
+    """Complete boundary extraction result."""
     left_boundary: Optional[np.ndarray] = None   # (N, 2) x, y in base_link
     right_boundary: Optional[np.ndarray] = None  # (N, 2) x, y in base_link
     debug_image: Optional[np.ndarray] = None     # BGR debug visualization
@@ -444,24 +57,28 @@ class BoundaryExtractor:
     """
     Extracts road boundaries from semantic segmentation images.
 
-    Creates a Bird's Eye View (BEV) using IPM transform, then uses sliding
-    window algorithm to extract left and right road boundaries.
+    Pipeline:
+        1. Create drivable and observed masks from semantic image
+        2. Transform both to BEV using IPM
+        3. Extract edges only where drivable meets observed obstruction
+        4. Track boundaries using sliding window algorithm
+        5. Fit polynomials to detected boundary points
+        6. Convert to base_link metric coordinates
 
-    The extracted boundaries represent the OUTER edge of the drivable area
-    (road + road_line), NOT the lane markings themselves. The lane estimator
-    must account for the buffer area between drivable edge and actual lanes.
+    Important: Boundaries only form between drivable area and observed
+    obstructions. Unmapped areas (outside camera FOV) do not create boundaries.
 
     Usage:
         extractor = BoundaryExtractor(
-            bev_x_range=(5.0, 35.0),
-            bev_y_range=(-15.0, 15.0),
-            pixels_per_meter=10.0,
+            bev_x_range=(3.0, 60.0),
+            bev_y_range=(-50.0, 50.0),
+            pixels_per_meter=8.0,
         )
-        extractor.set_camera_params(fov=90, pitch=5, height=1.5)
+        extractor.set_camera_params(fov=90, pitch=5, camera_height=1.5)
         result = extractor.extract(semantic_img)
     """
 
-    # Semantic class IDs (must match perception/data_classes/semantic_labels.py)
+    # Semantic class IDs
     ROAD_ID = 1
     ROAD_LINE_ID = 24
 
@@ -470,14 +87,25 @@ class BoundaryExtractor:
         bev_x_range: Tuple[float, float],
         bev_y_range: Tuple[float, float],
         pixels_per_meter: float,
+        # Sliding window parameters (in meters for resolution independence)
+        num_windows: int = 15,
+        window_margin_m: float = 7.5,
+        min_pixels: int = 10,
+        max_lateral_shift_m: float = 5.0,
+        poly_order: int = 2,
     ):
         """
-        Initialize the boundary extractor.
+        Initialize boundary extractor.
 
         Args:
-            bev_x_range: Forward range for BEV transform (meters)
-            bev_y_range: Lateral range for BEV transform (meters)
+            bev_x_range: Forward range (x_min, x_max) in meters
+            bev_y_range: Lateral range (y_min, y_max) in meters
             pixels_per_meter: BEV resolution
+            num_windows: Number of sliding windows
+            window_margin_m: Half-width of search window in meters
+            min_pixels: Minimum edge pixels to update window center
+            max_lateral_shift_m: Maximum lateral shift per window in meters
+            poly_order: Polynomial order for curve fitting
         """
         self.bev_x_range = bev_x_range
         self.bev_y_range = bev_y_range
@@ -488,68 +116,34 @@ class BoundaryExtractor:
         y_span = bev_y_range[1] - bev_y_range[0]
         self.bev_height = int(x_span * pixels_per_meter)
         self.bev_width = int(y_span * pixels_per_meter)
+        self.resolution = 1.0 / pixels_per_meter
 
-        # Camera parameters (set via set_camera_params)
+        # Sliding window parameters (convert meters to pixels)
+        self.num_windows = num_windows
+        self.window_margin = int(window_margin_m * pixels_per_meter)
+        self.min_pixels = min_pixels
+        self.max_lateral_shift = int(max_lateral_shift_m * pixels_per_meter)
+        self.poly_order = poly_order
+
+        # Camera parameters
         self.camera_fov: Optional[float] = None
         self.camera_pitch: Optional[float] = None
         self.camera_height: Optional[float] = None
 
-    def set_camera_params(
-        self,
-        fov: float,
-        pitch: float,
-        camera_height: float,
-    ):
-        """Set camera extrinsics for IPM transform."""
+    def set_camera_params(self, fov: float, pitch: float, camera_height: float):
+        """Set camera parameters for IPM transform."""
         self.camera_fov = fov
         self.camera_pitch = pitch
         self.camera_height = camera_height
 
-    def _is_boundary_at_fov_edge(
-        self,
-        boundary: BoundaryResult,
-        observed_mask: np.ndarray,
-        is_left: bool,
-        margin: int = 15,
-    ) -> bool:
-        """
-        Check if a detected boundary is at the edge of the observed (FOV) region.
-
-        A boundary at the FOV edge is not a real road boundary - it's just where
-        our camera view ends. Such boundaries should be invalidated.
-
-        Args:
-            boundary: BoundaryResult from extract_boundaries
-            observed_mask: Binary mask of observed area (1=observed, 0=outside FOV)
-            is_left: True for left boundary (low col values)
-            margin: Pixels from edge to consider as "at FOV edge"
-
-        Returns:
-            True if boundary is at FOV edge (should be invalidated)
-        """
-        if not boundary.detected or boundary.fitted_x is None:
-            return False
-
-        # Find the extent of the observed region
-        # Sum observed pixels per col to find which cols have observations
-        col_sums = np.sum(observed_mask, axis=0)
-        observed_cols = np.where(col_sums > 0)[0]
-
-        if len(observed_cols) == 0:
-            return True  # No observed area
-
-        min_observed_col = observed_cols.min()
-        max_observed_col = observed_cols.max()
-
-        # Get average boundary col position
-        avg_boundary_col = np.mean(boundary.fitted_x)
-
-        if is_left:
-            # Left boundary has low col values (toward min_observed_col)
-            return avg_boundary_col <= (min_observed_col + margin)
-        else:
-            # Right boundary has high col values (toward max_observed_col)
-            return avg_boundary_col >= (max_observed_col - margin)
+    @property
+    def camera_ready(self) -> bool:
+        """Check if all camera parameters are set."""
+        return (
+            self.camera_fov is not None and
+            self.camera_pitch is not None and
+            self.camera_height is not None
+        )
 
     def extract(self, semantic_img: np.ndarray) -> BoundaryExtractionResult:
         """
@@ -559,26 +153,25 @@ class BoundaryExtractor:
             semantic_img: Mono8 semantic segmentation image
 
         Returns:
-            BoundaryExtractionResult with left/right boundaries in base_link
+            BoundaryExtractionResult with boundaries in base_link coordinates
         """
-        # Import here to avoid circular dependency
         from mapping.utils.ipm_transform import convert_to_ipm
 
         result = BoundaryExtractionResult()
 
-        if self.camera_fov is None:
+        if not self.camera_ready:
             return result
 
         # 1. Create masks from semantic image
-        # Drivable area = road + road_line
+        # Drivable = road + road_line
         drivable_mask = (
             (semantic_img == self.ROAD_ID) | (semantic_img == self.ROAD_LINE_ID)
         ).astype(np.uint8) * 255
 
-        # Observed area = any pixel that has a semantic label (not unlabeled/0)
-        observed_mask_raw = (semantic_img != 0).astype(np.uint8) * 255
+        # Observed = any labeled pixel (semantic_id != 0 means camera saw something)
+        observed_mask = (semantic_img != 0).astype(np.uint8) * 255
 
-        # 2. Transform both masks to BEV using IPM (no additional transforms needed)
+        # 2. Transform both masks to BEV
         bev_drivable, _, _ = convert_to_ipm(
             image=drivable_mask,
             fov=self.camera_fov,
@@ -591,7 +184,7 @@ class BoundaryExtractor:
         )
 
         bev_observed, _, _ = convert_to_ipm(
-            image=observed_mask_raw,
+            image=observed_mask,
             fov=self.camera_fov,
             pitch=self.camera_pitch,
             camera_height=self.camera_height,
@@ -601,57 +194,271 @@ class BoundaryExtractor:
             interpolation=cv2.INTER_NEAREST,
         )
 
-        # 3. Extract road boundaries directly from BEV (no transform needed)
+        # Binary masks (get actual dimensions from BEV image)
         bev_height, bev_width = bev_drivable.shape[:2]
-        binary_mask = (bev_drivable > 127).astype(np.uint8)
-        observed_mask = (bev_observed > 127).astype(np.uint8)
+        drivable = (bev_drivable > 127).astype(np.uint8)
+        observed = (bev_observed > 127).astype(np.uint8)
 
-        left, right, edge_img, l_diag, r_diag = extract_boundaries(binary_mask, observed_mask)
+        # Obstruction = observed but not drivable
+        obstruction = observed & ~drivable
 
-        # 4. Check if boundaries are at FOV edge (not real road boundaries)
-        fov_edge_margin = 15
+        # 3. Extract edges only at drivable-obstruction boundaries
+        edge_img = self._extract_edges(drivable, obstruction)
 
-        left_at_fov_edge = self._is_boundary_at_fov_edge(
-            left, observed_mask, is_left=True, margin=fov_edge_margin
-        )
-        right_at_fov_edge = self._is_boundary_at_fov_edge(
-            right, observed_mask, is_left=False, margin=fov_edge_margin
-        )
+        # 4. Find boundaries using sliding window
+        left, right, diags = self._find_boundaries(edge_img)
 
-        # 5. Convert pixel boundaries to base_link (skip if at FOV edge)
-        resolution = 1.0 / self.pixels_per_meter
+        # 5. Convert to base_link coordinates (use actual BEV dimensions)
+        result.left_boundary = self._to_base_link(left, bev_height, bev_width)
+        result.right_boundary = self._to_base_link(right, bev_height, bev_width)
+        result.valid = result.left_boundary is not None or result.right_boundary is not None
 
-        left_pts = None
-        if left.detected and not left_at_fov_edge:
-            left_pts = boundary_to_base_link(
-                left,
-                bev_height=bev_height,
-                bev_width=bev_width,
-                x_max=self.bev_x_range[1],
-                y_max=self.bev_y_range[1],
-                resolution=resolution,
-                sample_step=3,
-            )
-
-        right_pts = None
-        if right.detected and not right_at_fov_edge:
-            right_pts = boundary_to_base_link(
-                right,
-                bev_height=bev_height,
-                bev_width=bev_width,
-                x_max=self.bev_x_range[1],
-                y_max=self.bev_y_range[1],
-                resolution=resolution,
-                sample_step=3,
-            )
-
-        result.left_boundary = left_pts
-        result.right_boundary = right_pts
-        result.valid = left_pts is not None or right_pts is not None
-
-        # 6. Generate debug image
-        result.debug_image = draw_boundary_overlay(
-            bev_drivable, left, right, l_diag, r_diag, edge_img
-        )
+        # 6. Generate debug visualization (show unmapped in gray)
+        result.debug_image = self._draw_debug(drivable, observed, left, right, diags, edge_img)
 
         return result
+
+    def _extract_edges(self, drivable: np.ndarray, obstruction: np.ndarray) -> np.ndarray:
+        """
+        Extract boundary edges between drivable area and obstructions.
+
+        Uses Sobel gradient for precise edge detection, then filters to only
+        keep edges adjacent to actual obstructions. Transitions from drivable
+        to unmapped (unobserved) areas are ignored.
+
+        Args:
+            drivable: Binary mask of drivable area (1=drivable)
+            obstruction: Binary mask of observed obstructions (1=obstruction)
+
+        Returns:
+            Binary edge image (255 at boundary pixels, 0 elsewhere)
+        """
+        # Sobel gradient for precise edge detection on drivable mask
+        drivable_u8 = drivable * 255
+        sobel_x = cv2.Sobel(drivable_u8, cv2.CV_64F, 1, 0, ksize=3)
+        edges = np.uint8(np.abs(sobel_x) > 30)
+
+        # Only keep edges that are adjacent to obstruction (not unmapped)
+        kernel = np.ones((5, 5), dtype=np.uint8)
+        obstruction_nearby = cv2.dilate(obstruction, kernel, iterations=1)
+
+        return (edges & obstruction_nearby) * 255
+
+    def _find_boundaries(
+        self, edge_img: np.ndarray
+    ) -> Tuple[BoundaryResult, BoundaryResult, List[tuple]]:
+        """
+        Find left and right boundaries using sliding window algorithm.
+
+        Returns:
+            left_result, right_result, diagnostics_list
+        """
+        h, w = edge_img.shape
+
+        # Initialize from histogram peaks
+        histogram = np.sum(edge_img, axis=0).astype(np.float64)
+        midpoint = w // 2
+
+        # Find peaks in left and right halves
+        left_hist = histogram[:midpoint]
+        right_hist = histogram[midpoint:]
+
+        # Use peak if there's significant signal, else use default positions
+        left_base = int(np.argmax(left_hist)) if np.max(left_hist) > 0 else midpoint // 2
+        right_base = int(np.argmax(right_hist)) + midpoint if np.max(right_hist) > 0 else midpoint + midpoint // 2
+
+        # Sliding window setup
+        sweep_margin = int(h * 0.05)
+        sweep_start = max(10, sweep_margin)
+        sweep_end = h - max(10, sweep_margin)
+        window_h = max(1, (sweep_end - sweep_start) // self.num_windows)
+
+        left_current, right_current = left_base, right_base
+        left_pts_col, left_pts_row = [], []
+        right_pts_col, right_pts_row = [], []
+        diags = []
+
+        # Get all edge pixel locations
+        nz_row, nz_col = edge_img.nonzero()
+
+        # Sweep from near (high row) to far (low row)
+        for win_idx in range(self.num_windows):
+            r_hi = sweep_end - win_idx * window_h
+            r_lo = sweep_end - (win_idx + 1) * window_h
+
+            # Find edge pixels in each search window
+            left_mask = (
+                (nz_row >= r_lo) & (nz_row < r_hi) &
+                (nz_col >= left_current - self.window_margin) &
+                (nz_col < left_current + self.window_margin)
+            )
+            right_mask = (
+                (nz_row >= r_lo) & (nz_row < r_hi) &
+                (nz_col >= right_current - self.window_margin) &
+                (nz_col < right_current + self.window_margin)
+            )
+
+            left_cols = nz_col[left_mask]
+            left_rows = nz_row[left_mask]
+            right_cols = nz_col[right_mask]
+            right_rows = nz_row[right_mask]
+
+            # Update window centers with constraints
+            left_frozen = len(left_cols) < self.min_pixels
+            right_frozen = len(right_cols) < self.min_pixels
+
+            if not left_frozen:
+                new_left = int(np.mean(left_cols))
+                if abs(new_left - left_current) <= self.max_lateral_shift:
+                    left_current = new_left
+                else:
+                    left_frozen = True
+
+            if not right_frozen:
+                new_right = int(np.mean(right_cols))
+                if abs(new_right - right_current) <= self.max_lateral_shift:
+                    right_current = new_right
+                else:
+                    right_frozen = True
+
+            # Collect points
+            if len(left_cols) > 0:
+                left_pts_col.extend(left_cols.tolist())
+                left_pts_row.extend(left_rows.tolist())
+            if len(right_cols) > 0:
+                right_pts_col.extend(right_cols.tolist())
+                right_pts_row.extend(right_rows.tolist())
+
+            diags.append((r_lo, r_hi, left_current, right_current, self.window_margin, left_frozen, right_frozen))
+
+        # Fit polynomials
+        left_result = self._fit_polynomial(left_pts_col, left_pts_row, h)
+        right_result = self._fit_polynomial(right_pts_col, right_pts_row, h)
+
+        return left_result, right_result, diags
+
+    def _fit_polynomial(
+        self, cols: List[int], rows: List[int], row_extent: int
+    ) -> BoundaryResult:
+        """Fit polynomial col = f(row) to boundary points."""
+        result = BoundaryResult()
+
+        if len(cols) < self.poly_order + 1:
+            return result
+
+        cols_arr = np.array(cols, dtype=np.float64)
+        rows_arr = np.array(rows, dtype=np.float64)
+
+        try:
+            coeffs = np.polyfit(rows_arr, cols_arr, self.poly_order)
+        except (np.linalg.LinAlgError, ValueError):
+            return result
+
+        result.detected = True
+        result.poly_coeffs = coeffs
+        result.points_col = cols_arr
+        result.points_row = rows_arr
+        result.row_min = float(np.min(rows_arr))
+        result.row_max = float(np.max(rows_arr))
+
+        # Evaluate polynomial
+        r_start = int(max(0, np.floor(result.row_min)))
+        r_end = int(min(row_extent - 1, np.ceil(result.row_max)))
+        if r_end >= r_start:
+            result.fitted_row = np.arange(r_start, r_end + 1, dtype=np.float64)
+            result.fitted_col = np.polyval(coeffs, result.fitted_row)
+
+        return result
+
+    def _to_base_link(
+        self, result: BoundaryResult, bev_height: int, bev_width: int, sample_step: int = 3
+    ) -> Optional[np.ndarray]:
+        """Convert BEV pixel coordinates to base_link metric coordinates."""
+        if not result.detected or result.fitted_col is None:
+            return None
+
+        rows = result.fitted_row[::sample_step]
+        cols = result.fitted_col[::sample_step]
+
+        # Clip to valid range (use actual BEV dimensions)
+        valid = (rows >= 0) & (rows < bev_height) & (cols >= 0) & (cols < bev_width)
+        rows, cols = rows[valid], cols[valid]
+
+        if len(rows) == 0:
+            return None
+
+        # BEV to base_link: x = X_max - row*res, y = Y_max - col*res
+        x_base = self.bev_x_range[1] - rows * self.resolution
+        y_base = self.bev_y_range[1] - cols * self.resolution
+
+        # Sort by x ascending (near to far)
+        idx = np.argsort(x_base)
+        return np.column_stack([x_base[idx], y_base[idx]])
+
+    def _draw_debug(
+        self,
+        drivable: np.ndarray,
+        observed: np.ndarray,
+        left: BoundaryResult,
+        right: BoundaryResult,
+        diags: List[tuple],
+        edge_img: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Generate debug visualization.
+
+        Color coding:
+            - White: Drivable area (road)
+            - Black: Obstruction (observed non-drivable)
+            - Gray: Unmapped (outside camera FOV)
+            - Red edges: Detected boundaries
+            - Green/Red boxes: Sliding windows (green=active, red=frozen)
+            - Yellow/Cyan lines: Fitted boundary polynomials
+        """
+        h, w = drivable.shape
+
+        # Create base visualization with three area types
+        # Start with gray (unmapped)
+        vis = np.full((h, w, 3), 128, dtype=np.uint8)
+
+        # Observed non-drivable = black (obstruction)
+        obstruction = observed & ~drivable
+        vis[obstruction == 1] = [0, 0, 0]
+
+        # Drivable = white
+        vis[drivable == 1] = [255, 255, 255]
+
+        # Overlay edges in red
+        edge_mask = edge_img > 0
+        vis[edge_mask] = [0, 0, 255]
+
+        GREEN, RED, YELLOW, CYAN = (0, 255, 0), (0, 0, 255), (0, 255, 255), (255, 255, 0)
+
+        # Draw windows
+        overlay = vis.copy()
+        for r_lo, r_hi, left_c, right_c, margin, left_frozen, right_frozen in diags:
+            # Left window
+            color = RED if left_frozen else GREEN
+            pt1 = (max(0, left_c - margin), r_lo)
+            pt2 = (min(w - 1, left_c + margin), r_hi)
+            cv2.rectangle(overlay, pt1, pt2, color, -1)
+            cv2.rectangle(vis, pt1, pt2, color, 2)
+            # Right window
+            color = RED if right_frozen else GREEN
+            pt1 = (max(0, right_c - margin), r_lo)
+            pt2 = (min(w - 1, right_c + margin), r_hi)
+            cv2.rectangle(overlay, pt1, pt2, color, -1)
+            cv2.rectangle(vis, pt1, pt2, color, 2)
+
+        vis = cv2.addWeighted(overlay, 0.3, vis, 0.7, 0)
+
+        # Draw fitted curves
+        for boundary, color in [(left, YELLOW), (right, CYAN)]:
+            if boundary.detected and boundary.fitted_col is not None:
+                pts = np.column_stack([
+                    np.clip(boundary.fitted_col.astype(np.int32), 0, w - 1),
+                    np.clip(boundary.fitted_row.astype(np.int32), 0, h - 1),
+                ])
+                cv2.polylines(vis, [pts], False, color, 3)
+
+        return vis

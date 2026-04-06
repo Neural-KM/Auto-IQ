@@ -73,9 +73,8 @@ import rclpy
 from rclpy.node import Node
 from ament_index_python.packages import get_package_share_directory
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-import tf2_ros
 
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import Image
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
 from geometry_msgs.msg import Point
@@ -83,6 +82,8 @@ from builtin_interfaces.msg import Time
 
 from autoiq_msgs.msg import LaneDetection as LaneDetectionMsg
 from autoiq_msgs.msg import EstimatedLanes, EstimatedLane
+
+from autoiq_common import CameraParams, CameraParamsProvider
 
 from mapping.core.lane_fitting import LaneDetector
 from mapping.core.local_lane_estimator import LocalLaneEstimator
@@ -147,20 +148,15 @@ class LaneFittingNode(Node):
         # ==================== CV Bridge ====================
         self.cv_bridge = CvBridge()
 
-        # ==================== TF2 (for camera extrinsics) ====================
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-
-        # ==================== Camera Params (packaged as dict) ====================
-        self._camera_params: Dict[str, Any] = {
-            'width': None,
-            'height': None,
-            'fov_deg': None,
-            'pitch_deg': None,
-            'height_m': None,
-        }
-        self._camera_info_received = False
-        self._camera_tf_received = False
+        # ==================== Camera Params Provider ====================
+        self.camera = CameraParamsProvider(
+            node=self,
+            camera_info_topic=camera_info_topic,
+            base_frame=self.base_frame,
+            camera_frame=self.camera_frame,
+            on_ready=self._on_camera_ready,
+            qos=sensor_qos,
+        )
 
         # ==================== Lane Detector Init Gate ====================
         # LaneDetector is created once CameraInfo + camera TF are available.
@@ -190,11 +186,6 @@ class LaneFittingNode(Node):
         self.semantic_sub = self.create_subscription(
             Image, semantic_topic, self._semantic_callback, sensor_qos)
 
-        self.camera_info_sub = self.create_subscription(
-            CameraInfo, camera_info_topic,
-            self._camera_info_callback, sensor_qos)
-        self.get_logger().info(f'Subscribed to CameraInfo: {camera_info_topic}')
-
         # ==================== Publishers ====================
         # Lane fitting publishers
         self.lane_detection_pub = self.create_publisher(
@@ -212,9 +203,6 @@ class LaneFittingNode(Node):
             MarkerArray, '/mapping/boundary_markers', 10)
         self.boundary_debug_pub = self.create_publisher(
             Image, '/mapping/debug/boundary', sensor_qos)
-
-        # Timer to periodically attempt lane detector initialization
-        self._init_timer = self.create_timer(0.5, self._try_init_lane_detector)
 
         self.get_logger().info('Lane Fitting Node initialized!')
 
@@ -237,106 +225,36 @@ class LaneFittingNode(Node):
         return config
 
     # ------------------------------------------------------------------ #
-    #  Lane Detector Initialization                                       #
+    #  Camera Ready Callback                                              #
     # ------------------------------------------------------------------ #
 
-    def _try_init_lane_detector(self):
-        """Periodically attempt to initialize the LaneDetector.
+    def _on_camera_ready(self, params: CameraParams):
+        """Called when camera intrinsics + extrinsics are available."""
+        # Initialize LaneDetector
+        self.lane_detector = LaneDetector(
+            image_width=params.width,
+            image_height=params.height,
+        )
+        self.lane_detector.set_camera_params(
+            fov=params.fov_deg,
+            pitch=params.pitch_deg,
+            camera_height=params.height_m,
+        )
 
-        Gated on having both CameraInfo (intrinsics) and camera TF
-        (extrinsics: height + pitch).
-        """
-        if self._lane_detector_initialized:
-            return
+        # Initialize BoundaryExtractor with camera params
+        self.boundary_extractor.set_camera_params(
+            fov=params.fov_deg,
+            pitch=params.pitch_deg,
+            camera_height=params.height_m,
+        )
 
-        if not self._camera_tf_received:
-            self._try_get_camera_tf()
-
-        if self._camera_info_received and self._camera_tf_received:
-            cam = self._camera_params
-            self.lane_detector = LaneDetector(
-                image_width=cam['width'],
-                image_height=cam['height'],
-            )
-            self.lane_detector.set_camera_params(
-                fov=cam['fov_deg'],
-                pitch=cam['pitch_deg'],
-                camera_height=cam['height_m'],
-            )
-            # Also initialize boundary extractor with camera params
-            self.boundary_extractor.set_camera_params(
-                fov=cam['fov_deg'],
-                pitch=cam['pitch_deg'],
-                camera_height=cam['height_m'],
-            )
-            self._lane_detector_initialized = True
-            self._init_timer.cancel()
-            self.get_logger().info(
-                f'LaneDetector initialized: '
-                f'{cam["width"]}x{cam["height"]}, '
-                f'FOV={cam["fov_deg"]:.1f}deg, '
-                f'pitch={cam["pitch_deg"]:.1f}deg, '
-                f'height={cam["height_m"]:.2f}m')
-        else:
-            missing = []
-            if not self._camera_info_received:
-                missing.append('CameraInfo')
-            if not self._camera_tf_received:
-                missing.append('Camera TF')
-            self.get_logger().info(
-                f'LaneDetector waiting for: {", ".join(missing)}...',
-                throttle_duration_sec=3.0)
-
-    def _try_get_camera_tf(self):
-        """Look up camera height and pitch from the TF tree."""
-        try:
-            transform = self.tf_buffer.lookup_transform(
-                'ego_vehicle', self.camera_frame, rclpy.time.Time(),
-                timeout=rclpy.duration.Duration(seconds=2.0))
-        except tf2_ros.LookupException:
-            return
-        except tf2_ros.ExtrapolationException:
-            return
-
-        cam_z = transform.transform.translation.z
-        if cam_z is None or cam_z <= 0.0:
-            self.get_logger().warn(
-                f'Invalid camera height from TF: {cam_z}')
-            return
-
-        # Extract pitch from quaternion
-        q = transform.transform.rotation
-        sinp = 2.0 * (q.w * q.y - q.z * q.x)
-        cam_pitch = np.degrees(np.arcsin(np.clip(sinp, -1.0, 1.0)))
-
-        self._camera_params['height_m'] = cam_z
-        self._camera_params['pitch_deg'] = cam_pitch
-        self._camera_tf_received = True
+        self._lane_detector_initialized = True
         self.get_logger().info(
-            f'Camera TF received: '
-            f'height={cam_z:.2f}m, pitch={cam_pitch:.1f}deg')
-
-    def _camera_info_callback(self, msg: CameraInfo):
-        """Extract image dimensions and FOV from the first CameraInfo msg."""
-        if self._camera_info_received:
-            return
-
-        fx = msg.k[0]
-        if fx <= 0:
-            self.get_logger().error(
-                f'Invalid focal length fx={fx} in CameraInfo. '
-                f'Cannot compute FOV.')
-            return
-
-        fov_deg = np.degrees(2 * np.arctan(msg.width / (2 * fx)))
-
-        self._camera_params['width'] = msg.width
-        self._camera_params['height'] = msg.height
-        self._camera_params['fov_deg'] = fov_deg
-        self._camera_info_received = True
-        self.get_logger().info(
-            f'CameraInfo: {msg.width}x{msg.height}, '
-            f'FOV={fov_deg:.1f}deg')
+            f'LaneDetector initialized: '
+            f'{params.width}x{params.height}, '
+            f'FOV={params.fov_deg:.1f}deg, '
+            f'pitch={params.pitch_deg:.1f}deg, '
+            f'height={params.height_m:.2f}m')
 
     # ------------------------------------------------------------------ #
     #  Semantic Map Callback                                              #
@@ -351,7 +269,8 @@ class LaneFittingNode(Node):
             return
 
         # Wait for camera params before processing
-        if not self._camera_info_received or not self._camera_tf_received:
+        if not self.camera.ready:
+            self.camera.try_get_extrinsics()
             return
 
         # Run lane fitting (polynomial detection from road_line markings)

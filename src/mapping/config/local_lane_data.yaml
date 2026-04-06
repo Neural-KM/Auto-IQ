@@ -22,6 +22,9 @@ min_road_width: 10.0            # Minimum valid road width (meters)
 max_road_width: 20.0            # Maximum valid road width (meters)
 
 # BEV (Bird's Eye View) transform parameters
-bev_x_range: [5.0, 35.0]        # Forward range for BEV transform (meters)
-bev_y_range: [-15.0, 15.0]      # Lateral range for BEV transform (meters)
-pixels_per_meter: 10.0          # BEV resolution
+# Range should cover full camera FOV. For ~90° FOV camera:
+# - Lateral at distance d: ±d * tan(45°) ≈ ±d
+# - So at 50m forward, need ~±50m lateral
+bev_x_range: [3.0, 60.0]        # Forward range for BEV transform (meters)
+bev_y_range: [-50.0, 50.0]      # Lateral range for BEV transform (meters)
+pixels_per_meter: 8.0           # BEV resolution (reduced for larger coverage)
