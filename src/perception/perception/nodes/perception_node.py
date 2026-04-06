@@ -76,6 +76,10 @@ class PerceptionNode(Node):
         self.camera_frame = self.declare_parameter('camera_frame', 'ego_vehicle/sensor/camera/rgb/front').value
         self.lidar_frame = self.declare_parameter('lidar_frame', 'ego_vehicle/sensor/lidar/top').value
 
+        # Topic names
+        self.camera_info_topic = self.declare_parameter(
+            'camera_info_topic', '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info').value
+
         # Hood mask parameters (normalized 0-1 values)
         self.hood_mask_config = {
             'enabled': self.declare_parameter('hood_mask.enabled', True).value,
@@ -135,7 +139,7 @@ class PerceptionNode(Node):
         # ==================== Camera Parameters (intrinsics + extrinsics) ====================
         self.camera = CameraParamsProvider(
             node=self,
-            camera_info_topic='/carla/ego_vehicle/sensor/camera/rgb/front/camera_info',
+            camera_info_topic=self.camera_info_topic,
             base_frame='ego_vehicle',
             camera_frame=self.camera_frame,
             on_ready=self._on_camera_ready,
