@@ -28,7 +28,7 @@ ros2 bag record -o Rosbags/hdmap_fastlio_odom /Odometry /path --use-sim-time
 
 # Terminal 3: Play the recorded rosbag (make sure to use the correct timestamp folder)
 
-ros2 bag play Rosbags/hdmap_<timestamp> --clock --qos-profile-overrides-path tools/qos_override.yaml
+ros2 bag play Rosbags/hdmap_<timestamp> --clock --qos-profile-overrides-path tools/HD_map/qos_override.yaml
 ```
 
 ## Step 3: Merge Rosbags
