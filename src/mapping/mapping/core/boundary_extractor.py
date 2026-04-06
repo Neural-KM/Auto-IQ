@@ -136,6 +136,15 @@ class BoundaryExtractor:
         self.camera_pitch = pitch
         self.camera_height = camera_height
 
+    @property
+    def camera_ready(self) -> bool:
+        """Check if all camera parameters are set."""
+        return (
+            self.camera_fov is not None and
+            self.camera_pitch is not None and
+            self.camera_height is not None
+        )
+
     def extract(self, semantic_img: np.ndarray) -> BoundaryExtractionResult:
         """
         Extract road boundaries from semantic segmentation image.
@@ -150,7 +159,7 @@ class BoundaryExtractor:
 
         result = BoundaryExtractionResult()
 
-        if self.camera_fov is None:
+        if not self.camera_ready:
             return result
 
         # 1. Create masks from semantic image
@@ -185,7 +194,8 @@ class BoundaryExtractor:
             interpolation=cv2.INTER_NEAREST,
         )
 
-        # Binary masks
+        # Binary masks (get actual dimensions from BEV image)
+        bev_height, bev_width = bev_drivable.shape[:2]
         drivable = (bev_drivable > 127).astype(np.uint8)
         observed = (bev_observed > 127).astype(np.uint8)
 
@@ -198,9 +208,9 @@ class BoundaryExtractor:
         # 4. Find boundaries using sliding window
         left, right, diags = self._find_boundaries(edge_img)
 
-        # 5. Convert to base_link coordinates
-        result.left_boundary = self._to_base_link(left)
-        result.right_boundary = self._to_base_link(right)
+        # 5. Convert to base_link coordinates (use actual BEV dimensions)
+        result.left_boundary = self._to_base_link(left, bev_height, bev_width)
+        result.right_boundary = self._to_base_link(right, bev_height, bev_width)
         result.valid = result.left_boundary is not None or result.right_boundary is not None
 
         # 6. Generate debug visualization (show unmapped in gray)
@@ -360,7 +370,9 @@ class BoundaryExtractor:
 
         return result
 
-    def _to_base_link(self, result: BoundaryResult, sample_step: int = 3) -> Optional[np.ndarray]:
+    def _to_base_link(
+        self, result: BoundaryResult, bev_height: int, bev_width: int, sample_step: int = 3
+    ) -> Optional[np.ndarray]:
         """Convert BEV pixel coordinates to base_link metric coordinates."""
         if not result.detected or result.fitted_col is None:
             return None
@@ -368,8 +380,8 @@ class BoundaryExtractor:
         rows = result.fitted_row[::sample_step]
         cols = result.fitted_col[::sample_step]
 
-        # Clip to valid range
-        valid = (rows >= 0) & (rows < self.bev_height) & (cols >= 0) & (cols < self.bev_width)
+        # Clip to valid range (use actual BEV dimensions)
+        valid = (rows >= 0) & (rows < bev_height) & (cols >= 0) & (cols < bev_width)
         rows, cols = rows[valid], cols[valid]
 
         if len(rows) == 0:
