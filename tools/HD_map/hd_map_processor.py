@@ -377,7 +377,7 @@ class HDMapProcessor:
         """Create a rosbag reader."""
         import rosbag2_py
         reader = rosbag2_py.SequentialReader()
-        storage_options = rosbag2_py.StorageOptions(uri=str(self.bag_path), storage_id='mcap')
+        storage_options = rosbag2_py.StorageOptions(uri=str(self.bag_path))
         converter_options = rosbag2_py.ConverterOptions(
             input_serialization_format='cdr', output_serialization_format='cdr')
         reader.open(storage_options, converter_options)

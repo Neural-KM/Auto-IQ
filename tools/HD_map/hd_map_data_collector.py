@@ -393,7 +393,6 @@ class HDMapDataCollector:
             cmd = [
                 'ros2', 'bag', 'record',
                 '-o', bag_name,
-                '--storage', 'mcap',
                 '--max-cache-size', '200000000'
             ]
             cmd.extend(hdmap_topics)
