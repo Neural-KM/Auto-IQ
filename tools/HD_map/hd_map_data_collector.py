@@ -6,6 +6,13 @@ HD Map Data Collection Script (Standalone)
 Spawns a vehicle with sensors in CARLA, drives between spawn points using
 autopilot, and records a rosbag with all data needed for HD map generation.
 
+This script allows:
+    - Automated, hands-free data collection (no manual driving required)
+    - Reproducible routes between specific spawn points (e.g., --start 10 --end 50)
+    - Standalone operation without running the full autoiq_bridge
+    - Automatic stop when destination is reached
+    - Clean shutdown (stops recording + destroys spawned actors on Ctrl+C)
+
 Recorded Topics:
     - /carla/ego_vehicle/ground_truth/odometry                    : Vehicle pose
     - /carla/ego_vehicle/sensor/gnss/gnss/fix                     : GPS coordinates
@@ -113,9 +120,9 @@ class HDMapDataCollector:
     Spawns vehicle with sensors from config, drives to destination.
     """
 
-    # Default config file path
+    # Default config file path (repo root is 3 levels up from tools/HD_map/)
     DEFAULT_CONFIG = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         'src/autoiq_bridge/config/objects.json'
     )
 
@@ -383,7 +390,12 @@ class HDMapDataCollector:
                 '/tf',
                 '/tf_static',
             ]
-            cmd = ['ros2', 'bag', 'record', '-o', bag_name, '--max-cache-size', '200000000']
+            cmd = [
+                'ros2', 'bag', 'record',
+                '-o', bag_name,
+                '--storage', 'mcap',
+                '--max-cache-size', '200000000'
+            ]
             cmd.extend(hdmap_topics)
             self.rosbag_process = subprocess.Popen(cmd)
 
@@ -448,8 +460,11 @@ Examples:
     parser.add_argument('--list-spawns', action='store_true', help='List spawn points and exit')
     parser.add_argument('--show-spawns', action='store_true', help='Visualize spawn points in CARLA')
     parser.add_argument('--record', action='store_true', help='Record a ROS 2 bag of all topics during the run')
-    # Default bag dir relative to project root
-    default_bag_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Rosbags')
+    # Default bag dir at repo root (3 levels up from tools/HD_map/)
+    default_bag_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        'Rosbags'
+    )
     parser.add_argument('--bag-dir', type=str, default=default_bag_dir, help='Directory to store the recorded rosbag')
     parser.add_argument('--use-bridge', action='store_true', help='Do not spawn vehicle/sensors. Attach to existing vehicle spawned by autoiq_bridge')
 
