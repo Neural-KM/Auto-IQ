@@ -1,0 +1,3 @@
+[submodule "src/mapping/FAST_LIO"]
+	path = src/mapping/FAST_LIO
+	url = https://github.com/Neural-KM/FAST_LIO.git
