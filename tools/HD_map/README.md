@@ -6,10 +6,10 @@ This document describes the step-by-step process to generate an HD Map from the 
 
 First, collect the necessary sensor data from CARLA. Ensure `autoiq_bridge` and `carla_ros_bridge` are running, or use the collector standalone.
 
-Run the data collector script to spawn a vehicle, navigate between spawn points, and record a rosbag:
+From the repository root, run the data collector script to spawn a vehicle, navigate between spawn points, and record a rosbag:
 
 ```bash
-python3 /home/autoiq/nakul/Auto-IQ/tools/HD_map/hd_map_data_collector.py --start <START_SPAWN_ID> --end <END_SPAWN_ID> --record
+python3 tools/HD_map/hd_map_data_collector.py --start <START_SPAWN_ID> --end <END_SPAWN_ID> --record
 ```
 *(Example: `--start 10 --end 50`)*
 
@@ -18,7 +18,16 @@ Outputs are saved in the `Rosbags/hdmap_YYYY_MM_DD-HH_MM_SS/` directory.
 ## Step 2: Run Fast-LIO
 
 To generate accurate odometry/mapping from the recorded LiDAR and IMU data, run `fast_lio` on the recorded rosbag:
-Build and source before
+
+Before running, make sure to build and source `fast_lio` from its submodule directory, as well as the main workspace:
+
+```bash
+# Build and source the fast_lio submodule
+cd src/mapping/FAST_LIO
+colcon build
+source install/setup.bash
+```
+
 ```bash
 # Terminal 1: Launch Fast-LIO
 ros2 launch fast_lio mapping.launch.py config_file:=carla.yaml rviz:=true
