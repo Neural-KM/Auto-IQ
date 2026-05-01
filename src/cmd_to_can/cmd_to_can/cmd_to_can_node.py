@@ -17,15 +17,18 @@ This node mirrors the wire protocol implemented in
                                   byte 2 = throttle mode (0=DIRECT, 1=VELOCITY_PID)
 * ``0x102`` STEER_TORQUE_CMD   -- 2 bytes, big-endian int16 (DIRECT steer)
 * ``0x103`` STEER_ANGLE_CMD    -- 2 bytes, big-endian int16, value = angle[deg] * 10
-* ``0x104`` VELOCITY_CMD       -- 2 bytes, big-endian int16, raw OBD velocity counts
+* ``0x104`` VELOCITY_CMD       -- 2 bytes, big-endian int16, value = velocity * 100
+                                  (in the same engineering units the firmware's
+                                  VEL_FB_SCALE produces -- typically m/s)
 
 For now this node intentionally **bypasses** the ``throttle`` and ``brake``
 fields produced by the control package. The Teensy runs an on-board velocity
 PID that closes the loop against the OBD feedback frame (extended ID
-``0x0C08A7F0``, bytes [2..3] little-endian uint16, with offset 0x7D00). The
-host just publishes a single hard-coded velocity setpoint -- exposed as the
-``target_velocity_raw_counts`` parameter -- so the lateral controller can be
-exercised without the longitudinal loop being a confounding factor.
+``0x0C08A7F0``, bytes [2..3] little-endian uint16, offset 0x7D00, scaled by
+the firmware's ``VEL_FB_SCALE``). The host just publishes a single hard-coded
+velocity setpoint -- exposed as the ``target_velocity`` parameter, in those
+same scaled engineering units -- so the lateral controller can be exercised
+without the longitudinal loop being a confounding factor.
 
 The steering pass-through maps ``VehicleControl.steer`` (left positive, right
 negative, range [-1, 1]) to a firmware steer-angle setpoint in degrees. The
@@ -75,6 +78,11 @@ COMMAND_IDS: tuple[tuple[bool, int], ...] = (
 )
 
 STEER_ANGLE_LIMIT_DEG = 15.0
+
+# Wire format for the 0x104 velocity setpoint frame: int16 BE carrying the
+# scaled velocity setpoint multiplied by this factor. Keep in sync with
+# ``VEL_CMD_TX_X100`` in firmware/main_project/src/main.cpp.
+VEL_CMD_TX_X100 = 100.0
 
 
 class SteerMode(IntEnum):
@@ -209,11 +217,14 @@ class CmdToCanNode(Node):
         self.declare_parameter("disable_blacklist", False)
 
         # Velocity bypass
-        # The Teensy velocity PID operates entirely in raw OBD counts (we
-        # don't yet have a calibrated counts -> m/s conversion). 0 is the
-        # safe default: "stay at idle". The user must override to ask the
-        # car to move.
-        self.declare_parameter("target_velocity_raw_counts", 0)
+        # The Teensy velocity PID operates in scaled engineering units --
+        # raw OBD counts × VEL_FB_SCALE on the firmware side. Set this
+        # parameter in the same units (typically m/s, or whatever you've
+        # calibrated VEL_FB_SCALE to produce). 0.0 is the safe default:
+        # "stay at idle"; the user must override to ask the car to move.
+        # Wire transport is int16 × VEL_CMD_TX_X100, so 0.01-unit resolution
+        # and ±327.67-unit range -- plenty for m/s or km/h.
+        self.declare_parameter("target_velocity", 0.0)
 
         # Steering mapping
         # ``VehicleControl.steer`` is +1 for left, -1 for right (per the msg
@@ -244,7 +255,7 @@ class CmdToCanNode(Node):
         # them each tick (rather than caching the value) so ``ros2 param
         # set`` takes effect without restarting the node.
         self._param_names_hot = (
-            "target_velocity_raw_counts",
+            "target_velocity",
             "steer_sign",
             "max_steer_angle_deg",
             "autonomous_mode",
@@ -318,8 +329,8 @@ class CmdToCanNode(Node):
             f"  CAN               : {self._can_interface}:{self._can_channel}"
             f" @ {self._can_bitrate} bps\n"
             f"  Blacklist         : {blacklist_status}\n"
-            f"  Velocity setpoint : {self._param('target_velocity_raw_counts')}"
-            " raw OBD counts (bypassing VehicleControl.throttle/brake)\n"
+            f"  Velocity setpoint : {float(self._param('target_velocity')):.2f}"
+            " (scaled units; bypassing VehicleControl.throttle/brake)\n"
             f"  Autonomous mode   : {self._param('autonomous_mode')}\n"
             f"  Steer mode        : {SteerMode(self._param('steer_mode')).name}\n"
             f"  Throttle mode     : "
@@ -347,7 +358,7 @@ class CmdToCanNode(Node):
 
         steer_sign = float(self._param("steer_sign"))
         max_angle_deg = float(self._param("max_steer_angle_deg"))
-        velocity_raw = int(self._param("target_velocity_raw_counts"))
+        target_velocity = float(self._param("target_velocity"))
         auto = bool(self._param("autonomous_mode"))
         steer_mode = SteerMode(int(self._param("steer_mode")))
         throttle_mode = ThrottleMode(int(self._param("throttle_mode")))
@@ -364,7 +375,7 @@ class CmdToCanNode(Node):
         msgs = [
             self._build_mode_frame(auto, steer_mode, throttle_mode),
             self._build_angle_frame(target_angle_deg),
-            self._build_velocity_frame(velocity_raw),
+            self._build_velocity_frame(target_velocity),
         ]
 
         for m in msgs:
@@ -399,10 +410,13 @@ class CmdToCanNode(Node):
         )
 
     @staticmethod
-    def _build_velocity_frame(velocity_raw: int) -> can.Message:
-        # int16 range matches the firmware decoder.
-        velocity_raw = clamp_int(velocity_raw, -32768, 32767)
-        payload = velocity_raw.to_bytes(2, byteorder="big", signed=True)
+    def _build_velocity_frame(target_velocity: float) -> can.Message:
+        # Encode in the firmware's wire format: int16 BE = scaled velocity ×
+        # VEL_CMD_TX_X100. Clamp to int16 so an out-of-range request from a
+        # bad parameter set doesn't wrap silently.
+        velocity_x100 = int(round(target_velocity * VEL_CMD_TX_X100))
+        velocity_x100 = clamp_int(velocity_x100, -32768, 32767)
+        payload = velocity_x100.to_bytes(2, byteorder="big", signed=True)
         return can.Message(
             arbitration_id=VELOCITY_CMD_CAN_ID,
             data=[payload[0], payload[1]],
@@ -443,7 +457,7 @@ class CmdToCanNode(Node):
             safe_msgs = [
                 self._build_mode_frame(False, SteerMode.DIRECT, ThrottleMode.DIRECT),
                 self._build_angle_frame(0.0),
-                self._build_velocity_frame(0),
+                self._build_velocity_frame(0.0),
             ]
             for m in safe_msgs:
                 try:

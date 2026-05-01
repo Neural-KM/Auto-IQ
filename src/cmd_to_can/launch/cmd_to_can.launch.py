@@ -4,7 +4,7 @@ Example::
 
     ros2 launch cmd_to_can cmd_to_can.launch.py \
         can_channel:=can0 \
-        target_velocity_raw_counts:=0 \
+        target_velocity:=0.0 \
         autonomous_mode:=false
 """
 
@@ -53,11 +53,12 @@ def generate_launch_description() -> LaunchDescription:
             description="CAN bus bitrate in bits/s.",
         ),
         DeclareLaunchArgument(
-            "target_velocity_raw_counts",
-            default_value="0",
+            "target_velocity",
+            default_value="0.0",
             description=(
-                "Hard-coded velocity setpoint sent on CAN ID 0x104 in raw "
-                "OBD counts (post-offset). 0 keeps the throttle parked. "
+                "Hard-coded velocity setpoint sent on CAN ID 0x104, in the "
+                "same scaled engineering units the firmware's VEL_FB_SCALE "
+                "produces (typically m/s). 0 keeps the throttle parked. "
                 "Bypasses VehicleControl.throttle/brake."
             ),
         ),
@@ -117,9 +118,7 @@ def generate_launch_description() -> LaunchDescription:
                 "can_interface": _typed("can_interface", str),
                 "can_channel": _typed("can_channel", str),
                 "can_bitrate": _typed("can_bitrate", int),
-                "target_velocity_raw_counts": _typed(
-                    "target_velocity_raw_counts", int
-                ),
+                "target_velocity": _typed("target_velocity", float),
                 "autonomous_mode": _typed("autonomous_mode", bool),
                 "steer_mode": _typed("steer_mode", int),
                 "throttle_mode": _typed("throttle_mode", int),
