@@ -10,3 +10,4 @@ lark
 scikit-image
 tabulate
 numba
+python-can

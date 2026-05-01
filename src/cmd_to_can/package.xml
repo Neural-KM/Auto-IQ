@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>cmd_to_can</name>
+  <version>0.0.0</version>
+  <description>
+    Bridge from autoiq_msgs/VehicleControl (produced by the control package)
+    to the Teensy 4.1 over the CAN bus. Uses the same wire protocol as
+    firmware/main_project/src/compute_side_tui.py: throttle/mode/steer-angle
+    frames on standard 11-bit IDs, plus the new 0x104 velocity-setpoint frame
+    so the Teensy can run an on-board velocity controller against the OBD
+    feedback frame (extended ID 0x0C08A7F0).
+  </description>
+  <maintainer email="boliyadeep2003@gmail.com">skully</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>autoiq_msgs</depend>
+
+  <exec_depend>python3-can</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
