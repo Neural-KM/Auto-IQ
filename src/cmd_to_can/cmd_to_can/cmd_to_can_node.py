@@ -25,10 +25,12 @@ For now this node intentionally **bypasses** the ``throttle`` and ``brake``
 fields produced by the control package. The Teensy runs an on-board velocity
 PID that closes the loop against the OBD feedback frame (extended ID
 ``0x0C08A7F0``, bytes [2..3] little-endian uint16, offset 0x7D00, scaled by
-the firmware's ``VEL_FB_SCALE``). The host just publishes a single hard-coded
-velocity setpoint -- exposed as the ``target_velocity`` parameter, in those
-same scaled engineering units -- so the lateral controller can be exercised
-without the longitudinal loop being a confounding factor.
+the firmware's ``VEL_FB_SCALE``). The host publishes the velocity setpoint
+on a separate ROS topic -- ``/target_velocity`` (``std_msgs/Float32``) by
+default -- in the same scaled engineering units the firmware's
+``VEL_FB_SCALE`` produces (typically m/s). Until a message arrives the
+setpoint is hardcoded to ``0.0`` ("stay at idle"), so a fresh launch never
+silently asks the car to move.
 
 The steering pass-through maps ``VehicleControl.steer`` (left positive, right
 negative, range [-1, 1]) to a firmware steer-angle setpoint in degrees. The
@@ -56,6 +58,7 @@ from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 
 from autoiq_msgs.msg import VehicleControl
+from std_msgs.msg import Float32
 
 
 # ---------------------------------------------------------------------------
@@ -171,18 +174,27 @@ def default_blacklist_path() -> Optional[Path]:
 
 @dataclass
 class _ControlSnapshot:
-    """Most recent ``VehicleControl`` we've received, with thread-safe access.
+    """Most recent ``VehicleControl`` + target-velocity values we've received,
+    with thread-safe access.
 
-    The ROS subscriber callback runs on the executor thread; the periodic
+    The ROS subscriber callbacks run on the executor thread; the periodic
     send timer also runs on the executor thread but in a separate callback
     invocation, so technically a lock isn't strictly required for CPython
     here. We use one anyway because (a) it's cheap, (b) it makes the
     invariant explicit, and (c) it keeps us correct if the executor type
     ever changes.
+
+    ``target_velocity`` defaults to 0.0 ("stay at idle") so the very first
+    tick before any /target_velocity message arrives never asks the car to
+    move. ``have_velocity_msg`` is exposed so the startup banner / hot path
+    can tell the difference between "explicit zero from the publisher" and
+    "no publisher yet".
     """
 
     steer: float = 0.0
+    target_velocity: float = 0.0
     have_msg: bool = False
+    have_velocity_msg: bool = False
     _lock: threading.Lock = threading.Lock()
 
     def update(self, msg: VehicleControl) -> None:
@@ -190,9 +202,19 @@ class _ControlSnapshot:
             self.steer = float(msg.steer)
             self.have_msg = True
 
-    def snapshot(self) -> tuple[float, bool]:
+    def update_velocity(self, value: float) -> None:
         with self._lock:
-            return self.steer, self.have_msg
+            self.target_velocity = float(value)
+            self.have_velocity_msg = True
+
+    def snapshot(self) -> tuple[float, float, bool, bool]:
+        with self._lock:
+            return (
+                self.steer,
+                self.target_velocity,
+                self.have_msg,
+                self.have_velocity_msg,
+            )
 
 
 # Threshold below which a change in throttle/brake/steer is treated as
@@ -208,6 +230,11 @@ class CmdToCanNode(Node):
         # ==================== Parameters ====================
         # ROS-side
         self.declare_parameter("control_topic", "/carla/ego_vehicle/control")
+        # Topic carrying the velocity setpoint as std_msgs/Float32, in the
+        # same scaled engineering units the firmware's VEL_FB_SCALE produces
+        # (typically m/s). Until a message arrives, the setpoint is held at
+        # 0.0 -- safe default, "stay at idle".
+        self.declare_parameter("target_velocity_topic", "/target_velocity")
         self.declare_parameter("publish_rate_hz", 20.0)
 
         # CAN bus
@@ -221,16 +248,6 @@ class CmdToCanNode(Node):
         # instead of silently disabling it.
         self.declare_parameter("blacklist_file", "")
         self.declare_parameter("disable_blacklist", False)
-
-        # Velocity bypass
-        # The Teensy velocity PID operates in scaled engineering units --
-        # raw OBD counts × VEL_FB_SCALE on the firmware side. Set this
-        # parameter in the same units (typically m/s, or whatever you've
-        # calibrated VEL_FB_SCALE to produce). 0.0 is the safe default:
-        # "stay at idle"; the user must override to ask the car to move.
-        # Wire transport is int16 × VEL_CMD_TX_X100, so 0.01-unit resolution
-        # and ±327.67-unit range -- plenty for m/s or km/h.
-        self.declare_parameter("target_velocity", 0.0)
 
         # Steering mapping
         # ``VehicleControl.steer`` is +1 for left, -1 for right (per the msg
@@ -251,6 +268,9 @@ class CmdToCanNode(Node):
 
         # Resolve parameters into local handles for the hot path.
         self._control_topic = self.get_parameter("control_topic").value
+        self._target_velocity_topic = str(
+            self.get_parameter("target_velocity_topic").value
+        )
         publish_rate_hz = float(self.get_parameter("publish_rate_hz").value)
 
         self._can_interface = self.get_parameter("can_interface").value
@@ -261,7 +281,6 @@ class CmdToCanNode(Node):
         # them each tick (rather than caching the value) so ``ros2 param
         # set`` takes effect without restarting the node.
         self._param_names_hot = (
-            "target_velocity",
             "steer_sign",
             "max_steer_angle_deg",
             "autonomous_mode",
@@ -315,6 +334,17 @@ class CmdToCanNode(Node):
             self._on_control,
             10,
         )
+        # Velocity setpoint subscription. Same depth as the control topic;
+        # the firmware re-uses the most recent value at every send tick so
+        # we don't need a long backlog. NaN/Inf is rejected at callback time
+        # to keep a malformed publisher from poisoning the hot path.
+        self._velocity_sub = self.create_subscription(
+            Float32,
+            self._target_velocity_topic,
+            self._on_target_velocity,
+            10,
+        )
+        self._last_logged_target_velocity = float("nan")
 
         # ==================== CAN bus ====================
         self._bus: Optional[can.BusABC] = None
@@ -342,12 +372,12 @@ class CmdToCanNode(Node):
         self.get_logger().info(
             "cmd_to_can_node started.\n"
             f"  Subscribing to    : {self._control_topic}\n"
+            f"  Velocity topic    : {self._target_velocity_topic}"
+            " (std_msgs/Float32, defaults to 0.0 until first msg)\n"
             f"  Publish rate      : {publish_rate_hz:.1f} Hz\n"
             f"  CAN               : {self._can_interface}:{self._can_channel}"
             f" @ {self._can_bitrate} bps\n"
             f"  Blacklist         : {blacklist_status}\n"
-            f"  Velocity setpoint : {float(self._param('target_velocity')):.2f}"
-            " (scaled units; bypassing VehicleControl.throttle/brake)\n"
             f"  Autonomous mode   : {self._param('autonomous_mode')}\n"
             f"  Steer mode        : {SteerMode(self._param('steer_mode')).name}\n"
             f"  Throttle mode     : "
@@ -396,6 +426,30 @@ class CmdToCanNode(Node):
             # is alive even when the operator isn't pressing anything.
             self.get_logger().info(line, throttle_duration_sec=1.0)
 
+    def _on_target_velocity(self, msg: Float32) -> None:
+        value = float(msg.data)
+        # NaN / Inf would otherwise propagate into the int16 wire encoding
+        # below and silently wrap; reject upstream so the operator sees the
+        # bad publisher in the log instead of weird actuator behavior.
+        if value != value or value in (float("inf"), float("-inf")):
+            self.get_logger().warn(
+                f"Ignoring non-finite target_velocity={msg.data!r}",
+                throttle_duration_sec=1.0,
+            )
+            return
+        self._snapshot.update_velocity(value)
+
+        # Same change-vs-heartbeat pattern as _on_control above so a
+        # publisher hammering the same value at 50 Hz doesn't drown the log.
+        if abs(value - self._last_logged_target_velocity) > _FIELD_CHANGE_EPS:
+            self.get_logger().info(f"RX target_velocity={value:+.3f}")
+            self._last_logged_target_velocity = value
+        else:
+            self.get_logger().info(
+                f"RX target_velocity={value:+.3f}",
+                throttle_duration_sec=1.0,
+            )
+
     # ------------------------------------------------------------------
     # Periodic CAN tick. Always sends MODE + STEER_ANGLE + VELOCITY so the
     # firmware watchdog (500 ms) never trips and so the most recent steer
@@ -406,11 +460,10 @@ class CmdToCanNode(Node):
         if self._bus is None:
             return
 
-        steer, _ = self._snapshot.snapshot()
+        steer, target_velocity, _, _ = self._snapshot.snapshot()
 
         steer_sign = float(self._param("steer_sign"))
         max_angle_deg = float(self._param("max_steer_angle_deg"))
-        target_velocity = float(self._param("target_velocity"))
         auto = bool(self._param("autonomous_mode"))
         steer_mode = SteerMode(int(self._param("steer_mode")))
         throttle_mode = ThrottleMode(int(self._param("throttle_mode")))

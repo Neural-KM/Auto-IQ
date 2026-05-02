@@ -4,8 +4,11 @@ Example::
 
     ros2 launch cmd_to_can cmd_to_can.launch.py \
         can_channel:=can0 \
-        target_velocity:=0.0 \
         autonomous_mode:=false
+
+The velocity setpoint is no longer a launch arg -- publish it on
+``/target_velocity`` (``std_msgs/Float32``, scaled engineering units, default
+0.0). See ``cmd_to_can_node`` docstring for the full convention.
 """
 
 from launch import LaunchDescription
@@ -53,13 +56,13 @@ def generate_launch_description() -> LaunchDescription:
             description="CAN bus bitrate in bits/s.",
         ),
         DeclareLaunchArgument(
-            "target_velocity",
-            default_value="0.0",
+            "target_velocity_topic",
+            default_value="/target_velocity",
             description=(
-                "Hard-coded velocity setpoint sent on CAN ID 0x104, in the "
-                "same scaled engineering units the firmware's VEL_FB_SCALE "
-                "produces (typically m/s). 0 keeps the throttle parked. "
-                "Bypasses VehicleControl.throttle/brake."
+                "Topic to subscribe to for the velocity setpoint "
+                "(std_msgs/Float32, in the same scaled units as "
+                "VEL_FB_SCALE -- typically m/s). Defaults to 0.0 until "
+                "the first message arrives."
             ),
         ),
         DeclareLaunchArgument(
@@ -114,11 +117,11 @@ def generate_launch_description() -> LaunchDescription:
             output="screen",
             parameters=[{
                 "control_topic": _typed("control_topic", str),
+                "target_velocity_topic": _typed("target_velocity_topic", str),
                 "publish_rate_hz": _typed("publish_rate_hz", float),
                 "can_interface": _typed("can_interface", str),
                 "can_channel": _typed("can_channel", str),
                 "can_bitrate": _typed("can_bitrate", int),
-                "target_velocity": _typed("target_velocity", float),
                 "autonomous_mode": _typed("autonomous_mode", bool),
                 "steer_mode": _typed("steer_mode", int),
                 "throttle_mode": _typed("throttle_mode", int),
