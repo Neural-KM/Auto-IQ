@@ -19,6 +19,9 @@
   <depend>autoiq_msgs</depend>
 
   <exec_depend>python3-can</exec_depend>
+  <!-- Optional: only needed by pid_tuner_gui, which is a standalone (non-ROS)
+       script. Listed as exec_depend so rosdep can install it on bring-up. -->
+  <exec_depend>python3-pygame</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
