@@ -10,14 +10,14 @@ This node mirrors the wire protocol implemented in
 ``firmware/main_project/src/main.cpp`` and demonstrated by
 ``firmware/main_project/src/compute_side_tui.py``:
 
-* ``0x100`` THROTTLE_CMD       -- 2 bytes, big-endian uint16, value = throttle[%] * 10
-* ``0x101`` MODE_CMD           -- 3 bytes:
+* ``0x300`` THROTTLE_CMD       -- 2 bytes, big-endian uint16, value = throttle[%] * 10
+* ``0x301`` MODE_CMD           -- 3 bytes:
                                   byte 0 = autonomous (1=AUTO, 0=MANUAL)
                                   byte 1 = steer mode (0=DIRECT, 1=ANGLE_PID)
                                   byte 2 = throttle mode (0=DIRECT, 1=VELOCITY_PID)
-* ``0x102`` STEER_TORQUE_CMD   -- 2 bytes, big-endian int16 (DIRECT steer)
-* ``0x103`` STEER_ANGLE_CMD    -- 2 bytes, big-endian int16, value = angle[deg] * 10
-* ``0x104`` VELOCITY_CMD       -- 2 bytes, big-endian int16, value = velocity * 100
+* ``0x302`` STEER_TORQUE_CMD   -- 2 bytes, big-endian int16 (DIRECT steer)
+* ``0x303`` STEER_ANGLE_CMD    -- 2 bytes, big-endian int16, value = angle[deg] * 10
+* ``0x304`` VELOCITY_CMD       -- 2 bytes, big-endian int16, value = velocity * 100
                                   (in the same engineering units the firmware's
                                   VEL_FB_SCALE produces -- typically m/s)
 
@@ -66,11 +66,11 @@ from std_msgs.msg import Float32
 # change in the firmware, this file must be updated to match.
 # ---------------------------------------------------------------------------
 
-THROTTLE_CMD_CAN_ID = 0x100
-MODE_CMD_CAN_ID = 0x101
-STEER_TORQUE_CMD_CAN_ID = 0x102
-STEER_ANGLE_CMD_CAN_ID = 0x103
-VELOCITY_CMD_CAN_ID = 0x104
+THROTTLE_CMD_CAN_ID = 0x300
+MODE_CMD_CAN_ID = 0x301
+STEER_TORQUE_CMD_CAN_ID = 0x302
+STEER_ANGLE_CMD_CAN_ID = 0x303
+VELOCITY_CMD_CAN_ID = 0x304
 
 # Every standard-frame ID this node ever transmits. Used for the blacklist
 # safety check at startup (see ``compute_side_tui.py``).
@@ -82,7 +82,17 @@ COMMAND_IDS: tuple[tuple[bool, int], ...] = (
 
 STEER_ANGLE_LIMIT_DEG = 15.0
 
-# Wire format for the 0x104 velocity setpoint frame: int16 BE carrying the
+# Wire format for the 0x303 steering-angle setpoint frame: int16 BE carrying
+# the desired angle in **degrees × STEER_ANGLE_CMD_TX_X10**. 10 → 0.1°
+# resolution and a wire range of ±3276.7°, way more than the physical
+# ±STEER_ANGLE_LIMIT_DEG, so the clamp in ``angle_deg_to_raw_x10`` catches
+# malformed/runaway commands at the edge before they ever hit the bus. Both
+# the encode side here and the firmware decode side
+# (``STEER_ANGLE_CMD_TX_X10`` in ``main.cpp``) MUST use the same factor --
+# the unit-pipeline contract is exactly the same as VEL_CMD_TX_X100 below.
+STEER_ANGLE_CMD_TX_X10 = 10.0
+
+# Wire format for the 0x304 velocity setpoint frame: int16 BE carrying the
 # scaled velocity setpoint multiplied by this factor. Keep in sync with
 # ``VEL_CMD_TX_X100`` in firmware/main_project/src/main.cpp.
 VEL_CMD_TX_X100 = 100.0
@@ -104,8 +114,18 @@ class ThrottleMode(IntEnum):
 # ---------------------------------------------------------------------------
 
 def angle_deg_to_raw_x10(angle_deg: float) -> int:
+    """Encode a desired steering angle in degrees as the int16 wire value.
+
+    Single source of truth for the host-side steering encode. The firmware
+    inverts this exactly: ``targetDeg = strAngleCmdX10 / STEER_ANGLE_CMD_TX_X10``.
+    Clamping happens here (in degrees) and again in firmware (in the
+    derived 0.1° integer limits) so a bad input gets bounded once at the
+    boundary it crosses, in the units that boundary is naturally expressed
+    in. Both clamps fall out of the same ``STEER_ANGLE_LIMIT_DEG`` so they
+    never disagree.
+    """
     bounded = max(-STEER_ANGLE_LIMIT_DEG, min(STEER_ANGLE_LIMIT_DEG, angle_deg))
-    return int(round(bounded * 10.0))
+    return int(round(bounded * STEER_ANGLE_CMD_TX_X10))
 
 
 def clamp_int(value: int, lo: int, hi: int) -> int:
@@ -505,8 +525,12 @@ class CmdToCanNode(Node):
     @staticmethod
     def _build_angle_frame(angle_deg: float) -> can.Message:
         angle_x10 = angle_deg_to_raw_x10(angle_deg)
-        # firmware clamps to ±150 (±15.0 deg), but be defensive here too.
-        angle_x10 = clamp_int(angle_x10, -150, 150)
+        # Firmware also clamps to the same range (derived from
+        # STEER_ANGLE_LIMIT_DEG × STEER_ANGLE_CMD_TX_X10), but enforce it
+        # here too -- defense in depth, and the source of truth for the
+        # numeric limit lives in this same module.
+        angle_x10_limit = int(round(STEER_ANGLE_LIMIT_DEG * STEER_ANGLE_CMD_TX_X10))
+        angle_x10 = clamp_int(angle_x10, -angle_x10_limit, angle_x10_limit)
         payload = angle_x10.to_bytes(2, byteorder="big", signed=True)
         return can.Message(
             arbitration_id=STEER_ANGLE_CMD_CAN_ID,

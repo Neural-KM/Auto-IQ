@@ -31,7 +31,7 @@ setup(
             'cmd_to_can_node = cmd_to_can.cmd_to_can_node:main',
             'vehicle_control_tui = cmd_to_can.vehicle_control_tui_node:main',
             # Standalone (non-ROS) pygame UI for live PID-gain tuning over
-            # CAN IDs 0x105 (set) and 0x106 (feedback). Runs fine via
+            # CAN IDs 0x333 (set) and 0x334 (feedback). Runs fine via
             # `ros2 run cmd_to_can pid_tuner_gui ...` or directly with
             # `python3 .../pid_tuner_gui.py`.
             'pid_tuner_gui = cmd_to_can.pid_tuner_gui:main',

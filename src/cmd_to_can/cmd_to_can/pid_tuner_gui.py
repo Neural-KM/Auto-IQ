@@ -7,7 +7,7 @@ Standalone pygame GUI for live-tuning the Teensy 4.1's steering-angle and
 velocity PID gains over CAN. **Not** a ROS 2 node -- it talks to the firmware
 directly with python-can so it can run on a laptop with a USB-CAN dongle and
 no ROS environment, or on the same Jetson next to ``cmd_to_can_node`` since
-the gain channel uses its own CAN IDs (0x105 / 0x106).
+the gain channel uses its own CAN IDs (0x333 / 0x334).
 
 Wire protocol (mirrors firmware/main_project/src/main.cpp)
 ----------------------------------------------------------
@@ -17,14 +17,14 @@ Two paired standard-frame IDs, each carrying a 5-byte payload::
     byte 0    : selector  (uint8, see PID_GAIN_SELECTORS below)
     bytes 1..4: value     (IEEE-754 float, little-endian / Teensy native)
 
-* ``0x105`` PID_GAINS_SET_CAN_ID   -- host -> Teensy, "store this value".
-* ``0x106`` PID_GAINS_FB_CAN_ID    -- Teensy -> host, "this is what I have".
+* ``0x333`` PID_GAINS_SET_CAN_ID   -- host -> Teensy, "store this value".
+* ``0x334`` PID_GAINS_FB_CAN_ID    -- Teensy -> host, "this is what I have".
 
 Confirmation strategy
 ---------------------
 
-After every successful 0x105 write, the firmware echoes the **stored** value
-back on 0x106. The firmware also round-robin broadcasts every gain on 0x106
+After every successful 0x333 write, the firmware echoes the **stored** value
+back on 0x334. The firmware also round-robin broadcasts every gain on 0x334
 at ~150 ms / selector, so:
 
 * a freshly-started GUI populates without having to ask, and
@@ -77,8 +77,8 @@ except ImportError as exc:  # pragma: no cover -- import-time install hint
 # Wire protocol -- keep in sync with firmware/main_project/src/main.cpp
 # ---------------------------------------------------------------------------
 
-PID_GAINS_SET_CAN_ID = 0x105
-PID_GAINS_FB_CAN_ID = 0x106
+PID_GAINS_SET_CAN_ID = 0x333
+PID_GAINS_FB_CAN_ID = 0x334
 
 
 class PidGainSelector(IntEnum):
@@ -106,7 +106,7 @@ PID_GAIN_ROWS: tuple[tuple[PidGainSelector, str, str], ...] = (
 _CONFIRM_EPS = 1e-5
 
 # How long to wait for a confirmation echo before declaring the write FAILED.
-# The firmware acks immediately on 0x105 RX, so anything past a few hundred
+# The firmware acks immediately on 0x333 RX, so anything past a few hundred
 # ms means the frame never landed (bus down, wrong selector, etc.).
 _CONFIRM_TIMEOUT_S = 0.75
 
@@ -122,7 +122,7 @@ def encode_gain_frame(selector: PidGainSelector, value: float) -> can.Message:
 
 
 def decode_gain_frame(msg: can.Message) -> Optional[tuple[int, float]]:
-    """Return ``(selector, value)`` from a 0x106 frame, or None if malformed.
+    """Return ``(selector, value)`` from a 0x334 frame, or None if malformed.
 
     We don't raise on garbage -- the bus may carry a frame with the same
     arbitration ID from some other device and we'd rather drop it quietly
@@ -145,7 +145,7 @@ def decode_gain_frame(msg: can.Message) -> Optional[tuple[int, float]]:
 
 class WriteStatus(IntEnum):
     IDLE = 0       # No write in flight; "Current" reflects the firmware
-    PENDING = 1    # Sent on 0x105, waiting for matching echo on 0x106
+    PENDING = 1    # Sent on 0x333, waiting for matching echo on 0x334
     CONFIRMED = 2  # Echo matched the value we sent (within _CONFIRM_EPS)
     FAILED = 3     # Echo never came (timeout) or value mismatched
 
@@ -185,7 +185,7 @@ def can_rx_loop(
     state: TunerState,
     stop_event: threading.Event,
 ) -> None:
-    """Pump 0x106 frames into ``state``. Runs until ``stop_event`` is set."""
+    """Pump 0x334 frames into ``state``. Runs until ``stop_event`` is set."""
     while not stop_event.is_set():
         try:
             msg = bus.recv(timeout=0.1)
@@ -538,7 +538,7 @@ def run_ui(
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="pygame GUI for tuning Teensy steering/velocity PID gains "
-                    "over CAN (IDs 0x105 set / 0x106 feedback).",
+                    "over CAN (IDs 0x333 set / 0x334 feedback).",
     )
     p.add_argument(
         "--can-interface",
