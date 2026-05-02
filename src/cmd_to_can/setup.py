@@ -29,6 +29,7 @@ setup(
     entry_points={
         'console_scripts': [
             'cmd_to_can_node = cmd_to_can.cmd_to_can_node:main',
+            'vehicle_control_tui = cmd_to_can.vehicle_control_tui_node:main',
         ],
     },
 )

@@ -195,6 +195,12 @@ class _ControlSnapshot:
             return self.steer, self.have_msg
 
 
+# Threshold below which a change in throttle/brake/steer is treated as
+# "the same value" for change-detection logging. Picked to be smaller than
+# the 0.05 step the TUI uses, so a single keypress always prints.
+_FIELD_CHANGE_EPS = 0.005
+
+
 class CmdToCanNode(Node):
     def __init__(self) -> None:
         super().__init__("cmd_to_can_node")
@@ -292,6 +298,17 @@ class CmdToCanNode(Node):
 
         # ==================== ROS I/O ====================
         self._snapshot = _ControlSnapshot()
+        # Last logged values, used to suppress duplicate "same as last frame"
+        # log lines (the TUI republishes at 20 Hz, we don't want a wall of
+        # identical text). Initialized to NaN so the very first message is
+        # always treated as a change.
+        self._last_logged_throttle = float("nan")
+        self._last_logged_brake = float("nan")
+        self._last_logged_steer = float("nan")
+        self._last_logged_hand_brake: Optional[bool] = None
+        self._last_logged_reverse: Optional[bool] = None
+        self._last_logged_gear: Optional[int] = None
+
         self._sub = self.create_subscription(
             VehicleControl,
             self._control_topic,
@@ -343,6 +360,41 @@ class CmdToCanNode(Node):
 
     def _on_control(self, msg: VehicleControl) -> None:
         self._snapshot.update(msg)
+
+        # Decide whether anything actually changed since the last log line.
+        # We treat float fields with an epsilon (smaller than the TUI's step
+        # size) so a single keypress is always loud; bool/int fields are
+        # exact-compare.
+        changed = (
+            abs(float(msg.throttle) - self._last_logged_throttle) > _FIELD_CHANGE_EPS
+            or abs(float(msg.brake) - self._last_logged_brake) > _FIELD_CHANGE_EPS
+            or abs(float(msg.steer) - self._last_logged_steer) > _FIELD_CHANGE_EPS
+            or bool(msg.hand_brake) != self._last_logged_hand_brake
+            or bool(msg.reverse) != self._last_logged_reverse
+            or int(msg.gear) != self._last_logged_gear
+        )
+
+        line = (
+            f"RX VehicleControl  throttle={float(msg.throttle):+.3f}  "
+            f"brake={float(msg.brake):+.3f}  steer={float(msg.steer):+.3f}  "
+            f"hand_brake={bool(msg.hand_brake)}  reverse={bool(msg.reverse)}  "
+            f"gear={int(msg.gear)}"
+        )
+
+        if changed:
+            # Print every change immediately so the operator sees keypresses
+            # land with no perceived latency.
+            self.get_logger().info(line)
+            self._last_logged_throttle = float(msg.throttle)
+            self._last_logged_brake = float(msg.brake)
+            self._last_logged_steer = float(msg.steer)
+            self._last_logged_hand_brake = bool(msg.hand_brake)
+            self._last_logged_reverse = bool(msg.reverse)
+            self._last_logged_gear = int(msg.gear)
+        else:
+            # Steady-state heartbeat at 1 Hz so it's still obvious the topic
+            # is alive even when the operator isn't pressing anything.
+            self.get_logger().info(line, throttle_duration_sec=1.0)
 
     # ------------------------------------------------------------------
     # Periodic CAN tick. Always sends MODE + STEER_ANGLE + VELOCITY so the
