@@ -3,9 +3,9 @@
 # These parameters define lane structure for the mapping package.
 # Used by LocalLaneEstimator to compute lane centerlines from detected boundaries.
 
-# Road geometry
-lane_count: 4                   # Number of lanes to divide road into
-total_road_width: 14.0          # Expected total road width (meters) - used when only one boundary visible
+# Road geometry — current hardware test track is a 2-lane road.
+lane_count: 2                   # Number of lanes to divide road into
+total_road_width: 7.0           # Expected total road width (meters), ~3.5 m per lane
 
 # Drivable-to-lane buffer distances (meters)
 # The extracted boundary is the OUTER edge of the drivable area (road + road_line).
@@ -14,12 +14,12 @@ total_road_width: 14.0          # Expected total road width (meters) - used when
 #
 # Right side (wall/kerb): drivable edge -> rightmost lane boundary
 # Left side (divider): drivable edge -> leftmost lane boundary
-clearance_from_wall: 3.3        # Buffer from right drivable edge to rightmost lane (meters)
-clearance_from_divider: 1.0     # Buffer from left drivable edge to leftmost lane (meters)
+clearance_from_wall: 0.3        # Buffer from right drivable edge to rightmost lane (meters)
+clearance_from_divider: 0.3     # Buffer from left drivable edge to leftmost lane (meters)
 
-# Validation thresholds
-min_road_width: 10.0            # Minimum valid road width (meters)
-max_road_width: 20.0            # Maximum valid road width (meters)
+# Validation thresholds — relaxed for the narrower 2-lane road.
+min_road_width: 4.5             # Minimum valid road width (meters)
+max_road_width: 12.0            # Maximum valid road width (meters)
 
 # BEV (Bird's Eye View) transform parameters
 # Range should cover full camera FOV. For ~90° FOV camera:

@@ -148,7 +148,7 @@ class LaneFollowerNode(Node):
 
         defaults = {
             'preferred_lane': 1,
-            'local_follow_speed': 25.0,
+            'local_follow_speed': 10.0,
             'curvature_speed_factor': 2.0,
         }
 

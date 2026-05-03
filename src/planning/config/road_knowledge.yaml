@@ -7,22 +7,28 @@
 #   x = forward,  y = lateral  (+left, −right)
 #   Right boundary → lower y  (wall / kerb side)
 #   Left  boundary → higher y (divider / oncoming side)
+#
+# preferred_lane index convention:
+#   0 = rightmost lane
+#   lane_count - 1 = leftmost lane
 # ─────────────────────────────────────────────────────────────
 
-# Road geometry
-total_road_width: 14.0    # full road width for one direction (m) - typically 3.5m per lane
-lane_count: 4             # number of lanes across the full road
+# Road geometry — current hardware test track is a 2-lane road.
+total_road_width: 7.0    # full road width for one direction (m), ~3.5 m per lane
+lane_count: 2            # number of lanes across the full road
 
 # Safety clearances (m)
 clearance_from_wall: 0.3      # min gap from kerb / wall (right edge)
 clearance_from_divider: 0.3   # min gap from centre divider (left edge)
 
 # Lane selection
-preferred_lane: 1   # 0 = rightmost, 1 = second from right (safer)
+# We test on the **leftmost** lane. With lane_count=2 that's index 1
+# (0 = rightmost, lane_count - 1 = leftmost).
+preferred_lane: 1
 
-# Boundary sanity guards (m)
-min_road_width: 10.0   # reject boundaries narrower than this
-max_road_width: 20.0   # reject boundaries wider than this
+# Boundary sanity guards (m) — relaxed for the narrower 2-lane road.
+min_road_width: 4.5    # reject boundaries narrower than this
+max_road_width: 12.0   # reject boundaries wider than this
 
 # Local lane-following speed
 local_follow_speed: 25.0        # km/h  (used when no global goal is set)

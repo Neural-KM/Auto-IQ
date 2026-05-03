@@ -83,7 +83,13 @@ def generate_launch_description():
     sensors_bringup_pkg = get_package_share_directory('sensors_bringup')
     cmd_to_can_pkg = get_package_share_directory('cmd_to_can')
 
-    rviz_config = os.path.join(autoiq_bridge_pkg, 'config', 'autoiq.rviz')
+    # Hardware-specific RViz layout: 3D view in base_link plus four image
+    # panels (raw camera, full segmentation, road+lane extraction,
+    # lane-BEV debug) plus the local lane midline path. Falls back to the
+    # CARLA `autoiq.rviz` if the hardware preset has been removed.
+    rviz_config = os.path.join(autoiq_bridge_pkg, 'config', 'hardware.rviz')
+    if not os.path.exists(rviz_config):
+        rviz_config = os.path.join(autoiq_bridge_pkg, 'config', 'autoiq.rviz')
 
     # --------------------- Arguments ---------------------
     args = [
