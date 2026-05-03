@@ -11,3 +11,4 @@ scikit-image
 tabulate
 numba
 python-can
+transformers

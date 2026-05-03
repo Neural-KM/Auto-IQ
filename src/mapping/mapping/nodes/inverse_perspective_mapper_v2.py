@@ -77,6 +77,23 @@ class InversePerspectiveMapperNode2(Node):
         self.declare_parameter('semantic_source', 'road_lane_extraction')  # 'road_lane_extraction' or 'ground_truth'
         self.declare_parameter('costmap_topic', '/mapping/ipm_costmap')
         self.declare_parameter('base_frame', 'ego_vehicle')
+        # Camera intrinsics topic + TF frame. Defaults match the CARLA
+        # bridge so existing sim launches keep working; the hardware
+        # bringup overrides both to point at the ZED X One front camera
+        # (e.g. `/zed_1/zed_node/rgb/color/camera_info` and
+        # `zed_1_camera_optical_frame`).
+        self.declare_parameter(
+            'camera_info_topic',
+            '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info')
+        self.declare_parameter(
+            'camera_frame',
+            'ego_vehicle/sensor/camera/rgb/front')
+        # Override for the ground-truth semantic image topic (CARLA only).
+        # The road_lane_extraction topic is fixed because it's an internal
+        # contract with the perception package.
+        self.declare_parameter(
+            'ground_truth_semantic_topic',
+            '/carla/ego_vehicle/ground_truth/camera/semantic/front/image')
 
         # Grid parameters
         self.declare_parameter('grid_size', 40.0)    # meters (square grid)
@@ -91,14 +108,16 @@ class InversePerspectiveMapperNode2(Node):
         self.declare_parameter('rear_to_base_link', 1.7)  # Distance from base_link to vehicle center
         self.declare_parameter('clear_zone_radius', 5.0)  # Circular free zone around vehicle (meters)
 
-        # Resolve semantic source → only the image topic changes
-        # Camera intrinsics and frame are shared (same physical camera)
+        # Resolve semantic source → only the image topic changes.
+        # Camera intrinsics + TF frame are shared (same physical camera)
+        # and now come from launch params so the hardware rig (ZED X One)
+        # and the CARLA front-cam can share this node unchanged.
         semantic_source = self.get_parameter('semantic_source').value
-        camera_info_topic = '/carla/ego_vehicle/sensor/camera/rgb/front/camera_info'
-        self.camera_frame = 'ego_vehicle/sensor/camera/rgb/front'
+        camera_info_topic = self.get_parameter('camera_info_topic').value
+        self.camera_frame = self.get_parameter('camera_frame').value
 
         if semantic_source == 'ground_truth':
-            semantic_topic = '/carla/ego_vehicle/ground_truth/camera/semantic/front/image'
+            semantic_topic = self.get_parameter('ground_truth_semantic_topic').value
         else:
             semantic_topic = '/perception/semantic_map/road_lane_extraction'
 

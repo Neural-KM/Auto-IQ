@@ -6,9 +6,26 @@ Pure Pursuit Control Node
 ROS2 node for vehicle control using Pure Pursuit (lateral) + PID (longitudinal).
 Subscribes to trajectory and odometry, publishes vehicle control commands.
 
+Two operating modes
+-------------------
+``local_only=False`` (default, CARLA bringups):
+  Subscribes to ``/carla/ego_vehicle/ground_truth/odometry`` for the
+  vehicle pose, runs pure-pursuit in the global ``map`` frame the
+  trajectory is published in.
+
+``local_only=True`` (real-hardware bringups -- no localisation):
+  Skips odometry entirely. The vehicle is treated as sitting at the
+  origin of ``base_frame`` with yaw=0 and unknown speed. The trajectory
+  is therefore consumed in vehicle-relative coordinates -- which is
+  exactly what ``lane_follower_node`` publishes when its own
+  ``local_only`` flag is set. Speed control falls back to open-loop
+  matching of the lookahead point's target speed (since we don't have a
+  measured speed); ``cmd_to_can_node`` only forwards the throttle/brake
+  triplet anyway when the firmware is in ``THROTTLE_MODE_DIRECT``.
+
 Subscribes:
 - /planning/trajectory (autoiq_msgs/Trajectory) - Planned trajectory from planning node
-- /carla/ego_vehicle/ground_truth/odometry (nav_msgs/Odometry) - Vehicle state
+- /carla/ego_vehicle/ground_truth/odometry (nav_msgs/Odometry) - Vehicle state (map mode only)
 
 Publishes:
 - /carla/ego_vehicle/control (autoiq_msgs/VehicleControl) - Vehicle control
@@ -59,6 +76,12 @@ class PurePursuitNode(Node):
         self.declare_parameter('min_lookahead', 4.0)
         self.declare_parameter('max_lookahead', 25.0)
         self.declare_parameter('lookahead_ratio', 0.5)
+
+        # ----- Local-only / hardware-mode switches -----
+        self.declare_parameter('local_only', False)
+        self.declare_parameter('odom_topic', '/carla/ego_vehicle/ground_truth/odometry')
+        self.declare_parameter('trajectory_topic', '/planning/trajectory')
+        self.declare_parameter('control_topic', '/carla/ego_vehicle/control')
         
         # Get parameters
         self.max_steering_diff = self.get_parameter('max_steering_diff').value
@@ -75,15 +98,30 @@ class PurePursuitNode(Node):
         self.min_lookahead = self.get_parameter('min_lookahead').value
         self.max_lookahead = self.get_parameter('max_lookahead').value
         self.lookahead_ratio = self.get_parameter('lookahead_ratio').value
-        
+
+        self.local_only: bool = bool(self.get_parameter('local_only').value)
+        odom_topic: str = str(self.get_parameter('odom_topic').value)
+        trajectory_topic: str = str(self.get_parameter('trajectory_topic').value)
+        control_topic: str = str(self.get_parameter('control_topic').value)
+
         # ==================== Initialize Controllers ====================
         # PID for longitudinal control
         output_limits = (-self.max_brake, self.max_throttle)
         self.pid = PIDController(pid_kp, pid_ki, pid_kd, 1.0/control_rate, output_limits)
         
         # ==================== State ====================
-        self.vehicle_state: VehicleState = None
-        
+        # In local_only mode there's no global pose source, so the vehicle
+        # is always considered to sit at the origin of the trajectory's
+        # frame (which lane_follower_node also publishes in `base_frame`).
+        # Speed defaults to 0 -- the longitudinal PID then pushes throttle
+        # toward whatever the trajectory's target speed is, which is a
+        # safe open-loop fallback until a real speed feedback topic gets
+        # wired in.
+        if self.local_only:
+            self.vehicle_state: VehicleState = VehicleState()
+        else:
+            self.vehicle_state: VehicleState = None
+
         self.current_waypoints = None
         self.has_trajectory = False
         self.current_behavior_state = Trajectory.LANE_FOLLOWING
@@ -96,17 +134,20 @@ class PurePursuitNode(Node):
         
         # ==================== Subscribers ====================
         self.trajectory_sub = self.create_subscription(
-            Trajectory, '/planning/trajectory',
+            Trajectory, trajectory_topic,
             self.trajectory_callback, 10)
-        
-        self.odom_sub = self.create_subscription(
-            Odometry, '/carla/ego_vehicle/ground_truth/odometry',
-            self.odom_callback, 10)
+
+        # In local_only mode we deliberately don't subscribe to odometry
+        # (no localisation on the real vehicle).
+        if not self.local_only:
+            self.odom_sub = self.create_subscription(
+                Odometry, odom_topic,
+                self.odom_callback, 10)
         
         # ==================== Publishers ====================
         self.control_pub = self.create_publisher(
             VehicleControl, 
-            '/carla/ego_vehicle/control', 
+            control_topic, 
             10)
         
         self.status_pub = self.create_publisher(String, '/control/status', 10)
@@ -115,7 +156,9 @@ class PurePursuitNode(Node):
         control_period = 1.0 / control_rate
         self.control_timer = self.create_timer(control_period, self.control_loop)
         
-        self.get_logger().info(f'Pure Pursuit Node initialized ({control_rate}Hz)')
+        self.get_logger().info(
+            f'Pure Pursuit Node initialized ({control_rate}Hz, '
+            f'local_only={self.local_only})')
         self.get_logger().info(f'  Wheelbase: {self.wheelbase}m')
         self.get_logger().info(f'  Lookahead: {self.min_lookahead}-{self.max_lookahead}m')
     

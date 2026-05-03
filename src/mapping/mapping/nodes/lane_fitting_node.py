@@ -117,10 +117,18 @@ class LaneFittingNode(Node):
         # Lane config file path (relative to mapping package share directory)
         self.declare_parameter('lane_config_file', 'config/local_lane_data.yaml')
 
+        # Allow the ground-truth topic to be overridden so the same node
+        # can run against either the CARLA bridge or a custom rosbag /
+        # alternative semantic source. The road_lane_extraction topic
+        # stays fixed because it's an internal contract with perception.
+        self.declare_parameter(
+            'ground_truth_semantic_topic',
+            '/carla/ego_vehicle/ground_truth/camera/semantic/front/image')
+
         # Resolve semantic source → only the image topic changes
         semantic_source = self.get_parameter('semantic_source').value
         if semantic_source == 'ground_truth':
-            semantic_topic = '/carla/ego_vehicle/ground_truth/camera/semantic/front/image'
+            semantic_topic = self.get_parameter('ground_truth_semantic_topic').value
         else:
             semantic_topic = '/perception/semantic_map/road_lane_extraction'
 
@@ -301,7 +309,7 @@ class LaneFittingNode(Node):
         """Publish a LaneDetection message with polynomial coefficients."""
         det_msg = LaneDetectionMsg()
         det_msg.header.stamp = header.stamp
-        det_msg.header.frame_id = 'ego_vehicle'
+        det_msg.header.frame_id = self.base_frame
         det_msg.valid = result.valid
         det_msg.confidence = float(result.confidence)
 
@@ -345,7 +353,7 @@ class LaneFittingNode(Node):
 
         # Clear previous markers
         clear = Marker()
-        clear.header.frame_id = 'ego_vehicle'
+        clear.header.frame_id = self.base_frame
         clear.header.stamp = timestamp
         clear.ns = 'lanes'
         clear.id = 0
@@ -390,15 +398,16 @@ class LaneFittingNode(Node):
                     bev,
                     marker_id=1 + idx,
                     color=palette[idx % len(palette)],
-                    stamp=timestamp))
+                    stamp=timestamp,
+                    frame_id=self.base_frame))
 
         self.lane_markers_pub.publish(marker_array)
 
     @staticmethod
-    def _make_lane_marker(fit, bev_params, marker_id, color, stamp):
+    def _make_lane_marker(fit, bev_params, marker_id, color, stamp, frame_id):
         """Create a LINE_STRIP marker from polynomial coefficients in BEV space."""
         marker = Marker()
-        marker.header.frame_id = 'ego_vehicle'
+        marker.header.frame_id = frame_id
         marker.header.stamp = stamp
         marker.ns = 'lanes'
         marker.id = marker_id

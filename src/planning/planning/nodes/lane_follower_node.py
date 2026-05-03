@@ -10,13 +10,30 @@ Pipeline:
   mapping publishes EstimatedLanes → this node subscribes
   → selects preferred lane → trajectory published to control
 
+Two operating modes
+-------------------
+``local_only=False`` (default, CARLA bringups):
+  Subscribes to ``/carla/ego_vehicle/ground_truth/odometry`` for the
+  vehicle pose, transforms the lane midline base_link→map, and publishes
+  the trajectory in the ``map`` frame. Pure-pursuit chases that pose.
+
+``local_only=True`` (real-hardware bringups -- no localisation):
+  Skips odometry entirely. The vehicle is assumed to sit at the origin of
+  ``base_frame``, the midline is published as-is in that frame, and the
+  trajectory header carries ``base_frame`` instead of ``map``. The node
+  also republishes the target speed of the first trajectory point on
+  ``/target_velocity`` (``std_msgs/Float32``) so ``cmd_to_can_node`` can
+  forward it directly to the firmware's velocity PID without needing the
+  control package.
+
 Topics subscribed:
-  /mapping/estimated_lanes  (autoiq_msgs/EstimatedLanes, base_link)
-  /carla/ego_vehicle/ground_truth/odometry  (nav_msgs/Odometry)
+  /mapping/estimated_lanes               (autoiq_msgs/EstimatedLanes)
+  /carla/ego_vehicle/ground_truth/odometry  (nav_msgs/Odometry, map mode only)
 
 Topics published:
-  /planning/trajectory     (autoiq_msgs/Trajectory, map frame)
-  /planning/lane_midline   (nav_msgs/Path, map frame — visualisation)
+  /planning/trajectory     (autoiq_msgs/Trajectory, frame depends on mode)
+  /planning/lane_midline   (nav_msgs/Path, frame depends on mode)
+  /target_velocity         (std_msgs/Float32, local_only mode only)
 """
 
 import math
@@ -29,6 +46,7 @@ from ament_index_python.packages import get_package_share_directory
 from typing import List, Optional, Dict, Any
 
 from nav_msgs.msg import Path, Odometry
+from std_msgs.msg import Float32
 from geometry_msgs.msg import PoseStamped
 from autoiq_msgs.msg import Trajectory, TrajectoryPoint, EstimatedLanes
 
@@ -40,6 +58,38 @@ from autoiq_common.converters import vehicle_state_from_odometry
 class LaneFollowerNode(Node):
     def __init__(self):
         super().__init__('lane_follower_node')
+
+        # --- Parameters ---
+        # `local_only=True` strips out odometry/CARLA dependencies and
+        # publishes everything in `base_frame` (no map frame, no
+        # localisation). Use this on real hardware where there is no
+        # global pose source.
+        self.declare_parameter('local_only', False)
+        self.declare_parameter('base_frame', 'base_link')
+        self.declare_parameter('odom_topic', '/carla/ego_vehicle/ground_truth/odometry')
+        self.declare_parameter('target_velocity_topic', '/target_velocity')
+        self.declare_parameter(
+            'estimated_lanes_topic', '/mapping/estimated_lanes')
+        self.declare_parameter('trajectory_topic', '/planning/trajectory')
+        self.declare_parameter('midline_topic', '/planning/lane_midline')
+
+        self.local_only: bool = bool(
+            self.get_parameter('local_only').value)
+        self.base_frame: str = str(
+            self.get_parameter('base_frame').value)
+        odom_topic: str = str(self.get_parameter('odom_topic').value)
+        target_velocity_topic: str = str(
+            self.get_parameter('target_velocity_topic').value)
+        estimated_lanes_topic: str = str(
+            self.get_parameter('estimated_lanes_topic').value)
+        trajectory_topic: str = str(
+            self.get_parameter('trajectory_topic').value)
+        midline_topic: str = str(self.get_parameter('midline_topic').value)
+
+        # In local_only mode the trajectory is consumed by a controller
+        # that also runs in `base_frame`, so we tag both the Trajectory
+        # and the visualisation Path with that frame instead of `map`.
+        self.output_frame: str = self.base_frame if self.local_only else 'map'
 
         # --- Road knowledge (from YAML) - for speed profile and lane selection ---
         self.road_knowledge = self._load_road_knowledge()
@@ -56,26 +106,41 @@ class LaneFollowerNode(Node):
         self._last_midline_bl: Optional[np.ndarray] = None
 
         # --- Subscribers ---
-        self.create_subscription(
-            Odometry,
-            '/carla/ego_vehicle/ground_truth/odometry',
-            self._odom_cb, 1)
+        # Skip the odometry subscription entirely in local_only mode --
+        # we don't have a global pose source on the real vehicle and the
+        # default vehicle_state of (0, 0, 0, speed=0) is exactly what
+        # _base_link_to_map needs to behave as identity.
+        if not self.local_only:
+            self.create_subscription(
+                Odometry,
+                odom_topic,
+                self._odom_cb, 1)
 
         drivable_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST, depth=1)
         self.create_subscription(
-            EstimatedLanes, '/mapping/estimated_lanes',
+            EstimatedLanes, estimated_lanes_topic,
             self._estimated_lanes_cb, drivable_qos)
 
         # --- Publishers ---
-        self.traj_pub = self.create_publisher(Trajectory, '/planning/trajectory', 1)
-        self.midline_pub = self.create_publisher(Path, '/planning/lane_midline', 1)
+        self.traj_pub = self.create_publisher(Trajectory, trajectory_topic, 1)
+        self.midline_pub = self.create_publisher(Path, midline_topic, 1)
+
+        # In local_only mode, also push the target speed straight to the
+        # firmware's velocity PID via cmd_to_can_node so we don't have to
+        # compose a full VehicleControl pipeline just to set a setpoint.
+        self.target_velocity_pub = (
+            self.create_publisher(Float32, target_velocity_topic, 1)
+            if self.local_only else None
+        )
 
         # --- Timer (10 Hz) ---
         self.create_timer(0.1, self._loop)
-        self.get_logger().info('Lane Follower Node ready (using EstimatedLanes message)')
+        self.get_logger().info(
+            f'Lane Follower Node ready (local_only={self.local_only}, '
+            f'output_frame={self.output_frame})')
 
     def _load_road_knowledge(self) -> Dict[str, Any]:
         """Load road knowledge config from YAML file."""
@@ -135,16 +200,30 @@ class LaneFollowerNode(Node):
                 f'Midline selected ({len(midline_bl)} points)',
                 throttle_duration_sec=2.0)
 
-        # Transform base_link → map
-        midline_map = self._base_link_to_map(midline_bl)
+        # In local_only mode the controller also runs in base_frame, so
+        # we skip the rigid-body transform entirely. Otherwise the
+        # midline gets pushed into the global map frame using the latest
+        # odometry estimate.
+        if self.local_only:
+            midline_out = midline_bl
+        else:
+            midline_out = self._base_link_to_map(midline_bl)
 
         # Publish visualisation
-        self._publish_midline(midline_map)
+        self._publish_midline(midline_out)
 
         # Build & publish trajectory
-        trajectory = self._trajectory_from_midline(midline_map)
+        trajectory = self._trajectory_from_midline(midline_out)
         if trajectory:
             self._publish_trajectory(trajectory)
+            # Push the very first segment's target speed onto
+            # /target_velocity so the firmware's velocity PID has a fresh
+            # setpoint even if the host-side controller decides to skip
+            # this tick (e.g. lookahead failure).
+            if self.target_velocity_pub is not None:
+                msg = Float32()
+                msg.data = float(trajectory[0].speed)
+                self.target_velocity_pub.publish(msg)
 
     def _estimated_lanes_valid(self) -> bool:
         if self._estimated_lanes is None or self._estimated_lanes_stamp is None:
@@ -261,7 +340,7 @@ class LaneFollowerNode(Node):
 
     def _publish_trajectory(self, trajectory: List[TrajectoryPointDC]):
         msg = Trajectory()
-        msg.header.frame_id = 'map'
+        msg.header.frame_id = self.output_frame
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.behavior_state = Trajectory.LANE_FOLLOWING
         msg.target_lane = 0
@@ -278,7 +357,7 @@ class LaneFollowerNode(Node):
 
     def _publish_midline(self, midline_map: np.ndarray):
         msg = Path()
-        msg.header.frame_id = 'map'
+        msg.header.frame_id = self.output_frame
         msg.header.stamp = self.get_clock().now().to_msg()
         for x, y in midline_map:
             ps = PoseStamped()
